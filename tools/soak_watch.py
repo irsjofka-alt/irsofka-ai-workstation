@@ -97,6 +97,13 @@ def decide(now: int, last: int | None, active: bool | None,
     if active is False:
         return {"action": "RESTART", "why": f"unit {TICK_UNIT} terbaca tidak aktif; tick terakhir "
                                             f"{age}s lalu", "age": age}
+    if active is None:
+        # Tidak terukur BUKAN berarti mati, dan tidak berarti boleh menyalakan apa pun — tapi juga
+        # tidak boleh lewat tanpa satu baris pun. Sebuah pengawas yang diam saat buta tidak bisa
+        # dibedakan dari pengawas yang melihat keadaan baik-baik saja, dan itu persis kebohongan
+        # yang ia dibuat untuk cegah.
+        return {"action": "WATCH", "why": f"state unit {TICK_UNIT} tidak terbaca — UNKNOWN; tick "
+                                          f"terakhir {age}s lalu", "age": age}
     if age > limit:
         return {"action": "RESTART" if (restart_at is None or now - restart_at > RESTART_COOLDOWN)
                 else "ALERT",
@@ -186,8 +193,12 @@ def selftest() -> int:
           decide(1000, 940, True)["action"] == "OK")
     check("unit terbaca mati mengalahkan segalanya, dan langsung ditangani",
           decide(1000, 990, False)["action"] == "RESTART")
-    check("unit tidak terukur TIDAK dibaca sebagai mati",
-          decide(1000, 990, None)["action"] == "OK")
+    # Tidak terukur tidak dibaca mati (tidak ada RESTART), dan tidak pula lulus sebagai aman: ia
+    # dilaporkan sebagai WATCH supaya sebuah pengawas yang buta tidak bisa dibedakan dari pengawas
+    # yang melihat keadaan baik-baik saja.
+    check("unit tidak terukur TIDAK dibaca mati, dan tidak lulus diam sebagai aman",
+          decide(1000, 990, None)["action"] == "WATCH"
+          and "tidak terbaca" in decide(1000, 990, None)["why"], str(decide(1000, 990, None)))
     check("kesenyapan melewati batas memicu tindakan",
           decide(2000, 1000, True)["action"] == "RESTART")
     check("satu kesempatan ulang per cooldown; yang kedua hanya berteriak",

@@ -51,12 +51,31 @@ _MEASURE = object()          # pembeda "belum diukur" dari "diukur tapi gagal di
 
 
 def _banner(action, detail, urgent=False):
-    """Satu-satunya jalur modul ini ke desktop. Tidak pernah melempar; kegagalan dilaporkan apa ada."""
+    """Satu-satunya jalur modul ini ke desktop. Tidak pernah melempar; kegagalan dilaporkan apa ada.
+
+    Kegagalan kirim TIDAK dibiarkan hilang. Operator meminta notifikasi justru supaya tidak perlu
+    membuka konsol untuk tahu ada yang menunggunya; kalau jalurnya mati dalam diam — dan mesin ini
+    sudah membuktikan satu jalur notifikasi bisa mati diam selama berhari-hari karena binernya tidak
+    ada — maka satu-satunya pengganti perhatian itu menjadi tidak terlihat persis saat ia dibutuhkan.
+    Jadi kegagalan ditulis ke log malam, dan nama peristiwanya dibuat sendiri: BANNER_FAILED.
+    """
     try:
         import notify
-        return notify.notify_event(action, detail, urgent=urgent)
+        out = notify.notify_event(action, detail, urgent=urgent)
     except Exception as exc:  # noqa: BLE001 — banner yang gagal bukan alasan untuk menggagalkan kerja
         return {"sent": False, "err": f"{type(exc).__name__}: {exc}"}
+    if not out.get("sent"):
+        try:
+            import datetime as _dt
+            ev = REPO / "logs" / "station_events.jsonl"
+            ev.parent.mkdir(parents=True, exist_ok=True)
+            with ev.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": _dt.datetime.now().astimezone().isoformat(
+                    timespec="seconds"), "kind": "banner_failed", "event": action,
+                    "why": str(out.get("err") or out)[:200]}, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001 — tidak ada jalur kedua untuk mengeluh
+            pass
+    return out
 
 
 banner = _banner   # sambatan uji — pola yang sama dipakai `tree_dirty` di atas
@@ -1471,9 +1490,11 @@ ROADMAP_ITEMS = [
      # lainnya adalah menahan push yang TIDAK ada verdict-nya. Gerbang yang hanya menuntut sisi
      # pertama akan menandai F10.9 COMPLETED begitu peristiwa pertama ditulis, padahal sisanya
      # persis yang membuat pagar ini berarti.
-     "grep -qE '\"kind\": ?\"push_verified\".*\"sha\": ?\"[0-9a-f]{7,40}\".*\"model\": ?\"[A-Za-z0-9._:-]+\"' "
-     "logs/station_events.jsonl && "
-     "grep -qE '\"kind\": ?\"push_held\".*\"reason\": ?\"[a-z_]+\"' logs/station_events.jsonl"),
+     # Bukan grep global. Dua `grep -q` atas berkas peristiwa akan keluar 0 selamanya begitu satu
+     # baris dari tiap jenis pernah tertulis sekali — dua pemeriksa independen menemukannya dari diff
+     # yang berbeda. Yang ditanya sekarang adalah keadaan yang masih bisa diperbaiki: apakah setiap
+     # commit yang belum berangkat sudah DINYATAKAN, divonis lolos atau ditahan dengan alasan.
+     "python3 tools/work_order.py push-gate"),
 ]
 
 
@@ -1811,6 +1832,130 @@ def semi_status(conn, engine) -> dict:
 
 
 # --- selftest ---------------------------------------------------------------
+def record_push_held(shas, reason, events_path=None):
+    """Catat bahwa commit TIDAK berangkat, dan kenapa.
+
+    F10.9 menuntut dua sisi: satu push yang diloloskan verifier, dan satu push yang ditahan karena
+    vonisnya tidak ada. Sisi pertama punya pemancar; sisi kedua tidak, jadi gerbang bisa menuntut
+    `push_held` sementara tidak ada satu jalur pun yang boleh menulisnya — dan separuh dari pagar
+    itu hanya bisa "lulus" dengan cara ditulis tangan, yang adalah hal yang persis dilarang §12
+    untuk laporan.
+
+    `reason` adalah kata, bukan kalimat bebas: sebuah keadaan yang bisa ditulis apa saja tidak bisa
+    dibandingkan antar-run.
+    """
+    import datetime as _dt
+    if not (reason or "").strip():
+        return []
+    ev = Path(events_path or (REPO / "logs" / "station_events.jsonl"))
+    ev.parent.mkdir(parents=True, exist_ok=True)
+    out = []
+    with ev.open("a", encoding="utf-8") as fh:
+        for sha in shas:
+            row = {"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                   "kind": "push_held", "sha": sha, "reason": reason.strip()[:60]}
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            out.append(row)
+    return out
+
+
+def _git(*args):
+    """Satu pembacaan git; None berarti TIDAK TERBACA, yang bukan berarti kosong."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True,
+                           timeout=20)
+    except Exception:  # noqa: BLE001
+        return None
+    if r.returncode != 0:
+        return None
+    return (r.stdout or "").strip()
+
+
+def push_events(events_path=None):
+    """Baris peristiwa push_verified / push_held, apa adanya dari berkasnya."""
+    path = Path(events_path or (REPO / "logs" / "station_events.jsonl"))
+    out = []
+    if not path.exists():
+        return out
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("kind") in ("push_verified", "push_held"):
+                out.append(row)
+    return out
+
+
+def push_gate(events_path=None):
+    """Pagar push: setiap commit yang belum berangkat harus DINYATAKAN, bukan didiamkan.
+
+    Gerbang f109 versi sebelumnya adalah dua `grep -q` global: begitu satu baris `push_verified`
+    dan satu baris `push_held` pernah tertulis di masa lalu, ia keluar 0 selamanya — dua pemeriksa
+    independen menemukannya dari diff yang berbeda. Yang diperiksa di sini bukan keberadaan kata,
+    melainkan kecocokan per sha:
+
+    - commit yang SUDAH sampai ke origin harus punya `push_verified` dengan verdict yang sungguh
+      lolos, menyebut sha itu; kalau tidak, sejarah sudah berisi push yang tidak ada yang menanggung;
+    - commit yang BELUM berangkat harus punya salah satu: vonis lolos (boleh dorong) atau catatan
+      `push_held` beralasan (sengaja ditahan). Yang tidak punya keduanya adalah commit yang hilang
+      di tengah jalan, dan itulah keadaan yang tidak boleh lulus;
+    - git yang tidak terbaca = UNKNOWN = pagar tertutup. Tidak ada interpretasi "mungkin bersih".
+    """
+    ev = push_events(events_path)
+    # KEDUA sisi dinormalisasi ke 12 karakter. Peristiwa boleh menyebut sha pendek (seseorang
+    # menyalinnya dari `git log --oneline`) dan `git rev-list` selalu memberi 40 — membandingkan
+    # keduanya apa adanya membuat setiap vonis tampak seperti vonis untuk commit lain, dan pagar
+    # akan menahan pekerjaan yang sebenarnya sudah diloloskan. Dua belas adalah panjang baku git
+    # sendiri; tabrakan prefiks sepanjang itu bukan keadaan yang perlu diperebutkan malam ini.
+    def _norm(sha):
+        sha = str(sha or "")
+        return sha[:12] if re.fullmatch(r"[0-9a-f]{7,40}", sha) else ""
+    cleared = {_norm(r.get("sha")) for r in ev
+               if r.get("kind") == "push_verified"
+               and str(r.get("verdict") or "").upper() in CLEARANCE_VERDICTS} - {""}
+    held = {_norm(r.get("sha")) for r in ev
+            if r.get("kind") == "push_held" and (r.get("reason") or "").strip()} - {""}
+    unpushed_raw = _git("rev-list", "@{u}..HEAD")
+    pushed_raw = _git("rev-list", "--max-count=200", "@{u}")
+    if unpushed_raw is None or pushed_raw is None:
+        return {"ok": False, "readable": False,
+                "why": ["git tidak terbaca — UNKNOWN, dan UNKNOWN tidak pernah berarti boleh"]}
+    unpushed = [x for x in unpushed_raw.splitlines() if x.strip()]
+    pushed = [x for x in pushed_raw.splitlines() if x.strip()]
+    undelivered = [sha for sha in unpushed if sha[:12] not in cleared and sha[:12] not in held]
+    shipped_without = [sha for sha in pushed if sha[:12] not in cleared]
+    assert "" not in cleared and "" not in held   # sebuah sha kosong tidak boleh membebaskan apa pun
+    reasons = []
+    if undelivered:
+        reasons.append(f"{len(undelivered)} commit belum berangkat TANPA vonis dan tanpa catatan "
+                       f"ditahan (contoh {undelivered[0][:12]})")
+    # Sejarah TIDAK diadili di sini. `shipped_without` hampir selalu besar — semua commit sebelum
+    # F10.9 lahir berangkat tanpa peristiwa verdict — dan membuat pagar merah permanen untuk keadaan
+    # yang tidak bisa lagi diubah lebih buruk daripada tidak punya pagar: orang belajar melewati
+    # yang merah. Yang dilaporkan adalah keadaan yang masih bisa diperbaiki, yaitu antrean yang belum
+    # berangkat; sisanya dicatat sebagai angka, bukan sebagai vonis.
+    return {"ok": not reasons, "readable": True, "unpushed": len(unpushed),
+            "cleared": len(cleared), "held": len(held),
+            "undelivered": undelivered[:5],
+            "shipped_without": len(shipped_without),
+            "shipped_without_example": shipped_without[0][:12] if shipped_without else None,
+            "why": reasons}
+
+
+def subprocess_run_sha():
+    """HEAD yang sungguh ada di repo ini, untuk menguji gerbang pada sha nyata."""
+    import subprocess
+    r = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
+                       capture_output=True, text=True, timeout=15)
+    return (r.stdout or "").strip()
+
+
 def selftest():
     globals()["_push_src"] = __import__("inspect").getsource(push_state)
     """Jalankan di SQLite sementara. Tes tidak boleh menyentuh produksi: satu selftest yang
@@ -1968,7 +2113,11 @@ def selftest():
         check("stalled() tidak mengarang kandidat dari tabel yang tak terbaca",
               stalled(conn, "SQLITE", older_than=0) == [], str(stalled(conn, "SQLITE", 0)))
 
-        conn.execute("CREATE TABLE action_log (engine TEXT, ts TEXT)")
+        # Kolomnya harus selengkap yang dibaca `push_clearance`: tabel (engine, ts) saja akan
+        # membuat setiap pencarian izin gagal lebih awal karena "no such column", dan itu membuat
+        # tes penolakan lulus tanpa membuktikan apa pun tentang vonis.
+        conn.execute("CREATE TABLE action_log (engine TEXT, ts TEXT, kind TEXT, tab TEXT, "
+                     "model TEXT, exit_code INTEGER, summary TEXT)")
         conn.commit()
         rows = heartbeat(conn, "SQLITE", 180, GAP, capture=still, busy=calm)
         check("tabel terbaca tapi kosong atas nama pemegang = UNKNOWN, bukan AT_REST",
@@ -2591,9 +2740,48 @@ def selftest():
               _txt[:120])
         _ev_file.unlink(missing_ok=True); _tmpdir.rmdir()
         gate109 = [i[4] for i in ROADMAP_ITEMS if i[0] == "f109"][0]
-        check("gerbang f109 mencari bentuk JSON, bukan `sha=`",
-              '"sha\": ?\"[0-9a-f]{7,40}\"' in gate109 and "sha=" not in gate109,
-              gate109[:150])
+        # Yang dulu diperiksa adalah regex di dalam string gerbang. Sekarang gerbang mendelegasi ke
+        # `push-gate`, jadi yang benar-benar harus dipastikan: ia mendelegasi (bukan lagi menggrep
+        # berkas secara global), dan pembacanya menguraikan JSON — bukan mencocokkan teks.
+        check("gerbang f109 mendelegasi ke pemilik katanya, bukan menggrep berkas peristiwa lagi",
+              "push-gate" in gate109 and "grep -q" not in gate109, gate109[:120])
+        import inspect as _ins
+        _pg = _ins.getsource(push_events) + _ins.getsource(push_gate)
+        check("pembaca peristiwa menguraikan JSON dan menolak bentuk `sha=` polos",
+              "json.loads" in _pg and '\"sha=\"' not in _pg and "sha=" not in _pg,
+              "pembacaan peristiwa bukan JSON")
+
+        # --- pagar per-sha: dua grep global lulus selamanya, ini tidak ---------------------------
+        _d3 = Path(_tf.mkdtemp(prefix="pushgate_"))
+        _e3 = _d3 / "events.jsonl"
+        _head = subprocess_run_sha()
+        _un = _git("rev-list", "@{u}..HEAD").splitlines()
+        _e3.write_text("", encoding="utf-8")
+        g_empty = push_gate(events_path=_e3)
+        check("tanpa satu peristiwa pun, setiap commit yang belum berangkat dianggap BELUM dinyatakan",
+              g_empty["ok"] is False and g_empty["unpushed"] >= 1
+              and len(g_empty["undelivered"]) >= 1, str(g_empty["why"])[:120])
+        held_rows = record_push_held(_un, "no-verdict", events_path=_e3)
+        g_held = push_gate(events_path=_e3)
+        check("satu catatan `ditahan dengan alasan` menutup celah itu — keadaan dinyatakan, bukan "
+              "dibersihkan", g_held["ok"] is True and len(held_rows) == len(_un), str(g_held["why"]))
+        check("penahan tanpa alasan tidak dihitung sebagai pernyataan",
+              record_push_held(["abc1234def"], "  ", events_path=_e3) == [], "alasan kosong")
+        _e3.write_text("", encoding="utf-8")
+        _e3.write_text(json.dumps({"kind": "push_verified", "sha": _head[:12],
+                                   "model": "gemini-3.8-flash-high", "verdict": "FAIL"}) + "\n",
+                       encoding="utf-8")
+        g_fail = push_gate(events_path=_e3)
+        check("peristiwa push_verified dengan verdict FAIL BUKAN izin — nilai verdict dibaca, "
+              "bukan hanya kata kuncinya", _head[:12] not in
+              [x[:12] for x in g_fail["undelivered"]] or g_fail["ok"] is False, str(g_fail)[:160])
+        _e3.write_text("", encoding="utf-8")
+        _e3.write_text(json.dumps({"kind": "push_verified", "sha": "0" * 40,
+                                   "model": "m", "verdict": "SETUJU"}) + "\n", encoding="utf-8")
+        g_other = push_gate(events_path=_e3)
+        check("vonis untuk sha lain tidak membebaskan commit yang menganggur (pengikatan per-sha)",
+              g_other["ok"] is False and g_other["unpushed"] >= 1, str(g_other["why"])[:120])
+        _e3.unlink(missing_ok=True); _d3.rmdir()
 
         # --- push tertunda harus menjadi keadaan yang tercatat ---
         # §6 menjanjikan "commit lokal + push masuk digest pagi" bila verifier tidak tercapai.
@@ -2615,6 +2803,59 @@ def selftest():
         check("verdict hanya diterima dari peristiwa push_verified, bukan dari prosa laporan",
               '"kind": "push_verified"' in code_only and "action_log" not in code_only,
               "push_state membaca sumber yang salah")
+
+        # --- vonis tidak bisa ditulis dari sini; hanya bisa dibaca dari catatan verifier ---------
+        # Ini jawaban untuk temuan audit ronde keempat: `record_push_verified` versi pertama
+        # menerima `verdict="PASS"` sebagai PARAMETER dengan nilai dasar. Engine mana pun bisa
+        # menulis clears-nya sendiri tanpa bertanya kepada siapa pun, dan gerbang akan lolos karena
+        # baris peristiwa itu ada — persis keputusan 6 yang F10.9 dibuat untuk menegakkannya.
+        import tempfile as _tf2
+        _d2 = Path(_tf2.mkdtemp(prefix="f109_clear_"))
+        _ev2 = _d2 / "events.jsonl"
+        head = subprocess_run_sha()
+        conn.execute("DELETE FROM action_log WHERE kind='cross_verify'")
+        conn.commit()
+        ok0, why0, w0 = record_push_verified(conn, "SQLITE", "gemini-verify", [head],
+                                             events_path=_ev2)
+        check("tanpa catatan verifikasi sama sekali, izin DITOLAK dan nol peristiwa ditulis",
+              ok0 is False and w0 == [] and not _ev2.exists(), str(why0)[:120])
+        conn.execute("INSERT INTO action_log (engine, ts, kind, tab, model, exit_code, summary) "
+                     "VALUES ('station', datetime('now'), 'cross_verify', 'gemini-verify', "
+                     "'gemini-3.8-flash-high', 0, 'verifikasi: COMPLETED verdict=PERLU_KOREKSI')")
+        conn.commit()
+        ok1, why1, w1 = record_push_verified(conn, "SQLITE", "gemini-3.8-flash-high", [head],
+                                             events_path=_ev2)
+        check("vonis PERLU_KOREKSI BUKAN izin — walau tercatat COMPLETED oleh model yang benar",
+              ok1 is False and not _ev2.exists(), str(why1)[:120])
+        conn.execute("INSERT INTO action_log (engine, ts, kind, tab, model, exit_code, summary) "
+                     "VALUES ('station', datetime('now'), 'cross_verify', 'gemini-verify', "
+                     "'gemini-3.8-flash-high', 1, 'verifikasi: FAILED verdict=SETUJU')")
+        conn.commit()
+        ok1b, _w, _e = record_push_verified(conn, "SQLITE", "gemini-3.8-flash-high", [head],
+                                            events_path=_ev2)
+        check("baris exit_code!=0 tidak dihitung sebagai izin walau teksnya menyebut SETUJU",
+              ok1b is False, str(ok1b))
+        conn.execute("DELETE FROM action_log WHERE kind='cross_verify'")
+        conn.execute("INSERT INTO action_log (engine, ts, kind, tab, model, exit_code, summary) "
+                     "VALUES ('station', datetime('now'), 'cross_verify', 'gemini-verify', "
+                     "'gemini-3.8-flash-high', 0, 'verifikasi: COMPLETED verdict=SETUJU')")
+        conn.commit()
+        ok2, why2, w2 = record_push_verified(conn, "SQLITE", "gemini-3.8-flash-high",
+                                             [head[:8], "zzzzzzz"], events_path=_ev2)
+        check("sha yang bukan commit di repo ini membatalkan SEMUA penulisan, bukan hanya miliknya",
+              ok2 is False and w2 == [] and not _ev2.exists(), str(why2)[:140])
+        ok3, why3, w3 = record_push_verified(conn, "SQLITE", "gemini-3.8-flash-high", [head],
+                                             events_path=_ev2)
+        line = _ev2.read_text(encoding="utf-8").strip() if _ev2.exists() else ""
+        check("dengan vonis SETUJU yang nyata dan sha yang nyata, satu peristiwa ditulis "
+              "dan bentuknya dibaca gerbang f109",
+              ok3 is True and len(w3) == 1 and '"kind": "push_verified"' in line
+              and f'"sha": "{head}"' in line, line[:160])
+        check("peristiwa mencatat kapan vonisnya diberikan, supaya izin basi bisa dilihat",
+              w3 and w3[0].get("verified_at"), str(w3[:1]))
+        _ev2.unlink(missing_ok=True); _d2.rmdir()
+        conn.execute("DELETE FROM action_log WHERE kind='cross_verify'")
+        conn.commit()
 
         # --- jebakan yang membuat baris tak bisa diklaim selamanya ---
         # Premisnya harus dinyatakan: kegagalan dari blok sebelumnya masih di jendela 12 jam dan
@@ -2890,29 +3131,101 @@ def selftest_live():
     return 1 if bad else 0
 
 
-def record_push_verified(model_id: str, shas: list[str], verdict: str = "PASS") -> list[dict]:
-    """Pancarkan peristiwa bahwa satu push berangkat karena seorang verifier meloloskannya.
+CLEARANCE_VERDICTS = ("SETUJU",)
+CLEARANCE_WINDOW_MINUTES = 180
 
-    F10.9 dibuka karena keputusan 6 ("boleh push asal ada verifier") hanya hidup di prosa §6,
-    dan gerbangnya membaca `kind=push_verified` yang tidak dipancarkan kode mana pun. Fungsi ini
-    adalah pemancar itu. Yang dicatat hanya peristiwa: sha yang berangkat, model yang meloloskan,
-    dan vonisnya — bukan kalimat laporan, karena gerbang f109 versi pertama lolos justru karena
-    engine menulis sendiri kata "push" dan "verifier" di prosanya.
+
+def push_clearance(conn, engine, model_id, within_minutes=CLEARANCE_WINDOW_MINUTES):
+    """Satu catatan verifikasi COMPLETED yang sungguh ada, milik model ini, masih segar.
+
+    Ini satu-satunya sumber klaim "boleh push". F10.9 dibuka justru karena keputusan 6 hidup di
+    prosa; mencatat vonis sebagai PARAMETER dengan nilai dasar PASS akan mengulang kesalahan yang
+    sama dengan satu lapis tambahan — engine mana pun bisa menulis clears-nya sendiri tanpa pernah
+    bertanya kepada siapa pun. Jadi vonis tidak diterima di sini, vonis DIBACA dari `action_log`:
+    baris `cross_verify` yang exit_code-nya 0 dan verdict-nya SETUJU.
+
+    Jendela waktu ikut disaring karena verifikasi yang berumur seminggu bukan izin untuk commit
+    yang baru saja berubah.
     """
+    ph = "%s" if engine == "POSTGRESQL" else "?"
+    # Pembacaan yang gagal adalah TIDAK ADA IZIN, bukan "entah, lanjut saja". Arah gagalnya sama
+    # dengan sisa kontrak ini: ketidaktahuan menutup jalur, tidak pernah membukanya.
+    try:
+        rows = _push_clearance_rows(conn, engine, model_id, within_minutes, ph)
+    except Exception:  # noqa: BLE001
+        return None
+    ok = [r for r in rows or []
+          if any(f"verdict={v}" in (r.get("summary") or "") for v in CLEARANCE_VERDICTS)]
+    return ok[0] if ok else None
+
+
+def _push_clearance_rows(conn, engine, model_id, within_minutes, ph):
+    return run(conn, engine,
+               f"SELECT ts, tab, model, summary FROM action_log WHERE kind = 'cross_verify' "
+               f"AND model = {ph} AND exit_code = 0 AND ts >= " +
+               ("NOW() - ({ph} || ' minutes')::interval" if engine == "POSTGRESQL"
+                else "datetime('now', '-' || {ph} || ' minutes')").format(ph=ph) +
+               " ORDER BY ts DESC LIMIT 12",
+               (model_id, str(within_minutes)))
+
+
+def record_push_verified(conn, engine, model_id: str, shas: list[str], events_path=None) -> tuple:
+    """Pancarkan peristiwa bahwa satu commit berangkat karena seorang verifier meloloskannya.
+
+    Tiga hal harus benar sebelum satu baris pun ditulis, dan ketiganya diukur, bukan dipercaya:
+
+    - ada catatan `cross_verify` COMPLETED dengan verdict SETUJU dari model yang disebut, masih di
+      dalam jendela (lihat `push_clearance`);
+    - setiap sha yang disebut benar-benar commit di repo ini (`git cat-file`), supaya sebuah vonis
+      tidak bisa ditempelkan pada string yang kebetulan berbentuk hex;
+    - model yang menyebutnya adalah model yang terdaftar sebagai verifier/decider, bukan nama karangan.
+
+    Yang dicatat adalah peristiwa: sha, model, vonis. Bukan kalimat laporan — gerbang f109 versi
+    pertama lolos justru karena engine menulis sendiri kata "push" dan "verifier" di prosanya.
+    """
+    import subprocess
+    clearance = push_clearance(conn, engine, model_id)
+    if not clearance:
+        return False, (f"tidak ada catatan verifikasi COMPLETED bervonis "
+                       f"{'/'.join(CLEARANCE_VERDICTS)} dari {model_id!r} dalam "
+                       f"{CLEARANCE_WINDOW_MINUTES} menit terakhir — vonis tidak bisa ditulis dari "
+                       "sini, hanya bisa dibaca dari action_log"), []
+    good, bad = [], []
+    for sha in shas:
+        s = (sha or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{7,40}", s):
+            bad.append(sha)
+            continue
+        try:
+            r = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", f"{s}^{{commit}}"],
+                               capture_output=True, text=True, timeout=15)
+            (good if r.returncode == 0 else bad).append(s)
+        except Exception:  # noqa: BLE001 — git tidak terbaca = tidak ada bukti
+            bad.append(s)
+    if bad:
+        return False, (f"sha bukan commit yang terbaca di repo ini: {', '.join(map(str, bad))} — "
+                       "tidak ada peristiwa yang ditulis"), []
+    if not good:
+        return False, "tidak ada satu sha pun yang disebut", []
     import datetime as _dt
-    ev = REPO / "logs" / "station_events.jsonl"
+    # Jalur peristiwa bisa dipindah. Bukan untuk kemudahan: tes yang menulis ke berkas sungguhan di
+    # sini akan meninggalkan `push_verified` untuk HEAD yang TIDAK pernah diverifikasi manusia mana
+    # pun, dan gerbang f109 akan membacanya sebagai izin — tes yang menciptakan bukti yang ia
+    # klaim sedang dicari.
+    ev = Path(events_path or (REPO / "logs" / "station_events.jsonl"))
     ev.parent.mkdir(parents=True, exist_ok=True)
     # SATU peristiwa per sha, tiap field satu nilai. `",".join(shas)` menghasilkan
     # "sha": "abc,def" dan gerbang mencari [0-9a-f]{7,40}: koma di tengah membuatnya tidak akan
     # pernah cocok untuk push berapa pun kecuali satu commit.
     written = []
     with ev.open("a", encoding="utf-8") as fh:
-        for sha in shas:
+        for sha in good:
             row = {"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                   "kind": "push_verified", "sha": sha, "model": model_id, "verdict": verdict}
+                   "kind": "push_verified", "sha": sha, "model": model_id,
+                   "verdict": "SETUJU", "verified_at": str(clearance.get("ts"))}
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             written.append(row)
-    return written
+    return True, f"{len(written)} peristiwa ditulis atas vonis {model_id}", written
 
 
 def push_state() -> dict:
@@ -3097,6 +3410,14 @@ def main(argv=None):
     p.add_argument("--state", default="RESOLVED",
                    choices=["RESOLVED", "ESCALATED", "UNAVAILABLE"])
     p.add_argument("--note", default=None)
+    p = sub.add_parser("push-verified")
+    p.add_argument("--model", required=True,
+                   help="kunci registry yang memberi vonis (harus punya catatan cross_verify)")
+    p.add_argument("--sha", action="append", required=True,
+                   help="commit yang akan diberangkatkan; boleh berulang, satu peristiwa per sha")
+    sub.add_parser("push-gate")
+    p = sub.add_parser("hold", help="catat bahwa commit yang belum berangkat DITAHAN, dan kenapa")
+    p.add_argument("--reason", required=True)
     sub.add_parser("digest")
     sub.add_parser("status")
     p = sub.add_parser("selftest"); p.add_argument("--live", action="store_true")
@@ -3262,6 +3583,24 @@ def main(argv=None):
         ok, msg = resolve_decision(conn, engine, a.id, a.rung, a.engine_key, a.model,
                                    a.answer, a.state, a.note)
         print(msg)
+        return 0 if ok else 1
+    elif a.cmd == "hold":
+        # "Run yang tidak bisa mencapai verifier meng-commit lokal dan meninggalkan push di digest"
+        # adalah janji §6. Janji itu butuh pemancar, bukan hanya paragraf.
+        un = [x for x in (_git("rev-list", "@{u}..HEAD") or "").splitlines() if x.strip()]
+        if un is None:
+            print(json.dumps({"ok": False, "why": "git tidak terbaca"}, indent=2))
+            return 1
+        written = record_push_held(un, a.reason)
+        print(json.dumps({"ok": bool(written), "held": len(written), "reason": a.reason}, indent=2))
+        return 0 if written else 1
+    elif a.cmd == "push-gate":
+        g = push_gate()
+        print(json.dumps(g, default=str, indent=2))
+        return 0 if g.get("ok") else 1
+    elif a.cmd == "push-verified":
+        ok, msg, written = record_push_verified(conn, engine, a.model, a.sha)
+        print(json.dumps({"ok": ok, "why": msg, "events": written}, default=str, indent=2))
         return 0 if ok else 1
     elif a.cmd == "digest":
         rows = run(conn, engine, "SELECT status, COUNT(*) AS n FROM quest_tasks GROUP BY status ORDER BY 2 DESC")
