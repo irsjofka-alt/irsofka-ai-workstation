@@ -1196,7 +1196,7 @@ def broker(conn, engine, decision_id, timeout=240):
 
 
 
-def seed(conn, engine, items):
+def seed(conn, engine, items, refresh_gates=False):
     """Idempoten berdasarkan judul — memanggil ulang tidak menggandakan pekerjaan.
 
     Dependensi ditulis sebagai KEY, bukan id: id di DB live sudah mulai dari 27, jadi angka
@@ -1211,6 +1211,25 @@ def seed(conn, engine, items):
                          (title,))
             if exists:
                 keymap[key] = int(exists[0]["id"])
+                # Gerbang boleh DIPERBAIKI selama barisnya belum divonis. Kebutuhan ini nyata:
+                # gerbang f109 diperketat hari ini (menuntut sisi "push tanpa verdict ditahan"),
+                # tapi seed idempoten berdasarkan judul dan tidak pernah menulis ulang
+                # check_command — jadi kode dan baris produksi berbeda diam-diam, dan drainer
+                # akan menutup F10.9 dengan gerbang lama yang sekarang lolos karena peristiwa
+                # push_verified yang sah sudah ada. Menandai selesai karena gerbang yang salah
+                # adalah laporan yang ditulis tangan, dan itu §12.
+                # Hanya PENDING yang boleh disentuh: COMPLETED/FAILED adalah vonis, dan vonis
+                # tidak pernah ditulis ulang.
+                if refresh_gates and norm(get_item(conn, engine, keymap[key])
+                                          .get("status")) == "PENDING":
+                    cur_gate = (get_item(conn, engine, keymap[key]).get("check_command") or "").strip()
+                    if cur_gate != (check or "").strip():
+                        run(conn, engine, "UPDATE quest_tasks SET check_command=%s WHERE id=%s"
+                            if engine == "POSTGRESQL" else
+                            "UPDATE quest_tasks SET check_command=? WHERE id=?",
+                            (check, keymap[key]))
+                        made.append((keymap[key], "gerbang diperbarui", title))
+                        continue
                 made.append((keymap[key], "ada", title))
                 continue
             ph = "%s" if engine == "POSTGRESQL" else "?"
@@ -1280,8 +1299,13 @@ ROADMAP_ITEMS = [
     ("f109", "F10.9 push gate: push hanya setelah verdict verifier COMPLETED menyebut model yang "
              "meloloskan diff-nya; tanpa verdict, commit berhenti lokal dan masuk digest pagi",
      "build", ["f101", "f103"],
+     # Dua sisi, bukan satu. Menerima push yang diloloskan verifier adalah separuh; separuh
+     # lainnya adalah menahan push yang TIDAK ada verdict-nya. Gerbang yang hanya menuntut sisi
+     # pertama akan menandai F10.9 COMPLETED begitu peristiwa pertama ditulis, padahal sisanya
+     # persis yang membuat pagar ini berarti.
      "grep -qE '\"kind\": ?\"push_verified\".*sha=[0-9a-f]{7,40}.*model=[A-Za-z0-9._:-]+' "
-     "logs/station_events.jsonl"),
+     "logs/station_events.jsonl && "
+     "grep -qE '\"kind\": ?\"push_held\".*reason=[a-z_]+' logs/station_events.jsonl"),
 ]
 
 
@@ -2461,6 +2485,26 @@ def selftest_live():
     return 1 if bad else 0
 
 
+def record_push_verified(model_id: str, shas: list[str], verdict: str = "PASS") -> dict:
+    """Pancarkan peristiwa bahwa satu push berangkat karena seorang verifier meloloskannya.
+
+    F10.9 dibuka karena keputusan 6 ("boleh push asal ada verifier") hanya hidup di prosa §6,
+    dan gerbangnya membaca `kind=push_verified` yang tidak dipancarkan kode mana pun. Fungsi ini
+    adalah pemancar itu. Yang dicatat hanya peristiwa: sha yang berangkat, model yang meloloskan,
+    dan vonisnya — bukan kalimat laporan, karena gerbang f109 versi pertama lolos justru karena
+    engine menulis sendiri kata "push" dan "verifier" di prosanya.
+    """
+    import datetime as _dt
+    ev = REPO / "logs" / "station_events.jsonl"
+    ev.parent.mkdir(parents=True, exist_ok=True)
+    row = {"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+           "kind": "push_verified", "sha": ",".join(shas), "model": model_id,
+           "verdict": verdict, "count": len(shas)}
+    with ev.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return row
+
+
 def push_state() -> dict:
     """Push yang tertunda adalah keadaan, bukan ingatan salah satu engine.
 
@@ -2570,6 +2614,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("ensure")
     p = sub.add_parser("seed"); p.add_argument("--roadmap", action="store_true")
+    p.add_argument("--refresh-gates", action="store_true",
+                   help="perbarui check_command baris PENDING; vonis tidak pernah disentuh")
     p = sub.add_parser("claim"); p.add_argument("id", type=int); p.add_argument("--by", required=True)
     p = sub.add_parser("lease"); p.add_argument("id", type=int)
     p = sub.add_parser("heartbeat")
@@ -2650,7 +2696,8 @@ def main(argv=None):
         for line in ensure_schema(conn, engine):
             print(line)
     elif a.cmd == "seed":
-        for i, state, title in seed(conn, engine, ROADMAP_ITEMS if a.roadmap else []):
+        for i, state, title in seed(conn, engine, ROADMAP_ITEMS if a.roadmap else [],
+                                    refresh_gates=getattr(a, "refresh_gates", False)):
             print(f"{i}\t{state}\t{title}")
     elif a.cmd == "claim":
         ok, msg = claim(conn, engine, a.id, a.by)
