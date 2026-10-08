@@ -65,10 +65,18 @@ NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD"
         # Rem yang dipatuhi bukan kegagalan: `WINDOW_CLOSED` berarti seseorang bilang berhenti dan
         # jalur instan menurutinya. Kabarnya tetap sampai — lewat QUEUED_NOT_DELIVERED, yang urgent
         # — jadi nama ini sendiri tidak boleh membunyikan alarm kedua untuk satu kejadian.
-        "WINDOW_CLOSED", "SELFTEST"}
-# CLOSED_OFF sengaja tidak ada di keranjang mana pun: OFF bukan lagi sebuah mode, jadi tidak ada
-# jalur yang bisa meng-emit-nya. Nama yang sudah dibuang tidak boleh punya perilaku diam — kalau
-# ia muncul lagi, `classify` membacanya `unknown`, dan `unknown` selalu berbanner.
+        "WINDOW_CLOSED", "SELFTEST",
+        # `MODE_OFF` satu keranjang dengan WINDOW_CLOSED karena keduanya adalah rem yang dipatuhi,
+        # bukan mesin yang macet. Yang membuat perintah orang tidak sampai sudah berbanner lewat
+        # QUEUED_NOT_DELIVERED; membunyikan banner kedua untuk satu kejadian itulah yang membuat
+        # orang berhenti membaca banner.
+        "MODE_OFF"}
+# `CLOSED_OFF` pernah ada di daftar ini dan dibuang dengan alasan "OFF bukan lagi sebuah mode".
+# Alasan itu tidak berlaku sejak 2026-10-09: OFF kembali menjadi state yang disimpan, dan nama
+# kejadiannya `MODE_OFF` (lihat keranjang NOTE di atas). Yang tetap benar dari komentar lama:
+# nama keadaan yang tidak di-emit siapa pun tidak boleh punya perilaku diam — `classify` membacanya
+# `unknown`, dan `unknown` selalu berbanner. Itulah sebabnya tes klasifikasi memeriksa SETIAP nama
+# yang bisa di-emit, bukan hanya yang terlintas saat seseorang menulis daftarnya.
 
 
 def worth_notifying(events) -> tuple[bool, str]:

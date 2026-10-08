@@ -28,6 +28,7 @@ import argparse
 import json
 import shlex
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -147,6 +148,24 @@ def cooldown(conn, engine, item_id, seconds):
     wo.run(conn, engine,
            f"UPDATE quest_tasks SET due_epoch={wo_p(engine)} WHERE id={wo_p(engine)}",
            (wo.now() + int(seconds), item_id))
+
+
+def refuse(conn, engine, item_id, emit, action, seconds=None, **rest):
+    """Satu penolakan = tiga tulisan, di satu tempat.
+
+    Peristiwa log, jeda, dan `escalation_reason` selama ini terpisah-pisah: enam cabang penolakan
+    di `hand_new_work` memanggil `cooldown()` + `emit()`, dan tidak ada yang menyentuh alasan.
+    Akibatnya baris yang ditolak gerbang punya `escalation_reason` NULL — identik dengan baris yang
+    belum dilihat siapa pun — sementara satu-satunya jawaban yang dicari operator adalah "kenapa
+    belum". Menyatukannya di satu fungsi membuat lubang itu tidak bisa muncul lagi hanya karena
+    seseorang lupa satu baris di cabang baru.
+    """
+    cooldown(conn, engine, item_id, CLAIM_COOLDOWN if seconds is None else seconds)
+    wo.note_refusal(conn, engine, item_id,
+                    " · ".join(str(x) for x in (action,
+                                               rest.get("why") or rest.get("note") or "") if x)[:500])
+    emit(action, item=int(item_id), **rest)
+    return None
 
 
 def default_runner(cmd, timeout=CHECK_TIMEOUT):
@@ -380,6 +399,14 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
         emit("MODE_UNKNOWN", mode=str(mode), why=f"bukan {'/'.join(wo.MODES)} — tidak ada yang "
              "diambil, tidak ada yang diketik")
         return None
+    if wanted == wo.OFF_MODE:
+        # OFF adalah state yang SAH, bukan MODE_UNKNOWN — dan ia tetap tidak boleh mengirim apa
+        # pun. Keduanya harus dibedakan: orang yang menekan berhenti berhak membaca "OFF" di log,
+        # bukan "mode tidak dikenal", sementara mesin tetap tidak mengetik. Tidak ada baris yang
+        # terpilih di titik ini, jadi tidak ada yang boleh didenda cooldown atau ditulis alasan.
+        emit("MODE_OFF", mode=str(mode),
+             why="mesin sedang OFF — tidak ada yang diambil, tidak ada yang diketik")
+        return None
     origin = wo.ORIGIN_OPERATOR if wanted == "SEMI" else None
     if for_item is not None:
         # Jalur instan: barisnya sudah ditunjuk oleh orang yang menulis perintahnya. Keranjang SEMI
@@ -401,20 +428,19 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
         # Ditolak SEBELUM ada klaim, bukan sesudahnya: baris WORKING tanpa pemegang adalah laporan
         # bahwa ada yang mengerjakan padahal tidak ada, dan mengarang laporan itu sebentar pun sudah
         # cukup untuk dibaca engine lain pada saat yang salah.
-        cooldown(conn, engine, int(item["id"]), CLAIM_COOLDOWN)
-        emit("NO_TARGET", item=int(item["id"]), why="kolom cli_engine kosong — memilih engine "
-             "dari ingatan dilarang, jadi item ini menunggu orang mengisinya")
-        return None
+        return refuse(conn, engine, int(item["id"]), emit, "NO_TARGET",
+                      why="kolom cli_engine kosong — memilih engine dari ingatan dilarang, jadi "
+                          "item ini menunggu orang mengisinya")
 
     # --- dua pagar yang sebelumnya tidak ada di jalur ini (temuan audit peer, 2026-10-08) ------
     # (1) PANE BUTA. Jalur ini membaca SQL lalu langsung mengetik; SQL tidak tahu ada orang yang
     #     sedang menulis di pane itu.
     quiet = pane_is_quiet(target, capture=capture, busy=busy, gap=gap, sleeper=sleeper)
     if not quiet["quiet"]:
-        cooldown(conn, engine, int(item["id"]), CLAIM_COOLDOWN)
-        emit("PANE_NOT_QUIET", item=int(item["id"]), target=target, why=quiet["why"],
-             note="tidak ada yang diklaim dan tidak ada yang diketik — dicoba lagi setelah jeda")
-        return None
+        return refuse(conn, engine, int(item["id"]), emit, "PANE_NOT_QUIET", target=target,
+                      why=quiet["why"],
+                      note="tidak ada yang diklaim dan tidak ada yang diketik — dicoba lagi "
+                           "setelah jeda")
 
     # (2) DIREKTORI BUTA. `semi_wake.py` sudah menjaga ini; jalur timer belum. Tugas proyek A yang
     #     masuk ke pane yang sedang berdiri di proyek B membuat engine mengerjakan satu tree sambil
@@ -433,18 +459,15 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
     live = read_live(target)       # dicatat untuk diagnostik; BUKAN pagar — alasannya di bawah
     want = wo.resolve_workspace(full)
     if where is None:
-        cooldown(conn, engine, int(item["id"]), CLAIM_COOLDOWN)
-        emit("PANE_DIR_UNKNOWN", item=int(item["id"]), target=target,
-             why="proyek tab tidak terbaca dari cli_profiles — UNKNOWN, dan UNKNOWN tidak pernah "
-                 "boleh mengetik")
-        return None
+        return refuse(conn, engine, int(item["id"]), emit, "PANE_DIR_UNKNOWN", target=target,
+                      why="proyek tab tidak terbaca dari cli_profiles — UNKNOWN, dan UNKNOWN tidak "
+                          "pernah boleh mengetik")
     if _as_path(where) != want:
-        cooldown(conn, engine, int(item["id"]), CLAIM_COOLDOWN)
-        emit("PANE_WRONG_DIR", item=int(item["id"]), target=target,
-             tab_project=str(where), pane_now=str(live) if live else None, wants=str(want),
-             why="tab target adalah proyek lain — perintah ini tidak akan dikerjakan di tree yang "
-                 "bukan miliknya")
-        return None
+        return refuse(conn, engine, int(item["id"]), emit, "PANE_WRONG_DIR", target=target,
+                      tab_project=str(where), pane_now=str(live) if live else None,
+                      wants=str(want),
+                      why="tab target adalah proyek lain — perintah ini tidak akan dikerjakan di "
+                          "tree yang bukan miliknya")
 
     # Prompt disusun SEBELUM klaim, sama seperti di `semi_wake.py`. Alasannya bukan gaya:
     # `.format()` di bawah klaim berarti satu KeyError meninggalkan baris WORKING tanpa ada yang
@@ -460,10 +483,8 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
     if not ok:
         # `claim()` yang memutuskan; di sini hasilnya hanya diterjemahkan menjadi nama kejadian,
         # supaya "engine masih mengerjakan satu perintah" terbaca berbeda dari "pemutus terbuka".
-        emit("ENGINE_BUSY" if msg.startswith("ENGINE_BUSY") else "CLAIM_REFUSED",
-             item=int(item["id"]), target=target, why=msg)
-        cooldown(conn, engine, int(item["id"]), CLAIM_COOLDOWN)
-        return None
+        _act = "ENGINE_BUSY" if msg.startswith("ENGINE_BUSY") else "CLAIM_REFUSED"
+        return refuse(conn, engine, int(item["id"]), emit, _act, target=target, why=msg)
     delivered = None
     try:
         reply = (sender or default_sender)(target, prompt)
@@ -515,6 +536,14 @@ def deliver_now(conn, engine, item_id, mode=None, sender=None, capture=None, bus
     if wanted not in wo.MODES:
         return {"sent": False, "queued": True, "refused": "MODE_UNKNOWN",
                 "why": f"mode {ap.get('mode')!r} bukan {'/'.join(wo.MODES)}"}
+    if wanted == wo.OFF_MODE:
+        # OFF adalah keadaan, bukan jendela yang kebetulan lewat. Dinamai sendiri supaya yang
+        # dibaca operator dan yang tersimpan di ledger menyebut alasan yang sebenarnya: mesin ini
+        # disuruh berhenti, dan perintah orang TETAP.antre sampai salah satu mode kerja dipilih lagi.
+        return {"sent": False, "queued": True, "refused": "MODE_OFF",
+                "why": f"mesin sedang OFF — {ap.get('off_reason') or 'tidak ada alasan tercatat'}; "
+                       "perintah tetap antre, pilih SEMI atau FULL AUTO dari Dashboard untuk "
+                       "membuka kembali"}
     # Tangga `level` TIDAK menahan jalur ini, dan itu keputusan yang diminta operator langsung:
     # "kalau saya mode semi, saya tidak perlu arm dispatch, saat saya kirim command AI harus jawab".
     # `level` menjaga gerakan yang DIMULAI MESIN — timer yang mengambil antrean, CONTINUE yang
@@ -926,18 +955,86 @@ def selftest():
         try:
             sys.path.insert(0, str(wo.REPO / "hooks"))
             import semi_wake as _sw2
-            _saved_fmt = None
             import drainer as _self_mod
-            _broken = dict(id=999, title="x")
-            _self_mod.SEMI_PROMPT = object()      # .format tidak ada -> TypeError di dalam
-            _res = _sw2.prepare_prompt(_broken, Path("/tmp"))
+            # Selftest INI yang mengarang 53 baris "SEMI_PREPARE_FAILED item=999" di
+            # logs/semi_wake.jsonl, dan operator membacanya sebagai mesin yang mengulang sendiri
+            # tanpa bisa dihentikan. Yang diuji adalah sifat prepare_prompt; yang ditulis adalah
+            # log produksi. Jadi log hook dipindah ke sandbox untuk durasi ujian ini saja dan
+            # dikembalikan di finally — kebalikannya menyisakan hook yang menunjuk ke direktori
+            # sementara untuk seluruh sisa proses. Kegagalan persiapan yang ASLI tetap harus
+            # tercatat di tempat aslinya; hanya kegagalan yang dikarang yang tidak.
+            _prod_log = _sw2.NIGHT_LOG
+            _before = _prod_log.stat().st_size if _prod_log.exists() else 0
+            _sw2.NIGHT_LOG = Path(tempfile.mkdtemp(prefix="drainer_selftest_log_")) / "semi_wake.jsonl"
+            try:
+                _broken = dict(id=999, title="x")
+                _self_mod.SEMI_PROMPT = object()  # .format tidak ada -> AttributeError di dalam
+                _res = _sw2.prepare_prompt(_broken, Path("/tmp"))
+            finally:
+                _sw2.NIGHT_LOG = _prod_log
             check("persiapan yang rusak mengembalikan None, bukan melempar — jadi tidak ada "
                   "kemungkinan ia gagal SETELAH klaim", _res == (None, 0), str(_res)[:80])
+            _after = _prod_log.stat().st_size if _prod_log.exists() else 0
+            check("selftest tidak mengarang baris di log hook produksi", _after == _before,
+                  f"log produksi tumbuh {_after - _before} byte karena satu ujian yang dikarang")
         except Exception as _e3:  # noqa: BLE001
             check("persiapan bisa diuji", False, f"{type(_e3).__name__}: {_e3}")
         finally:
             import drainer as _self_mod2
             _self_mod2.SEMI_PROMPT = _orig_prompt
+        # REM MASUK-KEMBALI. `stop_hook_active` selama ini hanya dijadikan KOLOM LOG dan tidak
+        # pernah dijadikan keputusan, jadi tidak ada satu pun tes yang bisa menangkap hilangnya
+        # pengereman. Yang diuji di sini: dengan flag itu True, hook harus diam — tidak menulis
+        # keputusan block, dan tidak mengklaim apa pun. Jalur ini sengaja diuji in-process dengan
+        # NIGHT_LOG dialihkan, supaya kegagalan remnya tidak mengarang baris di log produksi.
+        try:
+            import io as _io
+            import contextlib as _cl
+            import semi_wake as _sw3
+            _sandbox = Path(tempfile.mkdtemp(prefix="semiwake_reentry_")) / "semi_wake.jsonl"
+            _real_log = _sw3.NIGHT_LOG
+            _prod_before = _real_log.stat().st_size if _real_log.exists() else 0
+            _sw3.NIGHT_LOG = _sandbox
+            _out_buf = _io.StringIO()
+            _real_stdin = _sw3.sys.stdin
+            _sw3.sys.stdin = _io.StringIO(json.dumps(
+                {"stop_hook_active": True, "cwd": "/tmp", "hook_event_name": "Stop"}))
+            try:
+                with _cl.redirect_stdout(_out_buf):
+                    _rc_reentry = _sw3.main()
+            finally:
+                _sw3.sys.stdin = _real_stdin
+                _sw3.NIGHT_LOG = _real_log
+            _reentry_lines = _sandbox.read_text(encoding="utf-8").splitlines() if _sandbox.exists() else []
+            check("rem masuk-kembali: stop_hook_active=True membuat hook diam, tidak memblokir",
+                  _rc_reentry == 0 and "decision" not in _out_buf.getvalue(),
+                  f"rc={_rc_reentry} stdout={_out_buf.getvalue()[:120]!r}")
+            check("rem masuk-kembali tercatat dengan namanya sendiri, bukan sebagai kegagalan",
+                  any('"SEMI_REENTRY_HELD"' in x for x in _reentry_lines), str(_reentry_lines)[:160])
+            _prod_after = _real_log.stat().st_size if _real_log.exists() else 0
+            check("rem masuk-kembali tidak menambah satu byte pun ke log hook produksi",
+                  _prod_after == _prod_before,
+                  f"produksi tumbuh {_prod_after - _prod_before} byte")
+            # Urutan, bukan hanya keberadaan. Rem yang berdiri sesudah `ready_items` masih bisa
+            # menulis cooldown ke baris orang lain sebelum sempat diam, jadi yang ditegakkan di sini
+            # adalah posisinya: sebelum satu bacaan antrean dan sebelum satu klaim pun. Kontrol
+            # negatif dijalankan dengan memindah bloknya, bukan dengan mematikannya, karena
+            # mematikan rem di tes akan menyuntik ke produksi.
+            _msrc = hsegs.get("main", "")
+            _i_re = _msrc.find('data.get("stop_hook_active")')
+            _i_rdy = _msrc.find("wo.ready_items(")
+            _i_clm = _msrc.find("wo.claim(")
+            check("rem masuk-kembali berdiri SEBELUM antrean dibaca dan sebelum apa pun diklaim",
+                  -1 < _i_re < _i_rdy and -1 < _i_re < _i_clm,
+                  f"reentry={_i_re} ready_items={_i_rdy} claim={_i_clm}")
+            # Lima jalur keluar tanpa suntikan di `main()`: bukan-proyek, persiapan gagal, klaim
+            # ditolak, batas injeksi habis, stdout gagal. Semuanya harus memasang jeda; satu saja
+            # yang lupa berarti baris itu dicoba lagi di setiap batas giliran selamanya.
+            check("setiap jalur penolakan hook memasang jeda, tidak ada yang zero-backoff",
+                  _msrc.count("drainer.cooldown(") >= 5,
+                  f"cooldown() dipanggil {_msrc.count('drainer.cooldown(')}x di main()")
+        except Exception as _e4:  # noqa: BLE001
+            check("rem masuk-kembali bisa diuji", False, f"{type(_e4).__name__}: {_e4}")
         check("hook SEMI membaca mode dari database pada setiap tembakan, bukan dari harapan",
               "wo.autopilot(" in hsegs.get("main", ""))
         check("hook SEMI menyaring asal baris, jadi ia tidak pernah mengambil item roadmap",
@@ -1084,13 +1181,14 @@ def selftest():
                     # keadaan working tree, dan itu sudah dibuktikan di `work_order selftest`.
                     "night": {"ok": ok, "why": why or [], "tree_dirty": False}}
 
-        out = tick(conn, "SQLITE", gate=gate_for("observe", mode="OFF"), beats=[],
+        out = tick(conn, "SQLITE", gate=gate_for("observe", mode="NGAWUR"), beats=[],
                    sender=sender, runner=runner, capture=quiet_pane, busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
                       dirty=False)
-        # OFF sudah dibuang dari kosakata, jadi baris mode berisi "OFF" bukan lagi "orang mematikan
-        # mesin" — itu baris yang tidak dikenali. Yang tetap harus sama: TIDAK ADA yang bergerak,
-        # dan sekarang disertai satu teriakan, karena keadaan ini berarti loop berhenti oleh sebab
-        # yang tidak seharusnya (kolom rusak, migrasi belum jalan), bukan oleh pilihan.
+        # Yang diuji di sini adalah kolom mode yang berisi kata yang TIDAK PERNAH ditulis oleh
+        # siapa pun — kolom rusak, migrasi belum jalan. Dulu "OFF" dipakai sebagai contohnya karena
+        # OFF memang bukan kosakata. Sejak 2026-10-09 OFF adalah state yang sah (dan punya jalannya
+        # sendiri di bawah), jadi contohnya diganti dengan kata yang benar-benar asing. Sifat yang
+        # ditagih tidak berubah: TIDAK ADA yang bergerak, dan ia berteriak.
         check("mode di luar kosakata = tidak ada yang bergerak sama sekali, dan ia berteriak",
               [e["action"] for e in out] == ["MODE_UNKNOWN"] and not sent and not ran, str(out))
 
@@ -1265,6 +1363,13 @@ def selftest():
         check("klaim yang ditolak ikut diberi jeda pendek, tidak langsung ditanya ulang",
               all(int((wo.get_item(conn, "SQLITE", e["item"]) or {}).get("due_epoch") or 0) > wo.now()
                   for e in refused), str(refused))
+        # OFF ditulis ke baris fixture HANYA untuk blok tangan-manusia di bawah. Alasannya sekarang
+        # harus disebut, karena dulu tidak: selama OFF bukan bagian kosakata, "OFF" adalah cara
+        # praktis membuat `claim()` melompatkan pemutus malam dan tidak membaca git SUNGGUHAN —
+        # tree ini kotor justru karena selftest ini sedang berjalan di tengah suntingan.
+        # Sejak 2026-10-09 OFF berarti "tidak ada yang bergerak", dan itu justru yang mau diuji di
+        # sini: mesin yang berhenti total harus tetap bisa MENGANTAR JAWABAN ORANG. Jawaban manusia
+        # bukan mesin yang berinisiatif, jadi rem tidak boleh memaknainya sebagai gerakan.
         wo.run(conn, "SQLITE", "UPDATE autopilot_state SET mode='OFF', until_epoch=NULL")
 
         # Klaim atas nama HOLDER tidak boleh bisa diketuki: tanpa pane, heartbeat menjawab UNKNOWN.
@@ -1326,6 +1431,15 @@ def selftest():
               not deliver_answer(conn, "SQLITE", q_open, sender=sender,
                                  beats=[{"id": lonely, "state": "AT_REST", "claimed_by": "qoder",
                                          "why": "x"}])["sent"])
+
+        # Blok jawaban selesai, dan OFF-nya harus dilepas. Yang di bawah menguji pengiriman
+        # perintah, dan mengirim apa pun di atas OFF adalah kegagalan yang BENAR — kalau mode itu
+        # dibiarkan, tes-tes berikut hanya mengukur rem dan mengira dirinya mengukur pengiriman.
+        # Jendela dibuka lagi karena `deliver_now` menolaknya sebagai WINDOW_CLOSED; `dirty=False`
+        # yang dibawa tiap call-site di bawah-lah yang menjaga git nyata tidak dibaca, bukan mode.
+        wo.run(conn, "SQLITE",
+               "UPDATE autopilot_state SET mode='SEMI', on_epoch=?, until_epoch=?, off_reason=NULL",
+               (wo.now(), wo.now() + 3600))
 
         # --- F10.10 SEMI: otomatis dengan pengawas -------------------------------------
         # Yang diuji di blok ini bukan "apakah drainer masih hidup", melainkan BEDA yang membuatnya
@@ -1399,6 +1513,15 @@ def selftest():
         check("pane yang teksnya berubah antar pembacaan tidak diketiki, dan barisnya tetap PENDING",
               out and out[-1]["action"] == "PANE_NOT_QUIET" and not sent
               and wo.get_item(conn, "SQLITE", g1)["status"] == "PENDING", str(out))
+        # `refuse()` adalah satu-satunya tempat penolakan menulis tiga hal sekaligus. Tanpa tes ini,
+        # menghapus `note_refusal`/`cooldown` dari dalamnya tetap membuat semua tes di atas hijau —
+        # dan itulah lubang yang membuat operator bertanya perintahnya hilang ke mana.
+        _row_g1 = wo.get_item(conn, "SQLITE", g1)
+        check("penolakan gerbang menulis escalation_reason, bukan hanya peristiwa log",
+              (_row_g1.get("escalation_reason") or "").startswith("PANE_NOT_QUIET"),
+              str(_row_g1.get("escalation_reason"))[:160])
+        check("penolakan gerbang juga memasang jeda, jadi baris yang sama tidak dicoba tiap tick",
+              int(_row_g1.get("due_epoch") or 0) > wo.now(), str(_row_g1.get("due_epoch")))
 
         g2 = make("selftest-guard-blind", gate="false", engine_key="qoder", origin="operator")
         sent.clear(); out = []
@@ -1569,8 +1692,14 @@ def selftest():
                                "level_until=strftime('%s','now')+3600, "
                                "until_epoch=strftime('%s','now')+3600")
 
-        # (D) mode yang tidak dikenal harus gagal-TERTUTUP, bukan jatuh ke keranjang FULL AUTO.
-        for bad in ("semi", "OFF", "", "ngawur"):
+        # (D) keadaan yang tidak boleh mengirim apa pun. Ini sekarang DUA kelas yang dulu menyatu:
+        # "" dan "ngawur" bukan kosakata (MODE_UNKNOWN), sedangkan "OFF" adalah state SAH yang
+        # kebetulan berarti diam (MODE_OFF). Membedakannya bukan kosmetik — operator yang menekan
+        # berhenti harus melihat kata yang ia tulis sendiri di log, bukan tuduhan salah ketik, dan
+        # menambah satu mode baru tidak boleh lagi membuat "OFF" lolos sebagai kata yang dikenal.
+        _off_events = []
+        for bad, expected in (("semi", None), ("OFF", "MODE_OFF"), ("", "MODE_UNKNOWN"),
+                              ("ngawur", "MODE_UNKNOWN")):
             sent.clear(); out = []
             hand_new_work(conn, "SQLITE", bad, runner=runner, sender=sender, emit=sink(out),
                           capture=quiet_pane, busy=not_busy, tab_project=cwd_of,
@@ -1613,7 +1742,11 @@ def selftest():
                       len(held_now) >= 1, str(held_now))
             else:
                 check(f"mode {bad!r} tidak mengirim apa pun dan tidak mengambil keranjang penuh",
-                      not sent and any(e["action"] == "MODE_UNKNOWN" for e in out), str(out))
+                      not sent and any(e["action"] == expected for e in out), str(out))
+                if expected == "MODE_OFF":
+                    _off_events = [e["action"] for e in out]
+        check("OFF dilaporkan sebagai keadaannya sendiri, bukan sebagai salah ketik",
+              _off_events == ["MODE_OFF"], str(_off_events))
 
         check("jeda tidak bisa dinolkan oleh pemanggil mana pun, termasuk yang menyuntik pembaca",
               effective_gap(0) == MIN_PANE_GAP and effective_gap(5) == 5

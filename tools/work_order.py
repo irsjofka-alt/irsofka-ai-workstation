@@ -33,6 +33,11 @@ ALIAS = {"IN_PROGRESS": "CLAIMED", "DONE": "COMPLETED"}
 LEASE_SECONDS = 900          # satu item tanpa perpanjangan lease 15 menit dianggap lepas
 MIN_SAMPLE_GAP = 1           # detik; di bawahnya "pane tidak berubah" bukan pembacaan apa pun
 MAX_RESUME = 3               # item yang butuh 4 sentuhan bukan tertidur, tapi macet
+# Batas injeksi per baris. `MAX_RESUME` menjaga CONTINUE ke item yang SUDAH dipegang; yang ini
+# menjaga perintah BARU yang disuntikkan ke sesi yang berhenti. Tanpa batas, satu baris yang tidak
+# pernah di-complete (misal mesinnya tersangkut di antrean model) akan disuntik ulang setiap kali
+# lease 900 dtk-nya kedaluwarsa, selamanya, dan tidak ada satu pun angka yang melaporkan itu.
+MAX_INJECT = 3
 EVIDENCE_LIMIT = 900
 # Circuit breaker (temuan reviewer Gemini, 2026-10-08). Tanpa ini sebuah item yang gagal dengan
 # exit code cepat akan diklaim-lepas-gagal lagi tanpa henti, dan kuota mingguan habis dalam
@@ -41,12 +46,24 @@ REPO = Path.home() / ".ai-station"
 NIGHT_MAX_FAILURES = 3
 NIGHT_MAX_ITEMS = 25
 FAILURE_LOOKBACK = 12 * 3600   # detik; rentetan di luar ini bukan tanggungan malam ini
-# Dua keadaan mesin, bukan tiga. `SEMI` = otomatis dengan orang di meja (hanya perintah yang dia
-# tulis sendiri yang diambil); `ON` = seluruh antrean roadmap. OFF dibuang dari kosakata karena
-# operator hanya pernah memakai dua posisi itu; jalannya berhenti sekarang adalah `STOP_WORDS`,
-# yang menurunkan tangan dan menutup jendela tanpa menulis mode ketiga.
-MODES = ("SEMI", "ON")
-STOP_WORDS = ("OFF", "STOP", "BERHENTI", "MATI")
+# Tiga keadaan mesin, dan ketiganya tertulis sebagai SATU kata di satu kolom. `SEMI` = otomatis
+# dengan orang di meja (hanya perintah yang dia tulis sendiri yang diambil); `ON` = mesin ini
+# milik engine, termasuk antrean roadmap; `OFF` = tidak ada yang bergerak.
+#
+# `OFF` pernah dibuang dari kosakata atas perintah operator 2026-10-08 ("OFF dibuang saja, hanya
+# SEMI dan FULL AUTO"), dan berhenti saat itu jadi kata yang menutup jendela TANPA menulis mode
+# baru. Hasilnya terukur pada 2026-10-09: orang menekan berhenti, `mode` tetap terbaca "SEMI",
+# dan Dashboard menulis `tercatat: SEMI` di atas mesin yang sudah mati — dua kata untuk satu
+# keadaan, persis yang dilarang §12. Operator membalik perintahnya sendiri pagi itu: "buat 3 panel
+# saja (SEMI) (OFF) (FULL AUTO) agar tidak ambigu, jadi jelas OFF ya off". Jadi OFF kembali
+# sebagai state yang disimpan, bukan sebagai efek samping dari sebuah jendela di masa lalu.
+#
+# `STOP_WORDS` tetap ada karena tangan harus bisa berhenti dari shell tanpa membuka Dashboard, dan
+# sebuah typo harus tetap berarti berhenti. Kata-kata itu sekarang alias menuju `OFF`, bukan
+# keadaan keempat.
+MODES = ("SEMI", "OFF", "ON")
+OFF_MODE = "OFF"
+STOP_WORDS = ("STOP", "BERHENTI", "MATI")
 _MEASURE = object()          # pembeda "belum diukur" dari "diukur tapi gagal dibaca"
 
 
@@ -260,7 +277,14 @@ def night_state(conn, engine, dirty=_MEASURE):
     # syarat sebelumnya membuat ON tanpa jendela terbaca sebagai "tidak ada jendela untuk kedaluwarsa"
     # — yaitu ON tanpa batas waktu, tepat yang dilarang aturan "ON expires by itself". Sekarang ON
     # tanpa jendela adalah jendela yang BELUM dibuka, dan itu menutup loop, bukan membukanya.
-    if ap.get("mode") in MODES and ((until > 0 and until <= now())
+    if ap.get("mode") == OFF_MODE:
+        # OFF adalah SEBUAH KEADAAN, bukan jendela yang kedaluwarsa. Kalimat "jendela OFF lewat"
+        # menyiratkan ada jendela yang tinggal dibuka lagi, padahal yang orang minta adalah mesin
+        # berhenti. Kata `(dipilih)` ikut ditulis karena kedua permukaan mencetak daftar ini di
+        # samping label "BREAKER OPEN": seorang operator yang menekan berhenti sendiri tidak boleh
+        # dibacakan penolakan seolah-olah mesinnya gagal.
+        why.append(f"mode OFF (dipilih) — {ap.get('off_reason') or 'tidak ada alasan berhenti tercatat'}")
+    elif ap.get("mode") in MODES and ((until > 0 and until <= now())
                                     or (ap.get("mode") == "ON" and until <= 0)):
         why.append(f"jendela {ap.get('mode')} {'lewat' if until > 0 else 'belum dibuka'}")
     if n_fail >= NIGHT_MAX_FAILURES:
@@ -342,6 +366,11 @@ NEW_COLUMNS = [
     ("quest_tasks", "lease_epoch", "BIGINT", "INTEGER"),
     ("quest_tasks", "evidence", "TEXT", "TEXT"),
     ("quest_tasks", "resume_count", "INT DEFAULT 0", "INTEGER DEFAULT 0"),
+    # `inject_count` BUKAN `resume_count`. Yang terakhir menghitung ketikan CONTINUE ke pane yang
+    # sudah memegang item; ini menghitung berapa kali satu baris disuntikkan sebagai perintah BARU.
+    # Satu kata untuk dua hal membuat anggaran yang dibaca orang tidak sama dengan anggaran yang
+    # mesin pakai, jadi keduanya punya kolom sendiri-sendiri, seperti yang dituntut §12.
+    ("quest_tasks", "inject_count", "INT DEFAULT 0", "INTEGER DEFAULT 0"),
     ("quest_tasks", "escalation_reason", "TEXT", "TEXT"),
     ("quest_tasks", "due_epoch", "BIGINT", "INTEGER"),
     # Tangga tangan drainer (F10.3) tinggal di baris autopilot yang sama dengan sakelarnya:
@@ -530,6 +559,13 @@ def claim(conn, engine, item_id, who, dirty=_MEASURE, mode=None):
     # jendela ON bisa dinilai dengan mode yang berbeda dari yang dipakai pagar SEMI. Sekarang
     # satu baris, satu mode, dan kalau keduanya bertentangan itu terdengar.
     ap = autopilot(conn, engine) or {}
+    # OFF dibaca SEBELUM `mode` dari pemanggil boleh menimpa apa pun. Tanpa urutan ini, satu
+    # pemanggil yang mengirim mode="SEMI" sementara baris database menulis OFF akan lolos dari
+    # rem — dan rem adalah satu-satunya keadaan yang tidak boleh dilewati oleh kata seseorang,
+    # sebab justru untuk itu ia ada.
+    if ap.get("mode") == OFF_MODE:
+        return False, (f"OFF: tidak ada yang diklaim — "
+                       f"{ap.get('off_reason') or 'tidak ada alasan berhenti tercatat'}")
     if mode is not None:
         wanted_mode = (mode or "").upper()
         if ap.get("mode") and ap["mode"] != wanted_mode:
@@ -607,7 +643,7 @@ def claim(conn, engine, item_id, who, dirty=_MEASURE, mode=None):
         # Python di atas justru melihat `int(None or 0) = 0` dan menyebutnya "bebas": dua pembacaan
         # atas data yang sama tidak boleh memberi jawaban berbeda.
         q = (f"UPDATE quest_tasks SET status='WORKING', claimed_by={ph}, lease_epoch={ph}, "
-             f"model_assigned={ph} WHERE id={ph} "
+             f"model_assigned={ph}, escalation_reason=NULL WHERE id={ph} "
              f"AND (claimed_by IS NULL OR claimed_by={ph} OR COALESCE(lease_epoch,0) <= {ph}) "
              f"AND status IN ('PENDING','CLAIMED','WORKING')")
         run(conn, engine, q, (who, now() + LEASE_SECONDS, who, item_id, who, now()))
@@ -690,6 +726,36 @@ def nudge(conn, engine, item_id):
     return True, f"resume {after}/{MAX_RESUME}"
 
 
+def nudge_inject(conn, engine, item_id):
+    """Naikkan `inject_count` satu kali, dan tolak kenaikan yang melewati MAX_INJECT.
+
+    Padanan `nudge()` untuk kata yang berbeda: `nudge` menghitung CONTINUE yang diketik ke pane
+    yang sudah memegang item, yang ini menghitung perintah BARU yang disuntikkan ke sesi yang
+    berhenti. Memakai satu kolom untuk dua hal membuat anggaran yang dibaca operator berbeda dari
+    anggaran yang mesin pakai, dan §12 melarang itu.
+
+    Sama seperti `nudge()`: yang dilakukan hanya menghitung. Tidak ada satu pun ketikan di sini.
+    """
+    item = get_item(conn, engine, item_id)
+    if not item:
+        return False, f"item {item_id} tidak ada"
+    used = int(item.get("inject_count") or 0)
+    if used >= MAX_INJECT:
+        return False, (f"budget injeksi habis ({used}/{MAX_INJECT}) — baris ini sudah disuntik "
+                       "dan tidak ada yang menyelesaikan; menyuntik lagi tidak menggerakkannya")
+    ph = "%s" if engine == "POSTGRESQL" else "?"
+    run(conn, engine,
+        f"UPDATE quest_tasks SET inject_count=COALESCE(inject_count, 0) + 1 WHERE id={ph}",
+        (int(item_id),))
+    after = int((get_item(conn, engine, int(item_id)) or {}).get("inject_count") or 0)
+    if after > MAX_INJECT:
+        return False, (f"naik ke {after} melewati {MAX_INJECT}: pemanggil lain menyuntik item ini "
+                       "lebih dulu")
+    if after <= used:
+        return False, f"kenaikan inject_count tidak terbaca kembali ({used} -> {after})"
+    return True, f"inject {after}/{MAX_INJECT}"
+
+
 def finish(conn, engine, item_id, status, evidence=None, reason=None):
     """COMPLETED menuntut bukti. Laporan tidak boleh ditulis tangan (§12)."""
     if status == "COMPLETED" and not (evidence or "").strip():
@@ -712,6 +778,34 @@ def finish(conn, engine, item_id, status, evidence=None, reason=None):
                f"Item «{item['title']}» berhenti di ambang: {reason or 'alasan tidak tercatat'}",
                [], "heavy", item_id)
     return True, f"{item['title']} -> {status}"
+
+
+def _record_send_events(events):
+    """Simpan peristiwa kirim lewat penulis log drainer yang sudah ada — bukan jalur log kedua.
+
+    Dinamai dan dipasang lewat `globals()` supaya selftest bisa mengarahkannya ke penampung
+    sendiri. Alasannya bukan kerapian: `drainer.write_events` menulis ke berkas produksi dengan
+    path absolut, jadi selftest yang memanggilnya tanpa sambatan akan mengarang baris kegagalan
+    di log yang dibaca operator — kelas bug yang persis baru saja ditutup di jalur hook.
+    """
+    import drainer as _dr
+    return _dr.write_events(events)
+
+
+def note_refusal(conn, engine, item_id, why):
+    """Catat MENGAPA sebuah baris belum mendarat, tanpa mengubah statusnya.
+
+    Sebelum fungsi ini ada, `escalation_reason` hanya ditulis `finish()`. Sebuah baris yang
+    ditolak gerbang (pane sibuk, jendela tertutup, direktori salah) maka tetap punya
+    `escalation_reason = NULL`, persis seperti baris yang belum pernah dilihat siapa pun — dan
+    operator bertanya "perintahku hilang ke mana" sementara jawabannya ada di satu-satunya kolom
+    yang tidak pernah diisi. Status TETAP PENDING karena memang masih antre; yang bertambah
+    hanyalah alasannya. Penolakan bukan kesimpulan, jadi tidak boleh menulis status kesimpulan.
+    """
+    ph = "%s" if engine == "POSTGRESQL" else "?"
+    run(conn, engine, f"UPDATE quest_tasks SET escalation_reason={ph} WHERE id={ph}",
+        ((why or "(tanpa alasan dari jalur kirim)")[:500], int(item_id)))
+    return True
 
 
 def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None):
@@ -749,7 +843,7 @@ def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None,
     """
     rows = run(conn, engine,
                "SELECT id, title, status, depends_on, claimed_by, lease_epoch, phase, due_epoch, "
-               "origin, ws_path, cli_engine FROM quest_tasks ORDER BY id")
+               "origin, ws_path, cli_engine, escalation_reason FROM quest_tasks ORDER BY id")
     out = []
     done = {int(r["id"]) for r in rows if norm(r["status"]) == "COMPLETED"}
     for r in rows:
@@ -1036,7 +1130,23 @@ def autopilot(conn, engine, mode=None, minutes=None, budget=None, who="operator"
     ph = "%s" if engine == "POSTGRESQL" else "?"
     until = now() + int(minutes) * 60 if minutes else None
     wanted = (mode or "").upper()
-    if wanted in MODES:
+    if wanted in STOP_WORDS:
+        # Kata rem adalah ALIAS menuju OFF, bukan keadaan keempat yang hidup di kolom lain. Sebuah
+        # typo ("stop", "berhenti") tetap berarti berhenti, dan yang ditulis adalah kata yang sama
+        # dengan yang dibaca layar.
+        wanted = OFF_MODE
+    if wanted == OFF_MODE:
+        # OFF ditulis sebagai MODE. Versi lama menulis jendela ke masa lalu dan MEMBIARKAN `mode`
+        # apa adanya, sehingga mesin yang sudah berhenti dilaporkan sebagai SEMI. Itu bukan sekadar
+        # membingungkan: perintah operator di bawah "SEMI yang sudah mati" ditolak WINDOW_CLOSED
+        # sementara satu-satunya angka yang dibaca orang menyebut mode masih aktif, dan tidak ada
+        # jalan untuk membedakan "saya belum menekan apa-apa" dari "saya sudah menekan berhenti".
+        # Invarian 6 berlaku penuh: jalur ini tidak butuh TTY dan tidak butuh kerja sama AI.
+        run(conn, engine,
+            f"UPDATE autopilot_state SET mode={ph}, until_epoch={ph}, level='observe', "
+            f"level_until=NULL, off_reason={ph}, changed_by={ph} WHERE id=1",
+            (OFF_MODE, now(), reason or "berhenti — tangan diturunkan, jendela ditutup", who))
+    elif wanted in MODES:
         # `level` ikut direset di kedua cabang. Tanpa ini, tangan yang diangkat dari TTY saat
         # keranjang masih SEMI (hanya perintah operator) otomatis berlaku untuk keranjang ON
         # (seluruh roadmap) tanpa satu pun tindakan TTY baru.
@@ -1049,24 +1159,14 @@ def autopilot(conn, engine, mode=None, minutes=None, budget=None, who="operator"
             f"item_budget={ph}, items_done=0, off_reason=NULL, changed_by={ph}, "
             f"level='observe', level_until=NULL WHERE id=1",
             (wanted, now(), until, budget or 12, who))
-    elif wanted in STOP_WORDS:
-        # OFF dibuang sebagai MODE, bukan sebagai jalan mati. Yang operator minta adalah dua
-        # pilihan kerja (SEMI / FULL AUTO); yang tetap harus ada adalah rem, dan rem tidak boleh
-        # berupa nilai ketiga yang membuat kosakata punya dua definisi (§12). Jadi kata berhenti
-        # menurunkan TANGAN dan menutup JENDELA — dua fakta yang sudah dimiliki kolom ini —
-        # tanpa menulis mode baru. Invarian 6 berlaku penuh: jalur ini tidak butuh TTY dan tidak
-        # butuh kerja sama AI, dan sebuah typo ("off") tetap berarti berhenti, bukan berarti lolos.
-        run(conn, engine,
-            f"UPDATE autopilot_state SET until_epoch={ph}, level='observe', level_until=NULL, "
-            f"off_reason={ph}, changed_by={ph} WHERE id=1",
-            (now(), reason or "loop dihentikan — tangan diturunkan, jendela ditutup", who))
     else:
         row = autopilot(conn, engine) or {}
         # Menolak, bukan memilihkan. Mode yang tidak dikenal tidak boleh diam-diam jadi SEMI
         # (itu memperluas keranjang) atau diam-diam berhenti (itu menghapus rem yang orang sangka
         # masih ada). Yang ditulis hanya pesan penolakannya; baris tidak disentuh.
         row["refused"] = (f"mode {wanted!r} bukan kosakata: {'/'.join(MODES)} — untuk berhenti "
-                          "pakai 'off' (menurunkan tangan + menutup jendela) atau `disarm`")
+                          "pakai 'off' (menulis state OFF, menurunkan tangan, menutup jendela) "
+                          "atau `disarm`")
         return row
     return autopilot(conn, engine)
 
@@ -1807,6 +1907,26 @@ def queue_command(conn, engine, title: str, cli_engine: str, gate: str = "",
     except Exception as exc:  # noqa: BLE001 — perintah yang sudah tertulis tidak boleh hilang karena kirim
         handed = {"sent": False, "queued": True, "refused": f"jalur kirim tidak terpanggil: "
                   f"{type(exc).__name__}: {exc}"}
+    # Alasan penolakan harus TINGGAL, bukan hanya lewat. `emit()` di `deliver_now` mengumpulkan
+    # peristiwanya ke akumulator lokal, dan pemanggil di jalur ini tidak menyuplai `log=`, jadi
+    # daftar ["GATE_NO_COMMAND","PANE_NOT_QUIET"] hidup sepanjang satu HTTP response lalu dibuang.
+    # Tujuh baris ditolak tanpa satu pun jejak yang bisa ditanya, dan kolom yang dipakai UI untuk
+    # menjawab "kenapa belum" hanya pernah ditulis `finish()` — jadi PENDING yang ditolak terlihat
+    # persis seperti PENDING yang belum dilihat siapa pun.
+    _events = handed.get("detail") or []
+    if _events:
+        try:
+            _record_send_events(_events)
+        except Exception as _el:  # noqa: BLE001 — log yang gagal tidak boleh menghapus perintah orang
+            banner("LOG_WRITE_FAILED", f"peristiwa kirim item {new_id} tidak tersimpan: "
+                  f"{type(_el).__name__}: {_el}", urgent=False)
+    if not handed.get("sent"):
+        _last = _events[-1] if _events else {}
+        _code = (handed.get("refused") or handed.get("why") or _last.get("action")
+                 or (handed.get("events") or ["tanpa peristiwa"])[-1])
+        _note = _last.get("why") or _last.get("note") or ""
+        note_refusal(conn, engine, new_id,
+                     " · ".join(str(x) for x in (_code, _note) if x)[:500])
     if handed.get("sent"):
         banner("WORK_DISPATCHED", f"perintah {new_id} langsung masuk ke {target}", urgent=False)
     else:
@@ -1829,10 +1949,21 @@ def queue_command(conn, engine, title: str, cli_engine: str, gate: str = "",
 def semi_status(conn, engine) -> dict:
     """Yang SEMI butuhkan untuk melaporkan dirinya sendiri — semuanya turunan, tidak ada angka karangan."""
     listed = list_workspaces(conn, engine)
-    # Satu sumber: apa yang benar-benar siap ditawarkan. Baris yang tertahan dependensi, lease,
-    # atau cooldown tidak dihitung sebagai "menunggu" karena memang tidak akan jalan.
-    pend = [r for r in ready_items(conn, engine, respect_due=True, origin=ORIGIN_OPERATOR)
-            if norm(r["status"]) == "PENDING"]
+    # Satu sumber: apa yang benar-benar siap ditawarkan. Aturan pemilihannya identik dengan
+    # `next_item`, karena dua definisi "berikutnya" pernah membuat Dashboard bilang "3 menunggu"
+    # sementara mesin tidak menawarkan apa pun.
+    _operator_ready = [r for r in ready_items(conn, engine, respect_due=False, origin=ORIGIN_OPERATOR)
+                       if norm(r["status"]) == "PENDING"]
+    _t = now()
+    pend = [r for r in _operator_ready if int(r.get("due_epoch") or 0) <= _t]
+    # Baris yang sedang cooldown TIDAK boleh hilang dari laporan: ia ditahan, dan menahan harus
+    # terlihat. `due_epoch` ditulis oleh penolakan, jadi tanpa daftar ini `operator_pending`
+    # turun ke nol tepat pada detik sesudah perintah orang ditolak — dan komentar di berkas ini
+    # sendiri sudah menyatakan bahwa penolakan senyap dibaca orang sebagai "perintahku hilang".
+    held = [{"id": r["id"], "title": r["title"], "cli_engine": r.get("cli_engine"),
+             "due_epoch": int(r.get("due_epoch") or 0),
+             "reason": r.get("escalation_reason")}
+            for r in _operator_ready if int(r.get("due_epoch") or 0) > _t]
     working = run(conn, engine,
                   "SELECT id, title, cli_engine, claimed_by FROM quest_tasks "
                   "WHERE origin=%s AND status IN ('WORKING','CLAIMED') ORDER BY id"
@@ -1842,6 +1973,7 @@ def semi_status(conn, engine) -> dict:
                   (ORIGIN_OPERATOR,))
     return {"operator_pending": len(pend),
             "operator_queue": pend,
+            "operator_held": held,
             "operator_working": working,
             "engines_with_a_claim": sorted({r["cli_engine"] for r in working if r.get("cli_engine")}),
             "focus": listed["focus"], "focus_readable": listed["focus_readable"],
@@ -2009,6 +2141,13 @@ def selftest():
     orig_deliver = globals()["deliver_now"]
     globals()["deliver_now"] = lambda conn, engine, item_id: {
         "sent": False, "queued": True, "refused": "SELFTEST"}
+    # Penulis peristiwa kirim ikut disambat untuk SELURUH durasi tes, bukan per-blok. Versi
+    # pertama menyambatnya hanya di dalam satu blok dan lupa memasang kembali stub tanpa
+    # `detail` sesudahnya, sehingga satu tes BERIKUTNYA mengirim dua baris PANE_NOT_QUIET
+    # berbunyi `ts: 1` ke logs/drainer-<hari>.jsonl — pemalsuan catatan yang persis sama dengan
+    # yang baru ditutup di jalur hook, dan kali ini pelakunya adalah tes itu sendiri.
+    send_events, orig_send_events = [], globals()["_record_send_events"]
+    globals()["_record_send_events"] = lambda ev: send_events.append(list(ev))
     fails = []
     try:
         log = ensure_schema(conn, "SQLITE")
@@ -2074,6 +2213,37 @@ def selftest():
         run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (int(id_sent),))
         globals()["deliver_now"] = lambda conn, engine, item_id: {
             "sent": False, "queued": True, "refused": "SELFTEST"}
+        # Cabang PENOLAKAN juga harus punya bukti. Stub yang menolak tanpa `detail` membuat
+        # `note_refusal` dan penulis peristiwa tidak pernah dijalankan di satu pun tes — dan
+        # itulah lubang yang dibiarkan terbuka sampai operator bertanya perintahnya hilang ke mana:
+        # tujuh baris ditolak, `escalation_reason` tetap NULL, dan ledger tidak bisa ditanya.
+        # Tidak ada swap persis-di-sini: perekam global di atas sudah dipasang untuk seluruh tes,
+        # dan menyambatnya lagi di dalam blok membuat perekam itu tidak melihat apa pun.
+        _ev_before = len(send_events)
+        globals()["deliver_now"] = lambda conn, engine, item_id: {
+            "sent": False, "queued": True, "events": ["PANE_NOT_QUIET"],
+            "detail": [{"ts": 1, "action": "PANE_NOT_QUIET",
+                        "why": "pane sedang menampilkan pekerjaan"}]}
+        ok_ref, msg_ref, id_ref = queue_command(conn, "SQLITE", "uji penolakan tercatat", "qoder")
+        _captured = send_events[_ev_before:]
+        _row_ref = get_item(conn, "SQLITE", int(id_ref)) if id_ref else None
+        check("penolakan kirim menulis escalation_reason, bukan meninggalkan NULL",
+              bool(ok_ref and (_row_ref or {}).get("escalation_reason")), str(_row_ref)[:180])
+        check("alasan yang ditulis menyebut kode penolakannya, supaya ledger bisa ditanya",
+              "PANE_NOT_QUIET" in ((_row_ref or {}).get("escalation_reason") or ""),
+              str((_row_ref or {}).get("escalation_reason"))[:180])
+        check("status baris yang ditolak TETAP PENDING — penolakan bukan kesimpulan",
+              (_row_ref or {}).get("status") == "PENDING", str((_row_ref or {}).get("status")))
+        check("peristiwa kirim ditahan lewat penulis log, tidak dibuang bersama response",
+              bool(_captured) and _captured[-1] and _captured[-1][0].get("action") == "PANE_NOT_QUIET",
+              str(_captured)[:180])
+        # Stub ber-`detail` dibuang lagi. Meninggalknya hidup membuat satu tes SESUDAHNYA memanggil
+        # queue_command dan ikut menulis peristiwa, dan itu yang dulu memalsukan empat baris
+        # PANE_NOT_QUIET `ts: 1` ke log produksi.
+        globals()["deliver_now"] = lambda conn, engine, item_id: {
+            "sent": False, "queued": True, "refused": "SELFTEST"}
+        if id_ref:
+            run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (int(id_ref),))
         # Keadaan awal fixture harus DINYATAKAN, bukan diwarisi dari default skema. Tanpa baris
         # ini, seluruh blok di bawah ikut bentuk baris pertama: begitu default berubah dari OFF
         # menjadi SEMI, keranjang SEMI menolak item roadmap yang dibuat `seed` dan setiap tes di
@@ -2249,14 +2419,44 @@ def selftest():
         ap = autopilot(conn, "SQLITE", "off", reason="selftest selesai")
         check("kata berhenti menyimpan alasan di kolom yang sama",
               "selftest" in (ap["off_reason"] or ""), str(ap))
-        check("kata berhenti TIDAK menulis mode ketiga — mode tetap yang sedang berlaku",
-              ap["mode"] == "ON", str(ap["mode"]))
+        # Ini keadaan yang operator batalkan pada 2026-10-09. Perilaku lama: `berhenti` menulis
+        # jendela ke masa lalu dan MEMBIARKAN mode = ON/SEMI, sehingga mesin yang sudah mati
+        # dilaporkan masih dalam mode kerja. Yang sekarang ditegakkan justru kebalikannya — dan
+        # kalau seseorang mengembalikan perilaku lama, dua tes di bawah menolaknya.
+        check("berhenti menulis state OFF yang nyata, bukan jendela basi dengan mode yang tersisa",
+              ap["mode"] == OFF_MODE, str(ap["mode"]))
         check("kata berhenti menutup jendela dan menurunkan tangan (rem tanpa TTY)",
               int(ap["until_epoch"] or 0) <= now() and ap["level"] == "observe",
               str({k: ap[k] for k in ("until_epoch", "level")}))
+        # Alias rem harus menulis keadaan yang SAMA dengan tombolnya, tidak menambah kata keempat.
+        for word in STOP_WORDS:
+            ap_alias = autopilot(conn, "SQLITE", "SEMI", minutes=10, who="selftest")
+            check(f"menyalakan SEMI lagi menghapus status berhenti (mode={ap_alias['mode']})",
+                  ap_alias["mode"] == "SEMI" and ap_alias["off_reason"] is None, str(ap_alias["mode"]))
+            ap_alias = autopilot(conn, "SQLITE", word, reason=f"selftest alias {word}")
+            check(f"kata '{word}' adalah alias menuju OFF, bukan keadaan keempat",
+                  ap_alias["mode"] == OFF_MODE and "OFF" not in (ap_alias.get("refused") or ""),
+                  str({k: ap_alias.get(k) for k in ("mode", "refused")}))
         ap = autopilot(conn, "SQLITE", "nanti-dulu", reason="typo")
         check("mode di luar kosakata DITOLAK dengan menyebut kosakata, tidak dipilihkan diam-diam",
-              "bukan kosakata" in (ap.get("refused") or "") and ap["mode"] == "ON", str(ap))
+              "bukan kosakata" in (ap.get("refused") or "") and ap["mode"] == OFF_MODE, str(ap))
+        check("penolakan mode asing tidak mengubah baris: OFF yang sudah ada tetap tinggal",
+              ap["mode"] == OFF_MODE and "SEMI/OFF/ON" in (ap.get("refused") or ""),
+              str(ap.get("refused"))[:160])
+        # OFF bukan label: tidak ada satu pun jalur yang boleh mengklaim di atasnya, bahkan ketika
+        # pemanggil bersikeras mengirim mode lain. Klaim adalah satu-satunya tulisan yang menggerakkan
+        # pekerjaan, jadi inilah pagar yang membuktikan keadaan itu nyata.
+        off_made = seed(conn, "SQLITE", [("kOff", "off-claim-target", "build", None, "true")])
+        off_item = off_made[0][0]
+        ok_off, msg_off = claim(conn, "SQLITE", off_item, "selftest", dirty=False, mode="SEMI")
+        check("OFF menolak klaim walaupun pemanggil mengirim mode='SEMI'",
+              not ok_off and "OFF" in msg_off, msg_off)
+        ok_off2, msg_off2 = claim(conn, "SQLITE", off_item, "selftest", dirty=False, mode="ON")
+        check("penimpaan mode dari pemanggil tidak bisa menembus OFF", not ok_off2, msg_off2)
+        check("penolakan OFF tidak meninggalkan klaim di barisnya",
+              (get_item(conn, "SQLITE", off_item) or {}).get("claimed_by") is None,
+              str((get_item(conn, "SQLITE", off_item) or {}).get("claimed_by")))
+        run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (off_item,))
 
         # --- F10.3: tangga tangan, dan pagar yang membuatnya tak bisa dinaikkan sendiri ---
         lvl = drain_level(conn, "SQLITE")
@@ -2332,6 +2532,37 @@ def selftest():
               str(get_item(conn, "SQLITE", nid)["status"]))
         ok, msg = nudge(conn, "SQLITE", 999999)
         check("item yang tidak ada ditolak, tidak dibuatkan angka", not ok and "tidak ada" in msg, msg)
+
+        # --- batas injeksi per baris. `resume_count` menjaga CONTINUE ke item yang sudah dipegang;
+        # `inject_count` menjaga perintah BARU yang disuntikkan ke sesi yang berhenti. Dua kata,
+        # dua kolom — dan tes ini memastikan memenuhkan yang satu tidak menghabiskan yang lain,
+        # karena menumpang satu kolom adalah persis cara anggaran yang dibaca operator berbeda dari
+        # anggaran yang mesin pakai (§12).
+        conn.execute("INSERT INTO quest_tasks (title, status) VALUES ('inject-target','PENDING')")
+        conn.commit()
+        iid = run(conn, "SQLITE", "SELECT id FROM quest_tasks WHERE title='inject-target'")[0]["id"]
+        for k in range(MAX_INJECT):
+            ok, msg = nudge_inject(conn, "SQLITE", iid)
+            check(f"injeksi {k + 1} dari {MAX_INJECT} diizinkan dan terbaca kembali",
+                  ok and int(get_item(conn, "SQLITE", iid)["inject_count"] or 0) == k + 1, msg)
+        ok, msg = nudge_inject(conn, "SQLITE", iid)
+        check("injeksi berikutnya ditolak: baris ini sudah disuntik dan tidak ada yang menyelesaikan",
+              not ok and "habis" in msg and str(MAX_INJECT) in msg, msg)
+        check("penolakan injeksi tidak menaikkan angka diam-diam",
+              int(get_item(conn, "SQLITE", iid)["inject_count"] or 0) == MAX_INJECT,
+              str(get_item(conn, "SQLITE", iid)["inject_count"]))
+        check("batas injeksi TIDAK membaca atau menulis resume_count — dua kata, dua kolom",
+              int(get_item(conn, "SQLITE", iid)["resume_count"] or 0) == 0
+              and int(get_item(conn, "SQLITE", nid)["inject_count"] or 0) == 0,
+              f"inject={get_item(conn, 'SQLITE', iid)['inject_count']} "
+              f"resume={get_item(conn, 'SQLITE', iid)['resume_count']} "
+              f"target.inject_count={get_item(conn, 'SQLITE', nid)['inject_count']}")
+        check("nudge_inject hanya menghitung — status item tidak ikut ditulis",
+              get_item(conn, "SQLITE", iid)["status"] == "PENDING",
+              str(get_item(conn, "SQLITE", iid)["status"]))
+        ok, msg = nudge_inject(conn, "SQLITE", 999999)
+        check("injeksi ke item yang tidak ada ditolak, tidak dibuatkan angka",
+              not ok and "tidak ada" in msg, msg)
 
         d = decide(conn, "SQLITE", "A atau B?", ["A", "B"], weight="heavy")
         check("keputusan tercatat OPEN", d and d[0]["state"] == "OPEN")
@@ -3016,8 +3247,13 @@ def selftest():
         globals()["tree_dirty"] = orig_tree_dirty
         globals()["banner"] = orig_banner
         globals()["deliver_now"] = orig_deliver
+        globals()["_record_send_events"] = orig_send_events
         conn.close()
         tmp.unlink(missing_ok=True)
+
+    check("peristiwa kirim tes tertangkap penampung, dan penulis log produksi tidak pernah dipanggil",
+          len(send_events) >= 1 and globals()["_record_send_events"] is orig_send_events,
+          f"tertangkap={len(send_events)}")
 
     check("pertanyaan yang butuh manusia benar-benar mengirim satu banner darurat — jalur ini bukan "
           "kode yang lulus karena tidak ada yang memantau",

@@ -245,6 +245,7 @@
   .seg button:hover { color: var(--ink); background: #131d28; }
   .seg button.on { background: var(--panel-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
   .seg button.on[data-mode="SEMI"] { color: var(--amber); box-shadow: inset 0 0 0 1px #4a3a13; }
+  .seg button.on[data-mode="OFF"] { color: var(--ink-faint); box-shadow: inset 0 0 0 1px var(--line); }
   .seg button.on[data-mode="ON"] { color: var(--accent); box-shadow: inset 0 0 0 1px #1d4b48; }
   .seg button[disabled] { opacity: .4; cursor: default; }
   .ledger { margin-top: 9px; font-size: 11px; color: var(--ink-faint); font-family: var(--mono); }
@@ -874,7 +875,7 @@
    * jawaban. Yang tetap tidak ada di sini adalah tombol "kerjakan apa pun atas namaku": menaiki
    * tangga tangan (`arm`) hanya bisa dari terminal manusia.
    */
-  var ap = null, apBusy = false;
+  var ap = null, apBusy = false, apError = null;
   var drafts = {};      /* draf jawaban per decision, supaya render ulang tidak menghapus ketikan */
 
   function postJson(url, body) {
@@ -896,6 +897,17 @@
      menjadi satu pesan sukses adalah cara halaman ini berbohong. */
   function showReply(box, res) {
     box.textContent = "";
+    /* Judulnya diturunkan dari field yang daemon kirim, bukan dikarang di sini: `ok`/`why`/`refused`
+       adalah kata work_order sendiri. Raw payload tetap dicetak penuh di bawahnya. Yang hilang
+       hanyalah keharusan membaca `null` untuk tahu perintahnya ditolak — seorang operator tidak
+       perlu tahu bentuk JSON sebuah tabel untuk membaca penolakan atasannya sendiri. */
+    var j = res.json || {};
+    var head = el("div");
+    head.style.fontWeight = "600";
+    head.textContent = (j.ok === true ? "recorded"
+                      : (j.ok === false ? "refused" : "no ok field"))
+      + " · " + (j.why || j.refused || j.error || "(no reason given)");
+    box.appendChild(head);
     var pre = el("pre");
     pre.style.whiteSpace = "pre-wrap";
     pre.textContent = "HTTP " + res.status + "\n" + JSON.stringify(res.json, null, 1);
@@ -925,11 +937,18 @@
       .then(function (json) {
         apBusy = false;
         ap = json;
+        apError = null;
         if (view === "decide" || view === "dashboard") render();
       })
       .catch(function () {
         apBusy = false;
-        ap = { error: "daemon unreachable — is irsofka-ai-workstation running?" };
+        /* Yang gagal adalah SATU pembacaan, bukan seluruh isi halaman. Versi lama menimpa `ap`
+           dengan objek error, jadi renderDashboard menghapus feed dan menyisakan satu kalimat —
+           Command center "ngeblank tiba-tiba" setiap kali daemon sedang sibuk atau satu respons
+           bukan JSON. Sekarang kegagalan dicatat terpisah dan data terakhir yang masih hidup tetap
+           dipakai: halaman boleh menyebut dirinya basi, tapi tidak boleh hilang. */
+        apError = "daemon unreachable — is irsofka-ai-workstation running? "
+          + "yang ditampilkan di bawah adalah pembacaan terakhir yang berhasil.";
         if (view === "decide" || view === "dashboard") render();
       });
   }
@@ -992,18 +1011,29 @@
     // dalam field `refused` yang ditampilkan apa adanya di bawah.
     // Rem tidak hilang: ia tombol "berhenti", yang menulis kata berhenti ke jalur yang sama dan
     // tidak butuh persetujuan engine mana pun (invarian 6).
-    var card = dashCard("Autopilot", "Siapa yang memegang mesin. SEMI = otomatis dengan kamu di "
-      + "meja: yang dikerjakan hanya perintah yang kamu tulis sendiri ke SQL. FULL AUTO = mesin "
-      + "ini milik engine, termasuk antrean ROADMAP. Untuk berhenti: tombol berhenti di bawah.");
-    var seg = el("div", "seg seg-2");
-    ["SEMI", "ON"].forEach(function (m) {
-      var b = el("button", m === mode ? "on" : null, m === "ON" ? "FULL AUTO" : m);
-      b.dataset.mode = m;
+    var card = dashCard("Autopilot", "Siapa yang memegang mesin, dan jawabannya sekarang satu dari "
+      + "tiga kata yang tersimpan di kolom yang sama. SEMI = otomatis dengan kamu di meja: yang "
+      + "dikerjakan hanya perintah yang kamu tulis sendiri. OFF = tidak ada yang bergerak; ini keadaan, "
+      + "bukan sisa mode. FULL AUTO = mesin ini milik engine, termasuk antrean ROADMAP.");
+    var seg = el("div", "seg");
+    /* Tiga posisi, bukan dua-plus-sebuah-efek-samping. Versi sebelumnya membuang OFF atas perintah
+       operator 2026-10-08, dan `berhenti` hanya menulis jendela ke masa lalu sambil MEMBIARKAN mode
+       seperti adanya. Hasilnya terukur 2026-10-09: orang menekan berhenti, kolom mode masih berisi
+       "SEMI", dan halaman ini menulis `tercatat: SEMI` di atas mesin yang sudah mati. Operator
+       membalik perintahnya sendiri pagi itu — "buat 3 panel saja (SEMI) (OFF) (FULL AUTO) agar tidak
+       ambigu, jadi jelas OFF ya off" — dan yang menahan perubahan ini adalah `work_order.MODES`,
+       bukan daftar yang disalin ke halaman ini. */
+    [["SEMI", "SEMI"], ["OFF", "OFF"], ["ON", "FULL AUTO"]].forEach(function (pair) {
+      var b = el("button", pair[0] === mode ? "on" : null, pair[1]);
+      b.dataset.mode = pair[0];
       b.disabled = !!apBusySend;
-      b.addEventListener("click", function () { dashSwitch(m, b); });
+      b.addEventListener("click", function () { dashSwitch(pair[0], b); });
       seg.appendChild(b);
     });
     card.appendChild(seg);
+    /* Tombol berhenti TETAP ada. Empat jalan mati yang tidak butuh AI adalah aturan §6, dan sebuah
+       alias yang menulis OFF tidak menambah kata keempat — ia menulis keadaan yang sama dengan yang
+       ditampilkan panel di atasnya. */
     var stop = el("button", "stopbtn", "berhenti");
     stop.disabled = !!apBusySend;
     stop.title = "Menurunkan tangan dan menutup jendela. Tidak butuh TTY, tidak butuh AI.";
@@ -1178,6 +1208,16 @@
     card.appendChild(ta);
     var eng = el("select");
     (w.known_engines || []).forEach(function (e) { eng.appendChild(el("option", null, e)); });
+    /* Pilihan mesin hidup di `drafts`, bukan di DOM. Poll 10 detik membangun ulang elemen ini dari
+       nol, dan <select> yang dibangun ulang tanpa nilai yang diingat selalu jatuh ke baris pertama
+       — yang berarti antigravity. `change` adalah satu-satunya tempat yang tahu apa yang operator
+       pilih, jadi di situlah pilihan itu ditahan, sama seperti `input` menahan isi textarea. */
+    eng.addEventListener("change", function () { drafts.engine = eng.value; });
+    if (drafts.engine && (w.known_engines || []).indexOf(drafts.engine) >= 0) {
+      eng.value = drafts.engine;
+    } else {
+      drafts.engine = eng.value;
+    }
     var feng = el("div", "field");
     feng.appendChild(el("label", null, "mesin tujuan"));
     feng.appendChild(eng);
@@ -1206,14 +1246,35 @@
 
   function queueCard(host) {
     var w = ap.workspace || {};
+    var held = w.operator_held || [];
     var card = dashCard("Antrean perintahmu", (w.operator_pending || 0) + " menunggu, "
-      + (w.operator_working || []).length + " sedang dikerjakan.");
+      + (w.operator_working || []).length + " sedang dikerjakan."
+      + (held.length ? " · " + held.length + " ditahan cooldown" : ""));
     listOrNull(card, w.operator_queue, function (q) {
       var r = el("div", "card qrow");
       r.appendChild(el("span", "t", "#" + q.id + " · " + (q.title || "").slice(0, 90)));
       r.appendChild(el("span", "who", (q.cli_engine || "?") + (q.ws_path ? " · " + q.ws_path.split("/").pop() : " · ~/.ai-station")));
+      /* Alasan penolakan ditampilkan apa adanya dari kolom yang sama yang dibaca mesin. Yang
+         berubah di sini hanya tempatnya: tidak perlu lagi membuka console untuk tahu kenapa
+         perintah sendiri belum sampai. */
+      if (q.escalation_reason) {
+        r.appendChild(el("span", "note", "not delivered: " + q.escalation_reason));
+      }
       return r;
     });
+    /* Baris yang sedang cooldown dulu tidak muncul di mana pun, tepat pada detik sesudah
+       perintah orang ditolak. "Hilang" adalah keadaan yang tidak boleh dilaporkan oleh sebuah
+       ledger, jadi ia dinamai dan dihitung mundur. */
+    if (held.length) {
+      card.appendChild(el("div", "ledger", "held until the retry window opens again"));
+      held.forEach(function (q) {
+        var r = el("div", "card qrow");
+        r.appendChild(el("span", "t", "#" + q.id + " · " + (q.title || "").slice(0, 90)));
+        r.appendChild(el("span", "who", (q.cli_engine || "?") + " · retry in " + timeLeft(q.due_epoch)));
+        r.appendChild(el("span", "note", "not delivered: " + (q.reason || "no reason recorded")));
+        card.appendChild(r);
+      });
+    }
     (w.operator_working || []).forEach(function (q) {
       var r = el("div", "card qrow");
       r.appendChild(el("span", "t", "#" + q.id + " · " + (q.title || "").slice(0, 90)));
@@ -1224,17 +1285,33 @@
   }
 
   function renderDashboard() {
-    /* Poll 10 detik tidak boleh merebut apa yang sedang diketik. */
-    if (document.querySelector("#feed textarea:focus, #feed input:focus")) { return; }
+    /* Poll 10 detik tidak boleh merebut apa yang sedang diketik. `select` ikut dijaga karena
+       composer membangun ulang <select> dari nol setiap render: tanpa ini, memilih mesin tujuan
+       lalu membiarkan halaman diam sepuluh detik sudah cukup untuk memindahkan pilihan ke
+       baris pertama known_engines — dan baris pertama itu adalah antigravity. */
+    if (document.querySelector("#feed textarea:focus, #feed input:focus, #feed select:focus")) { return; }
     if (!ap) { return; }
-    if (ap.error) {
+    /* Satu pembacaan yang gagal tidak boleh menghapus halaman. Yang boleh menghapusnya hanyalah
+       ketiadaan data sama sekali — itu keadaan "belum pernah terbaca", bukan "tadi terbaca lalu
+       daemon sedang sibuk". Sebelum ini, satu catch membuat seluruh Command center berganti menjadi
+       satu kalimat dan data baik sebelumnya ikut dibuang, jadi tidak ada yang tersisa untuk
+       ditampilkan sampai poll berikutnya kebetulan berhasil. */
+    var hasData = !!(ap.workspace || ap.autopilot);
+    var errText = apError || ap.error;
+    if (errText && !hasData) {
       var f0 = document.getElementById("feed");
       f0.textContent = "";
-      f0.appendChild(el("p", "empty", ap.error));
+      f0.appendChild(el("p", "empty", errText));
       return;
     }
     var feed = document.getElementById("feed");
     feed.textContent = "";
+    if (errText && hasData) {
+      var stale = el("p", "note");
+      stale.style.color = "var(--accent-amber)";
+      stale.textContent = errText;
+      feed.appendChild(stale);
+    }
     var grid = el("div", "dash");
     grid.id = "dash";
     feed.appendChild(grid);
@@ -1857,7 +1934,8 @@
 
   Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (chip) {
     chip.addEventListener("click", function () {
-      document.querySelector(".chip.on").classList.remove("on");
+      var onChip = document.querySelector(".chip.on");
+      if (onChip) { onChip.classList.remove("on"); }
       chip.classList.add("on");
       filter = chip.dataset.f;
       render();
@@ -1865,7 +1943,13 @@
   });
   Array.prototype.forEach.call(document.querySelectorAll(".nav[data-view]"), function (item) {
     item.addEventListener("click", function () {
-      document.querySelector(".nav.on").classList.remove("on");
+      /* `if (on)` bukan hiasan. querySelector mengembalikan null kalau tidak ada satu pun .nav.on,
+         dan null.classList melempar TypeError di DALAM handler klik — view tidak pernah berubah,
+         tidak ada error yang muncul, dan tombol navigasi terlihat mati. Itu gejala "menu hilang"
+         yang dilaporkan operator, dan satu-satunya cara melihatnya adalah membuat halaman pernah
+         berada di keadaan tanpa .on — yang terjadi sendiri setelah goto() gagal mencari link. */
+      var on = document.querySelector(".nav.on");
+      if (on) { on.classList.remove("on"); }
       item.classList.add("on");
       view = item.dataset.view;
       /* Hash ditulis kembali. Sebelum ini halaman hanya MEMBACA hash sekali saat buka, jadi

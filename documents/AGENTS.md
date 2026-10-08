@@ -199,10 +199,13 @@ False status reports harm system reliability because subsequent engines build up
 - Reload interface: `refresh_workstation_ui`.
 - Restart daemon (safe, tmux preserves tabs): `restart_workstation_daemon(reason="...")` — `reason` is required and logged.
 
-**Autopilot (`ROADMAP` F10.8, modes revised 2026-10-08).** The cockpit carries one switch with two
-positions. **SEMI** is automatic with a human at the desk; **FULL AUTO (ON)** entrusts the machine to the
-engines for a bounded run. There is no OFF position: stopping is a verb (`berhenti` / `off` / `disarm` /
-stop the timer), not a mode. The rules below are load-bearing:
+**Autopilot (`ROADMAP` F10.8, modes revised 2026-10-08, revised again 2026-10-09).** The cockpit carries
+one switch with three positions. **SEMI** is automatic with a human at the desk; **OFF** is a stored
+state in which nothing moves; **FULL AUTO (ON)** entrusts the machine to the engines for a bounded run.
+Stopping is now both a verb and a state: the verbs (`berhenti` / `off` / `stop` / `mati` / `disarm` /
+stop the timer) write or enforce that state, and the Dashboard shows the state that is actually stored
+in `autopilot_state.mode` — not a leftover from whatever mode was last chosen. The rules below are
+load-bearing:
 
 - **Turning it off must not need the AI's cooperation.** Every route below was proven from a headless
   context before it was named here: the Dashboard's **berhenti** button, `ai-station autopilot off` from
@@ -214,16 +217,30 @@ stop the timer), not a mode. The rules below are load-bearing:
   wherever `/dev/tty` cannot be opened, re-measured on 2026-10-08 as `False` from this assistant's own
   shell tool even after the operator redirected the CLI's stdin, so no unattended process can widen its
   own reach.
-- **Two answers to "who owns the machine": SEMI and ON.** OFF was removed as a *mode* on 2026-10-08 by
-  operator order ("OFF dibuang saja, hanya SEMI dan FULL AUTO") because he only ever used two of the
-  three positions. The brake did not go with it: `off`/`stop` are now *words that lower the hand and close
-  the window* (`STOP_WORDS`), and they write no third value into `mode`. That keeps one word for one state
-  (§12) while leaving four independent ways to stop. The two modes differ by *basket*, not by strength of
-  hand. **SEMI** = automatic with a human at the desk, and the only work it may take is a command the
-  operator typed himself into SQL (`origin='operator'`); roadmap items are refused by name, in the queue
-  filter *and* inside `claim()`. **ON** = the computer is given to the engines and anything available may
-  be taken. The `level` ladder is shared by both and has no SEMI variant — raising a hand is still a
-  TTY-only act.
+- **Three answers to "who owns the machine": SEMI, OFF and ON.** OFF was removed as a *mode* on
+  2026-10-08 by operator order ("OFF dibuang saja, hanya SEMI dan FULL AUTO") because he only ever used
+  two of the three positions; the brake survived as a word that lowered the hand and closed the window
+  without writing a third value into `mode`. That revision is **reversed on 2026-10-09 by the same
+  operator**, for a measured reason rather than a change of taste: because the brake left `mode` alone,
+  a machine that had been stopped went on reporting `SEMI`, the Dashboard printed `tercatat: SEMI` over
+  a loop that was already dead, an operator who had pressed **berhenti** could not distinguish his own
+  stop from a run that never began, and his next command was refused by name (`WINDOW_CLOSED`) under a
+  label that claimed the machine was working. One word for one state (§12) means the stopped state must
+  have its own word, so `work_order.MODES = ("SEMI", "OFF", "ON")` and the brake writes `mode='OFF'`.
+  `off` / `stop` / `berhenti` / `mati` are aliases that write that same state — not a fourth thing — and
+  they still need no TTY and no AI cooperation. The two *working* modes still differ by basket, not by
+  strength of hand. **SEMI** = automatic with a human at the desk, and the only work it may take is a
+  command the operator typed himself into SQL (`origin='operator'`); roadmap items are refused by name,
+  in the queue filter *and* inside `claim()`. **ON** = the computer is given to the engines and anything
+  available may be taken. **OFF** = nothing is claimed and nothing is typed: `claim()` refuses it while
+  reading the stored mode *before* any caller's `mode=` argument may override it, and the delivery paths
+  answer `MODE_OFF` instead of pretending the row vanished. OFF is not a failure, so it does not get its
+  own alarm — an operator's command that does not land is already bannered as `QUEUED_NOT_DELIVERED`.
+  One exception is deliberate and tested: **a human answer to a Human Decide item is still delivered
+  while the machine is OFF**, because typing the operator's own answer is not the machine taking
+  initiative — the brake protects a sleeping person from the engines, never from himself. The `level`
+  ladder is shared by all three modes and has no per-mode variant — raising a hand is still a TTY-only
+  act.
 - **A boot leaves the machine still.** `mode` defaults to SEMI and `level` to `observe`, and
   `irsofka-autopilot.timer` is *started*, never `enable`d — so a reboot cannot resume a run nobody
   approved, which is the operator's own boundary ("SEMI tidak boleh auto start saat boot, saya tidak
@@ -234,10 +251,18 @@ stop the timer), not a mode. The rules below are load-bearing:
   the *machine* starts (a timer picking up a queue, a `CONTINUE` typed into someone's pane), while a
   command that just arrived in the ledger is already a human intention. Operator's words on 2026-10-08:
   *"kalau saya mode semi, saya tidak perlu arm dispatch — saat saya kirim command, AI harus jawab."*
-  The brake is the window, not the hand: `berhenti`/`off` closes it, and while it is closed even an
-  operator command is refused by name (`WINDOW_CLOSED`) and stays PENDING. `disarm` still lowers the
-  hand — the machine stops initiating, the operator's commands still land. An API that answered "sent"
-  when nothing was typed is how a queue stops being believed.
+  The brake is the stored state and the window, never the hand alone: `berhenti`/`off` writes
+  `mode='OFF'` and closes the window, and while either holds, an operator command is refused **by name**
+  (`MODE_OFF`, `WINDOW_CLOSED`) and stays PENDING. `disarm` still lowers the hand — the machine stops
+  initiating, the operator's commands still land. A refusal must be readable where the refusal happened
+  to be recorded: `drainer.refuse()` is the single place that writes the event, the cooldown and
+  `quest_tasks.escalation_reason` together. That is a rule because of a measured failure, not taste: on
+  2026-10-08 seven operator commands aimed at Qoder were refused at the pane gate and left
+  `escalation_reason = NULL`, because that column had exactly one writer — `finish()` — and no refusal
+  path calls it. A command that had been refused and a command nobody had ever looked at were therefore
+  the same row to every reader, including the person who typed it and could not see why his own message
+  had not arrived. An API that answered "sent" when nothing was typed is how a queue stops being
+  believed; a queue that answers "queued" and records no reason is how it stops being believed twice.
 - **The operator is told when it matters.** `tools/notify.py` is the single owner of the desktop
   banner, and it fires on three things only: work that actually reached a CLI, a question that needs a
   human, and an error or refusal that stops the loop. A tick that merely observes stays in the night
@@ -249,6 +274,22 @@ stop the timer), not a mode. The rules below are load-bearing:
 - SEMI's trigger is the engine's own turn boundary (`hooks/semi_wake.py`, a `Stop` hook): it may block a
   stop **only as the consequence of having claimed a real PENDING row**, so an empty queue injects
   nothing and the queue itself is the loop guard. Silence is the failure state this exists to remove.
+  A guard that fires on a turn boundary must also be able to stop, and on 2026-10-09 three brakes were
+  found missing; all three are now required:
+  1. **Re-entry.** `stop_hook_active` was read into log rows and never branched on, so the hook had no
+     brake on its own re-entry. It now returns without blocking when that flag is set, and it returns
+     *before* reading the queue or claiming anything — so a held stop cannot even write a cooldown.
+  2. **Backoff.** Every refusal path of the hook (prompt preparation failed, `claim()` refused, inject
+     budget spent, stdout failed, row belongs to another project) must set the cooldown. A hook that
+     returns without one re-asks at every single stop, and one permanently-refused row at the head of
+     the queue froze every command behind it with zero backoff.
+  3. **A cap that is countable.** `MAX_INJECT` bounds how many times one row may be injected, in its own
+     column, separate from `resume_count`, because `ready_items` re-offers a `WORKING` row once its lease
+     expires and `claim()` lets the same holder win it again: a row that never completes was re-injected
+     forever, with no number anywhere reporting it.
+  Hook refusals leave the row `PENDING`, so they contribute nothing to `NIGHT_MAX_FAILURES`, which counts
+  `FAILED`/`PARKED` only. The cap and the cooldown therefore *are* the breaker for this path, and neither
+  may be dropped with the argument that the night breaker already exists.
 - **ON grants panes and headless APIs; it does not grant `ydotool`.** Moving the real mouse and typing
   real keys steals the desktop of a sleeping person, and a misclick into whatever window is frontmost at
   03:00 is the one failure the ledger cannot undo — no `action_log` row restores a file deleted inside an

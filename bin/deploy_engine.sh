@@ -193,6 +193,24 @@ if [ -f "$HOME/.ai-station/bin/check_dash_order.sh" ]; then
   fi
 fi
 
+# Dua guard permukaan yang menutup cacat nyata, bukan preferensi tampilan. Yang pertama: composer
+# membangun ulang <select> mesin tujuan setiap poll 10 detik, dan pilihan yang tidak disimpan selalu
+# jatuh ke baris pertama registri — yang bernama antigravity. Operator memilih qoder, menunggu, dan
+# barisnya tersimpan untuk mesin lain. Yang kedua: panel mode Autopilot harus cerminan
+# `work_order.MODES`, karena sejak OFF menjadi state yang disimpan, halaman yang menyimpan salinan
+# kosakata sendiri akan melaporkan mesin berhenti sebagai mode kerja. Keduanya dipanggil sebagai
+# fungsi render sungguhan di atas DOM tiruan, dan keduanya diuji dua arah.
+for _guard in check_compose_target check_autopilot_modes check_dashboard_resilience; do
+  if [ -f "$HOME/.ai-station/bin/$_guard.sh" ]; then
+    echo "=== $_guard ==="
+    _g_out="$(bash "$HOME/.ai-station/bin/$_guard.sh" 2>&1)"; _g_rc=$?
+    printf '%s\n' "$_g_out" | sed 's/^/  /'
+    if [ "$_g_rc" -ne 0 ]; then
+      echo "  ✗ $_guard gagal"; fail=1
+    fi
+  fi
+done
+
 if [ -f "$HOME/.ai-station/bin/arch_map.sh" ]; then
   echo
   echo "=== peta struktur ==="

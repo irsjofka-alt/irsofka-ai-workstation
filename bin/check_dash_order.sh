@@ -41,9 +41,15 @@ const grid = el("div", "dash"), feed = { textContent: "", appendChild: (x) => x 
 const document = { getElementById: (id) => (id === "feed" ? feed : null), querySelector: () => null };
 const ap = { autopilot: { mode: "SEMI" }, night: { ok: true }, drain: { level: "observe" },
              workspace: { operator_pending: 0 } };
+/* `apError` adalah var cakupan modul di halaman, dan renderDashboard membacanya untuk memutuskan
+   apakah satu pembacaan yang gagal boleh menghapus halaman atau tidak. Harness ini menyuntik fungsi
+   dengan daftar nama tetap, jadi nama baru di halaman HARUS ikut didaftarkan di ctx di bawah — dan
+   itu bukan formalitas: kehilangan satu nama membuat guard melempar ReferenceError, dan itulah cara
+   guard ini menangkap bahwa halaman dan pengujiannya sudah bergerak terpisah. */
+const apError = null;
 const card = (n) => () => ({ __card: n, appendChild(){} });
 const stub = (n) => (host) => { if (host && host.kids) host.kids.push(n); };
-const ctx = { document, el, feed, grid, ap,
+const ctx = { document, el, feed, grid, ap, apError,
   projectCard: stub("projectCard"), guidesCard: stub("guidesCard"),
   composeCard: stub("composeCard"), queueCard: stub("queueCard"),
   decisionsCards: stub("decisionsCards"), switchCard: stub("switchCard"),

@@ -238,6 +238,23 @@ def main() -> int:
     # satu baris. Boot tetap diam: timer tidak pernah di-enable, dan jalur timer tetap butuh
     # `dispatch`. Yang berubah malam ini hanya bahwa perintah orang tidak lagi menunggu timer.
 
+    # REM MASUK-KEMBALI. `stop_hook_active` adalah cara CLI memberitahu bahwa peristiwa Stop ini
+    # terjadi SEDANG sebuah stop hook masih berjalan — yaitu kita sendiri. Field ini selama ini
+    # hanya dicatat sebagai kolom log dan tidak pernah dijadikan keputusan, sehingga rangkaiannya
+    # tidak punya pengereman: setiap blokir memicu Stop baru, yang memicu blokir baru. Yang diminta
+    # operator persis ini ("jangan melakukan yang saya tidak bisa cancel"). Yang dilakukan di sini
+    # hanya membiarkan penghentian itu selesai; barisnya tetap PENDING dan diambil pada batas
+    # giliran berikutnya yang benar-benar bersih.
+    # Ini rem pertama, bukan satunya: audit mengukur tiga Suntikan berantai 14 dtk/49 dtk terpisah
+    # justru melaporkan field ini `false`, jadi batas injeksi per baris (`MAX_INJECT`) dan cooldown
+    # pada setiap penolakan di bawah yang menutup sisanya.
+    if data.get("stop_hook_active"):
+        log("SEMI_REENTRY_HELD", engine=SESSION_ENGINE,
+            reason="stop hook sudah aktif dalam rantai ini — penghentian dibiarkan selesai, "
+                   "tidak ada yang disuntik",
+            stop_hook_active=True)
+        return 0
+
     if not is_really_idle(data):
         # Yang diminta operator: "kalau melihat kamu Working, nunggu sampai selesai". Antigravity
         # mengirim fullyIdle=false ketika masih ada tugas latar — di sini jawabannya adalah diam,
@@ -297,14 +314,41 @@ def main() -> int:
     # dihapus, dan memperbaiki salah satu cabangnya saja tidak menghapus akarnya.
     prompt, nguides = prepare_prompt(item, cwd)
     if prompt is None:
+        # Tanpa jeda di sini, satu baris yang gagal karena CACAT KODE (misalnya template yang tidak
+        # bisa di-format) dicoba lagi pada setiap batas giliran, selamanya — dan ia berdiri di kepala
+        # antrean, jadi tidak ada baris lain yang pernah mendapat kesempatan. Zero backoff adalah
+        # loop yang tidak bisa dibatalkan dari kursi operator, dan itu permintaan eksplisitnya.
+        import drainer
+        drainer.cooldown(conn, engine, int(item["id"]), drainer.CLAIM_COOLDOWN)
+        wo.note_refusal(conn, engine, int(item["id"]),
+                        "SEMI_PREPARE_FAILED · lihat logs/semi_wake.jsonl untuk tipe errornya")
         return 0
 
     ok, msg = wo.claim(conn, engine, int(item["id"]), SESSION_ENGINE, mode="SEMI")
     if not ok:
         # claim() sudah memuat pemutus malam dan aturan tree kotor, jadi penolakan di sini adalah
-        # keputusan yang tercatat, bukan kegagalan jalur ini.
+        # keputusan yang tercatat, bukan kegagalan jalur ini. Tapi ia tetap butuh jeda: tanpa
+        # cooldown, satu baris yang ditolak ENGINE_BUSY dicoba lagi pada Stop berikutnya, lalu
+        # berikutnya lagi, sementara perintah di belakangnya tidak pernahgilir.
+        import drainer
+        drainer.cooldown(conn, engine, int(item["id"]), drainer.CLAIM_COOLDOWN)
+        wo.note_refusal(conn, engine, int(item["id"]), f"CLAIM_REFUSED · {msg}"[:500])
         log("SEMI_CLAIM_REFUSED", item=int(item["id"]), reason=msg, engine=SESSION_ENGINE,
             stop_hook_active=bool(data.get("stop_hook_active")))
+        return 0
+
+    # Batas injeksi per baris. Klaim sudah terjadi, jadi kalau batasnya habis klaimnya dilepas
+    # lagi: menghitung lalu melepas lebih aman daripada menyuntik lalu menghitung, karena yang
+    # terakhir meninggalkan satu ketikan tambahan setiap putaran pada mesin yang jelas-jelas tidak
+    # menyelesaikan baris ini.
+    cap_ok, cap_msg = wo.nudge_inject(conn, engine, int(item["id"]))
+    if not cap_ok:
+        wo.release_claim(conn, engine, int(item["id"]), SESSION_ENGINE)
+        import drainer
+        drainer.cooldown(conn, engine, int(item["id"]), drainer.CLAIM_COOLDOWN)
+        wo.note_refusal(conn, engine, int(item["id"]), f"INJECT_CAPPED · {cap_msg}"[:500])
+        log("SEMI_INJECT_CAPPED", item=int(item["id"]), reason=cap_msg, engine=SESSION_ENGINE,
+            note="klaim dilepas, baris kembali PENDING dan diberi jeda — tidak disuntik lagi")
         return 0
 
     # Satu-satunya hal yang tersisa setelah klaim adalah menulis satu baris ke stdout. Kalau itu
@@ -315,6 +359,8 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         wo.finish(conn, engine, int(item["id"]), "PENDING",
                   reason=f"stdout gagal: {type(exc).__name__}")
+        import drainer
+        drainer.cooldown(conn, engine, int(item["id"]), drainer.CLAIM_COOLDOWN)
         log("SEMI_EMIT_FAILED", item=int(item["id"]), engine=SESSION_ENGINE,
             reason=f"{type(exc).__name__}: {exc}", note="klaim dilepas, baris kembali PENDING")
         return 0
