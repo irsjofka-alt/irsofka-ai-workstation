@@ -464,13 +464,12 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
              item=int(item["id"]), target=target, why=msg)
         cooldown(conn, engine, int(item["id"]), CLAIM_COOLDOWN)
         return None
+    delivered = None
     try:
         reply = (sender or default_sender)(target, prompt)
-        # `tab_project` dan `pane_now` dicatat supaya suatu saat seseorang bisa menguji dugaan
-        # tentang penyebab pengiriman ditolak — tanpa itu, menyangkal sebuah klaim butuh menebak.
-        emit("WORK_DISPATCHED", item=int(item["id"]), target=target, mode=mode,
-             tab_project=str(where), pane_now=str(live) if live else None,
-             reply=str(reply)[:200])
+        delivered = {"item": int(item["id"]), "target": target, "mode": mode,
+                     "tab_project": str(where), "pane_now": str(live) if live else None,
+                     "reply": str(reply)[:200]}
     except Exception as exc:  # noqa: BLE001 — kegagalan kirim dicatat, tidak dikarang ulang
         # Klaim DILEPAS. Versi lama meninggalkan baris WORKING tanpa ada yang mengerjakan dan
         # tetap mengembalikan bentuk seperti sukses — dari luar terlihat terdistribusi, dan engine
@@ -481,6 +480,13 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
              why=f"{type(exc).__name__}: {exc}")
         return {"item": int(item["id"]), "target": target, "sent": False,
                 "why": f"{type(exc).__name__}: {exc}"}
+    # Pencatahan terjadi DI LUAR try, dan ini bukan kerapian. Pada titik ini `sender` sudah
+    # mengetik ke pane. Kalau baris log-nya melempar dan pengecualian itu jatuh ke except di
+    # atas, klaim akan dilepas padahal pekerjaannya sedang berjalan — ledger lalu mengatakan
+    # tidak ada yang mengerjakan sesuatu yang sedang dikerjakan, dan tick berikutnya boleh
+    # mengirim ulang perintah yang sama ke mesin yang sama. Satu kiriman yang hilang masih bisa
+    # diulang; satu ketikan ganda di tengah pekerjaan orang lain tidak bisa ditarik kembali.
+    emit("WORK_DISPATCHED", **delivered)
     return {"item": int(item["id"]), "target": target, "sent": True}
 
 

@@ -1963,7 +1963,13 @@ def push_gate(events_path=None):
     # yang tidak bisa lagi diubah lebih buruk daripada tidak punya pagar: orang belajar melewati
     # yang merah. Yang dilaporkan adalah keadaan yang masih bisa diperbaiki, yaitu antrean yang belum
     # berangkat; sisanya dicatat sebagai angka, bukan sebagai vonis.
-    return {"ok": not reasons, "readable": True, "unpushed": len(unpushed),
+    # `ok` dinamai ulang menjadi dua kata yang tidak bisa tertukar, dan itu bukan kosmetik: ronde
+    # kesembilan membaca `ok: True` pada keadaan "semua commit DITAHAN" sebagai "semua commit boleh
+    # didorong". Satu nama untuk dua keadaan berbeda adalah dua laporan yang boleh berbeda (§12),
+    # dan yang salah baca di sini adalah pagar yang menahan kode keluar dari mesin orang lain.
+    return {"declared": not reasons, "ok": not reasons and not undelivered and bool(cleared),
+            "pushable": [x for x in unpushed if x[:12] in cleared][:5],
+            "unpushed": len(unpushed),
             "cleared": len(cleared), "held": len(held),
             "undelivered": undelivered[:5],
             "shipped_without": len(shipped_without),
@@ -2839,8 +2845,12 @@ def selftest():
               and len(g_empty["undelivered"]) >= 1, str(g_empty["why"])[:120])
         held_rows = record_push_held(_un, "no-verdict", events_path=_e3)
         g_held = push_gate(events_path=_e3)
-        check("satu catatan `ditahan dengan alasan` menutup celah itu — keadaan dinyatakan, bukan "
-              "dibersihkan", g_held["ok"] is True and len(held_rows) == len(_un), str(g_held["why"]))
+        # Dua kata yang berbeda, dan tes ini yang menegakkan perbedaannya: dinyatakan ≠ boleh
+        # dorong. Ronde kesembilan membaca yang pertama sebagai yang kedua.
+        check("satu catatan `ditahan dengan alasan` menutup celah DITOLAK-TANPA-SEBAB, tapi tidak "
+              "membuatnya boleh didorong",
+              g_held["declared"] is True and g_held["ok"] is False
+              and g_held["pushable"] == [] and len(held_rows) == len(_un), str(g_held)[:160])
         check("penahan tanpa alasan tidak dihitung sebagai pernyataan",
               record_push_held(["abc1234def"], "  ", events_path=_e3) == [], "alasan kosong")
         _e3.write_text("", encoding="utf-8")
@@ -2916,8 +2926,10 @@ def selftest():
         # apa pun yang lolos — bahkan soal aritmatika — memberi izin mendorong commit mana pun,
         # karena yang dicari hanyalah "ada baris SETUJU dari model ini dalam 3 jam".
         _evd = _d2 / "evidence.diff"
-        _evd.write_text("# commits under review: " + head + "\n\ndiff --git a/x b/x\n",
-                        encoding="utf-8")
+        # Satu sha per baris manifest — bentuk yang sama dengan yang ditulis generator bukti
+        # sungguhan. Substring bebas tidak cukup: sha yang muncul di tengah komentar diff bukan
+        # pernyataan cakupan.
+        _evd.write_text("# MANIFEST\n# " + head + "\n\ndiff --git a/x b/x\n", encoding="utf-8")
         conn.execute("INSERT INTO action_log (engine, ts, kind, tab, model, exit_code, summary, "
                      "raw_ref) VALUES ('station', datetime('now'), 'cross_verify', 'gemini-verify', "
                      "'gemini-3.8-flash-high', 0, 'verifikasi: COMPLETED verdict=SETUJU', ?)",
@@ -3240,6 +3252,33 @@ CLEARANCE_VERDICTS = ("SETUJU",)
 CLEARANCE_WINDOW_MINUTES = 180
 
 
+def _registry_roles(model_id):
+    """Entri registry untuk sebuah kunci mesin, atau {} kalau nama itu bukan pemeriksa terdaftar.
+
+    Docstring fungsi ini dulu MENYEBUT validasi registry padahal tidak melakukannya — dan itu
+    bentuk kegagalan terburuk dari sebuah komentar: pembaca berhenti curiga karena teksnya sudah
+    menjanjikan pagar yang ada di bawahnya.
+    """
+    try:
+        import json as _j
+        reg = _j.loads((REPO / "config" / "engines.json").read_text(encoding="utf-8")).get("engines", {})
+    except Exception:  # noqa: BLE001 — registry tidak terbaca = tidak ada yang terverifikasi
+        return {}
+    # Dicari sebagai KUNCI registry ATAU sebagai id model di dalam sebuah entri. Catatan verifikasi
+    # menyimpan id model (`gemini-3.8-flash-high`), bukan kunci registry (`gemini-verify`); membanding
+    # -kan yang satu dengan daftar yang lain akan menolak setiap izin yang sah, dan pagar yang selalu
+    # menolak terasa aman sampai seseorang butuh mendorong pekerjaannya.
+    roles = ("reviewer", "decider", "validator", "deep-reviewer")
+    for key, spec in reg.items():
+        if not isinstance(spec, dict):
+            continue
+        if str(spec.get("role") or "") not in roles:
+            continue
+        if key == model_id or str(spec.get("model") or "") == model_id:
+            return {**spec, "_key": key}
+    return {}
+
+
 def push_clearance(conn, engine, model_id, within_minutes=CLEARANCE_WINDOW_MINUTES):
     """Satu catatan verifikasi COMPLETED yang sungguh ada, milik model ini, masih segar.
 
@@ -3298,7 +3337,13 @@ def clearance_covers(clearance, shas):
         body = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return False, f"berkas bukti tidak terbaca: {exc}"
-    missing = [x for x in shas if x[:12] not in body]
+    # Dicocokkan dengan BARIS MANIFEST, bukan dengan keberadaan substring. Sebuah sha yang
+    # kebetulan muncul di tengah komentar diff, atau yang ditempel di mana pun dalam berkas, tidak
+    # boleh berarti "commit ini ikut diperiksa" — yang dimaksud adalah daftar yang sengaja dibuat
+    # untuk menyatakan cakupan, dan bentuknya harus bisa dibedakan dari teks biasa.
+    listed = set(re.findall(r"^#\s*([0-9a-f]{7,40})\s*$", body, re.M))
+    missing = [x for x in shas
+               if not any(l == x or l.startswith(x[:12]) or x.startswith(l[:12]) for l in listed)]
     if missing:
         return False, (f"berkas bukti tidak menyebut {len(missing)} sha yang akan berangkat "
                        f"(contoh {missing[0][:12]}) — vonis ini bukan untuk commit ini")
@@ -3331,6 +3376,11 @@ def record_push_verified(conn, engine, model_id: str, shas: list[str], events_pa
     pertama lolos justru karena engine menulis sendiri kata "push" dan "verifier" di prosanya.
     """
     import subprocess
+    reg = _registry_roles(model_id)
+    if not reg:
+        return False, (f"{model_id!r} tidak terdaftar sebagai pemeriksa di config/engines.json — "
+                       "izin hanya bisa datang dari mesin yang memang dipasang sebagai verifier/"
+                       "reviewer/decider, bukan dari nama yang cocok"), []
     clearance = push_clearance(conn, engine, model_id)
     if not clearance:
         return False, (f"tidak ada catatan verifikasi COMPLETED bervonis "
