@@ -794,19 +794,26 @@ that skips the order cannot claim.
      `observe`. The Rust route stopped carrying its own copy of the word list, which is the copy that
      would have gone on rejecting `off` for weeks after the machine stopped knowing it; it validates shape
      and forwards, and a refusal now exits non-zero so no caller can read a rejected write as success.
-  Measured acceptance: `work_order selftest 162/162`, `selftest --live 34/34` (PostgreSQL), `drainer
-  selftest 134/134`, `notify selftest 20/20`, and a 30-round tick soak against the live ledger with
-  injected hands — 0 rounds silent, 0 exceptions, 0 keystrokes.
-- ⬜ **F10.9 Push gate — the answer to decision 6 has to stop being a sentence.** The operator allowed an
-  unattended run to commit and push *on condition* that a verifier clears the work first. That condition
-  currently lives only in §6 prose, which means it binds exactly as far as an engine remembers it — and
-  §12 forbids a rule with two definitions while the ledger has none. What is missing is a row: a push
-  claims nothing until a `decisions`-shaped verdict exists for the commit it is about to publish, written
-  by the resolver ladder with its own `model_id`, `state='COMPLETED'` and the diff it read. A run with no
-  verdict commits locally and lists the pending push in the morning digest; it does not ask the operator,
-  and it does not push. *Acceptance:* with the toggle ON, one commit reaches `origin` carrying a verifier
-  row naming the model that cleared it, and one commit is deliberately made unverifiable (meter hidden) and
-  is still local at dawn — both visible in `action_log`, neither produced by a human hand.
+  Measured acceptance: `work_order selftest 178/178`, `selftest --live 34/34` (PostgreSQL), `drainer
+  selftest 138/138`, `notify selftest 24/24`, `soak_watch selftest 10/10`, `arch_map --check` clean, and a
+  30-round tick soak against the live ledger with injected hands — 0 rounds silent, 0 exceptions, 0
+  keystrokes. Live proof of the delivery path: item 143 queued to SQL, refused by the dirty-tree brake,
+  then `drainer wake --item 143` handed it to the Antigravity pane with `level` still `observe`; it
+  answered, ran five commands and closed the item.
+- 🔶 **F10.9 Push gate — the answer to decision 6 has to stop being a sentence.** The operator allowed an
+  unattended run to commit and push *on condition* that a verifier clears the work first. The mechanism now
+  exists and is bound per commit: `work_order push-gate` refuses unless every unpushed commit is
+  *declared* — cleared by a `push_verified` event naming its sha with a passing verdict, or held by a
+  `push_held` event with a reason. `record_push_verified` no longer takes a verdict as an argument; it
+  reads one from the `cross_verify` rows in `action_log`, so an engine cannot write its own clearance.
+  `record_push_held` supplies the other half, which had no emitter at all.
+  Two defects were found by independent auditors and closed: the gate was two global `grep -q` over the
+  event file (permanently satisfied once both kinds existed) and it never read the *value* of `verdict`.
+  Historical commits are reported as a count, not as failures — a permanently red gate is a gate people
+  walk past.
+  *Acceptance still owed:* one commit reaching `origin` with a verifier row naming the model that cleared
+  it, and one commit deliberately unverifiable and still local at dawn, both visible in the event log and
+  neither produced by a human hand.
 
 ## Known Boundaries & Constraints
 
