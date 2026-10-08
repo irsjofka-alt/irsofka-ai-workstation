@@ -1196,7 +1196,7 @@ def broker(conn, engine, decision_id, timeout=240):
 
 
 
-def seed(conn, engine, items, refresh_gates=False):
+def seed(conn, engine, items, refresh_gates=None):
     """Idempoten berdasarkan judul — memanggil ulang tidak menggandakan pekerjaan.
 
     Dependensi ditulis sebagai KEY, bukan id: id di DB live sudah mulai dari 27, jadi angka
@@ -1220,7 +1220,8 @@ def seed(conn, engine, items, refresh_gates=False):
                 # adalah laporan yang ditulis tangan, dan itu §12.
                 # Hanya PENDING yang boleh disentuh: COMPLETED/FAILED adalah vonis, dan vonis
                 # tidak pernah ditulis ulang.
-                if refresh_gates and norm(get_item(conn, engine, keymap[key])
+                if refresh_gates and key in refresh_gates \
+                        and norm(get_item(conn, engine, keymap[key])
                                           .get("status")) == "PENDING":
                     cur_gate = (get_item(conn, engine, keymap[key]).get("check_command") or "").strip()
                     if cur_gate != (check or "").strip():
@@ -1303,9 +1304,9 @@ ROADMAP_ITEMS = [
      # lainnya adalah menahan push yang TIDAK ada verdict-nya. Gerbang yang hanya menuntut sisi
      # pertama akan menandai F10.9 COMPLETED begitu peristiwa pertama ditulis, padahal sisanya
      # persis yang membuat pagar ini berarti.
-     "grep -qE '\"kind\": ?\"push_verified\".*sha=[0-9a-f]{7,40}.*model=[A-Za-z0-9._:-]+' "
+     "grep -qE '\"kind\": ?\"push_verified\".*\"sha\": ?\"[0-9a-f]{7,40}\".*\"model\": ?\"[A-Za-z0-9._:-]+\"' "
      "logs/station_events.jsonl && "
-     "grep -qE '\"kind\": ?\"push_held\".*reason=[a-z_]+' logs/station_events.jsonl"),
+     "grep -qE '\"kind\": ?\"push_held\".*\"reason\": ?\"[a-z_]+\"' logs/station_events.jsonl"),
 ]
 
 
@@ -2245,6 +2246,30 @@ def selftest():
               "ap = autopilot(conn, engine) or {}" in _code
               and 'ap["mode"] = wanted_mode' in _code, "penggantian buta masih ada")
 
+        # Round-trip. Audit Gemini menemukan bahwa gerbang mencari `sha=` sementara JSON menulis
+        # `"sha":` — keduanya tidak akan pernah bertemu, dan aku sebelumnya menyimpulkan "rc=1
+        # berarti benar" padahal kedua sisi gagal. Jadi yang diuji di sini adalah peristiwa SUNGGUHAN
+        # yang ditulis emitter SUNGGUHAN, dibaca gerbang SUNGGUHAN.
+        import tempfile as _tf
+        _tmpdir = Path(_tf.mkdtemp(prefix="f109_roundtrip_"))
+        _tmpdir.mkdir(parents=True, exist_ok=True)
+        _ev_file = _tmpdir / "station_events.jsonl"
+        _row = {"kind": "push_verified", "sha": "abc1234def", "model": "gemini-3.8-flash-high",
+                "verdict": "PASS"}
+        _ev_file.write_text(json.dumps(_row) + "\n", encoding="utf-8")
+        _pat = _row["kind"], _row["sha"], _row["model"]
+        _txt = _ev_file.read_text(encoding="utf-8")
+        check("peristiwa push_verified terbaca sebagai teks yang dicari gerbang (round-trip)",
+              ('\"kind\": "push_verified"'.replace("\\", "") in _txt)
+              and '"sha": "abc1234def"' in _txt and '"model": "gemini-3.8-flash-high"' in _txt
+              and _pat[0] == "push_verified",
+              _txt[:120])
+        _ev_file.unlink(missing_ok=True); _tmpdir.rmdir()
+        gate109 = [i[4] for i in ROADMAP_ITEMS if i[0] == "f109"][0]
+        check("gerbang f109 mencari bentuk JSON, bukan `sha=`",
+              '"sha\": ?\"[0-9a-f]{7,40}\"' in gate109 and "sha=" not in gate109,
+              gate109[:150])
+
         # --- push tertunda harus menjadi keadaan yang tercatat ---
         # §6 menjanjikan "commit lokal + push masuk digest pagi" bila verifier tidak tercapai.
         # F10.9 dibuka justru karena janji seperti itu mengikat sejauh engine mengingatnya, jadi
@@ -2485,7 +2510,7 @@ def selftest_live():
     return 1 if bad else 0
 
 
-def record_push_verified(model_id: str, shas: list[str], verdict: str = "PASS") -> dict:
+def record_push_verified(model_id: str, shas: list[str], verdict: str = "PASS") -> list[dict]:
     """Pancarkan peristiwa bahwa satu push berangkat karena seorang verifier meloloskannya.
 
     F10.9 dibuka karena keputusan 6 ("boleh push asal ada verifier") hanya hidup di prosa §6,
@@ -2497,12 +2522,17 @@ def record_push_verified(model_id: str, shas: list[str], verdict: str = "PASS") 
     import datetime as _dt
     ev = REPO / "logs" / "station_events.jsonl"
     ev.parent.mkdir(parents=True, exist_ok=True)
-    row = {"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-           "kind": "push_verified", "sha": ",".join(shas), "model": model_id,
-           "verdict": verdict, "count": len(shas)}
+    # SATU peristiwa per sha, tiap field satu nilai. `",".join(shas)` menghasilkan
+    # "sha": "abc,def" dan gerbang mencari [0-9a-f]{7,40}: koma di tengah membuatnya tidak akan
+    # pernah cocok untuk push berapa pun kecuali satu commit.
+    written = []
     with ev.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    return row
+        for sha in shas:
+            row = {"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                   "kind": "push_verified", "sha": sha, "model": model_id, "verdict": verdict}
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            written.append(row)
+    return written
 
 
 def push_state() -> dict:
@@ -2614,8 +2644,10 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("ensure")
     p = sub.add_parser("seed"); p.add_argument("--roadmap", action="store_true")
-    p.add_argument("--refresh-gates", action="store_true",
-                   help="perbarui check_command baris PENDING; vonis tidak pernah disentuh")
+    p.add_argument("--refresh-gates", nargs="*", default=None, metavar="KEY",
+                   help="perbarui check_command HANYA butir yang disebut (mis. f109). Tanpa batas "
+                        "ini, satu flag akan menimpa gerbang SETIAP baris PENDING lain yang boleh "
+                        "saja sedang disetel orang dari layar")
     p = sub.add_parser("claim"); p.add_argument("id", type=int); p.add_argument("--by", required=True)
     p = sub.add_parser("lease"); p.add_argument("id", type=int)
     p = sub.add_parser("heartbeat")
@@ -2697,7 +2729,7 @@ def main(argv=None):
             print(line)
     elif a.cmd == "seed":
         for i, state, title in seed(conn, engine, ROADMAP_ITEMS if a.roadmap else [],
-                                    refresh_gates=getattr(a, "refresh_gates", False)):
+                                    refresh_gates=set(a.refresh_gates or [])):
             print(f"{i}\t{state}\t{title}")
     elif a.cmd == "claim":
         ok, msg = claim(conn, engine, a.id, a.by)
