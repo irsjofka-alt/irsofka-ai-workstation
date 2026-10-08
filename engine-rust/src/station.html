@@ -269,7 +269,9 @@
            word-break: break-word; white-space: pre-wrap; }
   .reply.bad { color: var(--rose); }
   .reply.good { color: var(--accent); }
-  /* Kolom 3: kartu keputusan. Ini satu-satunya tempat halaman ini meminta sesuatu dari manusia. */
+  /* Kartu keputusan: satu-satunya tempat halaman ini meminta sesuatu dari manusia.
+     Tidak ada nomor kolom di sini, dan itu disengaja — kolomnya dipindah pada 2026-10-08, dan
+     satu fakta posisi yang disimpan di dua tempat akan berhenti benar di salah satunya. */
   .card.decision { border-left: 2px solid var(--amber); }
   .card.span { grid-column: 1 / -1; }
   .card.qrow { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; }
@@ -1238,14 +1240,21 @@
     feed.appendChild(grid);
 
     var c1 = el("div", "dash-col"), c2 = el("div", "dash-col"), c3 = el("div", "dash-col");
-    switchCard(c1);
-    summaryCard(c1);
-    c1.appendChild(diagnosticFold());
-    projectCard(c2);
-    guidesCard(c2);
-    composeCard(c2);
-    queueCard(c2);
-    decisionsCards(c3);
+    /* Urutan kolom adalah urutan kerja, bukan urutan kode. Operator membalik ketiganya pada
+       2026-10-08: yang paling sering dipakai — proyek, pedoman, dan tempat menulis perintah —
+       sekarang berdiri paling kiri tempat mata mulai, antrean keputusan di tengah, dan Ringkasan
+       plus sakelar Autopilot pindah ke kanan karena "summary autopilot ini jarang di klik".
+       Yang tidak berubah adalah ISI tiap kolom: tidak ada kartu yang dipisah dari kelompoknya atau
+       diganti pembangunnya. Perintahnya adalah permutasi tiga kelompok, dan `bin/check_dash_order.sh`
+       menahan keadaan itu dengan menjalankan fungsi ini, bukan dengan mencari string di halaman. */
+    projectCard(c1);
+    guidesCard(c1);
+    composeCard(c1);
+    queueCard(c1);
+    decisionsCards(c2);
+    switchCard(c3);
+    summaryCard(c3);
+    c3.appendChild(diagnosticFold());
     grid.appendChild(c1); grid.appendChild(c2); grid.appendChild(c3);
   }
 

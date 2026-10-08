@@ -180,6 +180,19 @@ for k,t in (d.get('tabs') or {}).items():
 
 # Peta struktur ikut segar setiap deploy: berkas baru muncul sendiri di
 # brain/memory/projects/ARCHITECTURE.md, tanpa ada yang perlu mengingatnya.
+# Urutan kolom Dashboard adalah permintaan operator, bukan preferensi kode. Ia diperiksa dengan
+# menjalankan fungsi render-nya, jadi memindah satu kartu tanpa sadar akan menghentikan deploy.
+# Tanpa pipe: `bash x.sh | sed` mengembalikan status sed, dan file ini tidak menyalakan pipefail —
+# guard yang begitu akan SELALU hijau, yang lebih buruk daripada tidak ada guard sama sekali.
+if [ -f "$HOME/.ai-station/bin/check_dash_order.sh" ]; then
+  echo "=== urutan Dashboard ==="
+  _dash_out="$(bash "$HOME/.ai-station/bin/check_dash_order.sh" 2>&1)"; _dash_rc=$?
+  printf '%s\n' "$_dash_out" | sed 's/^/  /'
+  if [ "$_dash_rc" -ne 0 ]; then
+    echo "  ✗ urutan kolom Dashboard menyimpang dari yang diminta"; fail=1
+  fi
+fi
+
 if [ -f "$HOME/.ai-station/bin/arch_map.sh" ]; then
   echo
   echo "=== peta struktur ==="
