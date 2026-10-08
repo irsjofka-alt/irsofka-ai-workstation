@@ -287,8 +287,16 @@ def main() -> int:
             stop_hook_active=bool(data.get("stop_hook_active")))
         return 0
 
-    ready = wo.ready_items(conn, engine, respect_due=True, origin=wo.ORIGIN_OPERATOR,
-                           for_engine=SESSION_ENGINE)
+    # Batas `due_epoch` sengaja TIDAK ditaati mentah di sini. Yang dijalankan jalur ini adalah
+    # satu-satunya peristiwa yang membuktikan mesin sudah diam: batas giliran. Untuk alasan
+    # "sedang sibuk" (pane belum tenang, engine masih memegang satu perintah), bukti itu
+    # membatalkan jeda-nya — dan itulah yang operator minta: IDLE berarti terima perintah, supaya
+    # ia bisa berputar sendiri. Untuk alasan lain (direktori salah, tanpa target, injeksi habis,
+    # jendela ditutup) jeda tetap berlaku, karena mengulangi kegagalan yang tidak berubah di setiap
+    # batas adalah loop tanpa rem.
+    ready = [r for r in wo.ready_items(conn, engine, respect_due=False,
+                                       origin=wo.ORIGIN_OPERATOR, for_engine=SESSION_ENGINE)
+             if wo.retry_now(r)]
     item = None
     skipped = []
     for r in ready:

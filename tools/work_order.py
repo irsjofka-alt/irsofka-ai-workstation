@@ -38,6 +38,10 @@ MAX_RESUME = 3               # item yang butuh 4 sentuhan bukan tertidur, tapi m
 # pernah di-complete (misal mesinnya tersangkut di antrean model) akan disuntik ulang setiap kali
 # lease 900 dtk-nya kedaluwarsa, selamanya, dan tidak ada satu pun angka yang melaporkan itu.
 MAX_INJECT = 3
+# Alasan penolakan yang boleh dibatalkan oleh bukti "mesin baru saja diam". Hanya keluarga
+# "sedang sibuk": semuanya akan lolos kalau pane sudah idle, jadi menahannya sampai jeda habis
+# hanya menambah latensi tanpa menambah keamanan.
+BUSY_RETRY_REASONS = ("PANE_NOT_QUIET", "ENGINE_BUSY")
 EVIDENCE_LIMIT = 900
 # Circuit breaker (temuan reviewer Gemini, 2026-10-08). Tanpa ini sebuah item yang gagal dengan
 # exit code cepat akan diklaim-lepas-gagal lagi tanpa henti, dan kuota mingguan habis dalam
@@ -724,6 +728,27 @@ def nudge(conn, engine, item_id):
     if after <= used:
         return False, f"kenaikan tidak terbaca kembali ({used} -> {after})"
     return True, f"resume {after}/{MAX_RESUME}"
+
+
+def retry_now(row, at=None):
+    """Bolehkah baris ini diambil SEKARANG, walaupun `due_epoch`-nya masih di masa depan?
+
+    Jeda ditulis oleh setiap penolakan, dan sejak perbaikan ini alasannya ikut tersimpan di
+    `escalation_reason`. Itu memungkinkan pembedaan yang benar, yang sebelumnya tidak bisa dibuat:
+    "pane sedang sibuk" adalah alasan yang TERBUKTI sudah tidak berlaku pada detik mesin mencapai
+    batas giliran — peristiwa Stop adalah buktinya. Menahan baris itu sampai jeda-nya habis berarti
+    membuat mesin menunggu lima menit untuk hal yang sudah ia ketahui sendiri, dan itulah yang
+    membuat qoder terasa tidak pernah menerima perintah padahal antigravity langsung.
+
+    Alasan lain TETAP menunggu jeda-nya: direktori salah, tanpa target, injeksi habis, jendela
+    ditutup. Kalau itu juga dibatalkan, satu baris yang rusak permanen dicoba lagi di setiap batas
+    selamanya — dan loop yang tidak bisa dihentikan adalah tepat yang operator larang.
+    """
+    due = int(row.get("due_epoch") or 0)
+    if due <= (at if at is not None else now()):
+        return True
+    reason = row.get("escalation_reason") or ""
+    return any(k in reason for k in BUSY_RETRY_REASONS)
 
 
 def nudge_inject(conn, engine, item_id):
@@ -2563,6 +2588,35 @@ def selftest():
         ok, msg = nudge_inject(conn, "SQLITE", 999999)
         check("injeksi ke item yang tidak ada ditolak, tidak dibuatkan angka",
               not ok and "tidak ada" in msg, msg)
+
+        # --- `retry_now`: IDLE harus berarti terima perintah, tanpa menghapus rem yang lain.
+        # Operator menamai sendiri sifat ini: yang penting adalah status IDLE otomatis menerima,
+        # supaya mesin bisa berputar sendiri. Jeda 300 dtk yang ditulis penolakan "pane sibuk"
+        # menahan baris itu sampai lima menit justru pada detik mesin terbukti sudah diam.
+        _t = 1_700_000_100
+        check("jeda yang sudah lewat selalu boleh diambil",
+              retry_now({"due_epoch": _t - 1, "escalation_reason": None}, at=_t) is True, "past due")
+        check("penolakan 'pane sibuk' dibatalkan oleh bukti mesin baru saja diam",
+              retry_now({"due_epoch": _t + 300,
+                         "escalation_reason": "PANE_NOT_QUIET · pane sedang menampilkan pekerjaan"},
+                        at=_t) is True, "busy reason must retry at a boundary")
+        check("penolakan 'engine masih memegang satu perintah' juga keluarga yang sama",
+              retry_now({"due_epoch": _t + 300, "escalation_reason": "CLAIM_REFUSED · ENGINE_BUSY: qoder"},
+                        at=_t) is True, "ENGINE_BUSY reason must retry at a boundary")
+        # Arah sebaliknya, dan ini yang membuat perubahan di atas bukan pintu belakang: alasan yang
+        # tidak akan berubah oleh sendirinya tetap menunggu jeda-nya.
+        check("direktori pane yang salah TETAP menunggu jeda, bukan dicoba di setiap batas",
+              retry_now({"due_epoch": _t + 300, "escalation_reason": "PANE_WRONG_DIR · tab proyek lain"},
+                        at=_t) is False, "wrong dir must keep waiting")
+        check("injeksi habis TETAP menunggu jeda — inilah rem anti-loop",
+              retry_now({"due_epoch": _t + 300, "escalation_reason": "INJECT_CAPPED · budget habis"},
+                        at=_t) is False, "capped must keep waiting")
+        check("jendela yang ditutup operator TETAP berarti tertutup di jalur ini",
+              retry_now({"due_epoch": _t + 300, "escalation_reason": "WINDOW_CLOSED"}, at=_t) is False,
+              "operator brake must not be bypassed")
+        check("baris tanpa alasan tersimpan tidak pernah diloloskan lebih awal",
+              retry_now({"due_epoch": _t + 300, "escalation_reason": None}, at=_t) is False,
+              "no reason recorded must keep waiting")
 
         d = decide(conn, "SQLITE", "A atau B?", ["A", "B"], weight="heavy")
         check("keputusan tercatat OPEN", d and d[0]["state"] == "OPEN")

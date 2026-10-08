@@ -363,6 +363,46 @@ def pane_is_busy(frame):
     return any(ch in frame for ch in SPINNER_CHARS) or "esc to cancel" in frame.lower()
 
 
+WORKING_WORDS = ("working", "running", "thinking", "generating")
+READY_WORDS = ("ready", "idle")
+
+
+def pane_state(tab):
+    """Status yang DINYATAKAN SENDIRI oleh CLI lewat judul pane tmux (OSC).
+
+    Qodercli menulis "✦ <topik> | Working" selama satu giliran berjalan dan "◇ … | Ready" di
+    prompt yang diam. Itu pernyataan mesin tentang dirinya sendiri, bukan dugaan dari bentuk glyph.
+    Bedanya konkret: menebak dari isi layar membuat satu baris chrome yang berdetak — jam berjalan,
+    persen konteks, glyph tool-call yang berganti — sudah cukup untuk menyebut pane yang SEDANG
+    DIAM sebagai sibuk, pada setiap pembacaan, selamanya. Itulah yang dialami qoder dan tidak
+    dialami antigravity, dan itulah sebabnya perintah operator mendarat di mesin yang satu dan
+    menggantung di mesin yang lain padahal keduanya melewati gerbang yang sama.
+
+    None berarti tidak ada yang dinyatakan — BUKAN berarti diam. Pemanggil wajib jatuh ke bukti
+    tidak langsung; UNKNOWN tidak pernah boleh diartikan kosong.
+    """
+    try:
+        res = subprocess.run(
+            ["tmux", "-L", os.environ.get("STATION_TMUX_SOCKET", "irsofka"),
+             "display", "-p", "-t", f"station-{tab}", "#{pane_title}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+        if res.returncode != 0:
+            return None
+        title = (res.stdout or "").strip().lower()
+    except Exception:  # noqa: BLE001 — tidak terbaca bukan berarti diam
+        return None
+    if not title:
+        return None
+    # Kata state dibaca dari EKOR judul ("✦ topik | working"). Mencocokkan di seluruh string akan
+    # salah setiap kali nama proyek di judul pane kebetulan memuat kata seperti "idle" atau "run".
+    tail = title.rsplit("|", 1)[-1].strip()
+    if any(w in tail for w in WORKING_WORDS):
+        return "working"
+    if any(w in tail for w in READY_WORDS):
+        return "ready"
+    return None
+
+
 def capture_pane(tab):
     """Baca layar pane lewat tmux capture-pane.
 

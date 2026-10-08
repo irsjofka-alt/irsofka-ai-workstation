@@ -315,14 +315,16 @@ def effective_gap(gap):
     return max(gap, MIN_PANE_GAP)
 
 
-def pane_is_quiet(target, capture=None, busy=None, gap=MIN_PANE_GAP, sleeper=None):
-    """Bukti bahwa pane target tidak sedang dipakai — dibaca dua kali dengan jeda NYATA.
+def pane_is_quiet(target, capture=None, busy=None, gap=MIN_PANE_GAP, sleeper=None, pane_state=None):
+    """Bukti bahwa pane target tidak sedang dipakai.
 
-    Standar yang sama yang menahan jalur resume, dipindahkan ke jalur dispatch karena temuan audit
-    peer 2026-10-08: `hand_new_work` hanya memeriksa SQL lalu mengetik, padahal SQL tidak tahu
-    bahwa seseorang sedang menulis di pane itu. Menyuntik teks ke tengah ketikan operator lalu
-    menekan Enter atas nama mesin adalah satu-satunya kegagalan di jalur ini yang tidak bisa
-    dibatalkan dengan mengembalikan baris database — yang hilang adalah apa yang sedang ia ketik.
+    Bukti pertama adalah yang paling murah dan paling benar: apa yang MESIN ITU SENDIRI nyatakan
+    lewat judul pane. Qodercli menulis Working selama satu giliran berjalan dan Ready di prompt yang
+    diam; kalau itu terbaca, tidak ada ruang untuk menebak. Yang di bawahnya — glyph spinner dan
+    perbandingan dua pembacaan — adalah bukti tidak langsung untuk mesin yang tidak menyatakan
+    apa pun (antigravity menulis "pop-os" sebagai judulnya), dan bukti tidak langsung itulah yang
+    membuat qoder tampak diperlakukan berbeda: chrome miliknya berdetak, jadi layar utuh tidak pernah
+    sama dua kali, jadi pane yang diam pun disebut sibuk.
 
     None dari pembacaan mana pun = UNKNOWN = jangan mengetik (invarian 5). Jeda tidak bisa
     dinolkan: `effective_gap` memaksa lantai, dan tes tidak tidur karena SLEEPER-nya yang disuntik
@@ -332,6 +334,12 @@ def pane_is_quiet(target, capture=None, busy=None, gap=MIN_PANE_GAP, sleeper=Non
     capture = capture or cv.capture_pane
     busy = busy or cv.pane_is_busy
     sleeper = sleeper or time.sleep
+    declared = (pane_state or cv.pane_state)(target)
+    if declared == "working":
+        return {"quiet": False, "why": "CLI menyatakan Working lewat judul pane — ia sedang "
+                                       "mengerjakan sesuatu, tidak ada yang boleh diketik"}
+    if declared == "ready":
+        return {"quiet": True, "why": "CLI menyatakan Ready lewat judul pane"}
     first = capture(target)
     if first is None:
         return {"quiet": False, "why": "pane tidak terbaca — UNKNOWN, bukan diam"}
@@ -816,6 +824,14 @@ def selftest():
     import sqlite3
     import drainer as _keep
     _orig_prompt = _keep.SEMI_PROMPT
+    # Pembaca state pane juga disambat, sama seperti capture/busy/sleeper. Tanpa ini selftest akan
+    # membaca tmux operator SUNGGUHAN: hasilnya bergantung pada apakah mesinnya sedang bekerja saat
+    # suite dijalankan, dan suite yang hijau-hitam mengikuti jam orang bukan bukti apa pun. None
+    # berarti "tidak ada yang dinyatakan", yaitu keadaan yang membuat jalur bukti tidak langsung
+    # tetap diuji.
+    import cross_verify as _cvx
+    _orig_pane_state = _cvx.pane_state
+    _cvx.pane_state = lambda _t: None
     results = []
 
     def check(name, cond, detail=""):
@@ -1760,6 +1776,40 @@ def selftest():
                       gap=0, sleeper=lambda sec: _waits.append(sec))
         check("dua pembacaan sungguhan dipisahkan jeda lantai walau pemanggil minta nol",
               _waits == [MIN_PANE_GAP], str(_waits))
+        check("selftest tidak membaca tmux operator: pembaca state pane benar-benar disuntik",
+              _cvx.pane_state is not _orig_pane_state, str(_cvx.pane_state))
+        # Status yang DINYATAKAN mesin mengalahkan dugaan dari glyph. Dua arah, dan keduanya wajib:
+        #
+        # (a) READY dengan layar yang tetap berubah. Inilah cacat yang membuat qoder diperlakukan
+        #     berbeda dari antigravity padahal gerbangnya sama: chrome qoder punya jam berjalan dan
+        #     glyph tool-call yang berganti, jadi perbandingan dua pembacaan atas LAYAR UTUH tidak
+        #     pernah sama, jadi pane yang sedang diam disebut sibuk — selamanya. Tanpa jalur ini,
+        #     perintah operator mendarat di antigravity dan menggantung di qoder.
+        # (b) WORKING dengan layar yang kebetulan identik dan tanpa glyph. Arah ini justru PENGETATAN:
+        #     sebelumnya kombinasi itu terbaca "diam", dan konsekuensinya adalah satu ketikan ke
+        #     tengah giliran orang — satu-satunya kegagalan di jalur ini yang tidak bisa ditarik
+        #     kembali dengan mengembalikan baris database.
+        _tick = {"n": 0}
+
+        def _ticking_screen(_t):
+            _tick["n"] += 1
+            return f"baris status: 25m{_tick['n']}s · tidak ada spinner"
+        ready_q = pane_is_quiet("qoder", capture=_ticking_screen, busy=lambda _s: False,
+                                gap=0, sleeper=lambda _x: None, pane_state=lambda _t: "ready")
+        check("CLI yang menyatakan Ready dibaca DIAM walaupun chrome-nya berdetak tiap pembacaan",
+              ready_q["quiet"] and "Ready" in ready_q["why"], str(ready_q))
+        working_q = pane_is_quiet("qoder", capture=lambda _t: "prompt siap",
+                                  busy=lambda _s: False, gap=0, sleeper=lambda _x: None,
+                                  pane_state=lambda _t: "working")
+        check("CLI yang menyatakan Working ditolak walau dua pembacaan identik dan tanpa glyph",
+              not working_q["quiet"] and "Working" in working_q["why"], str(working_q))
+        # None = tidak ada yang dinyatakan, BUKAN dinyatakan bebas. Jalur lama harus tetap jalan
+        # utuh untuk mesin seperti antigravity yang judul panenya hanya berisi nama distro.
+        unknown_q = pane_is_quiet("antigravity", capture=lambda _t: "prompt siap",
+                                  busy=lambda _s: False, gap=0, sleeper=lambda _x: None,
+                                  pane_state=lambda _t: None)
+        check("judul tanpa pernyataan state jatuh ke bukti tidak langsung, tidak dianggap Ready",
+              unknown_q["quiet"] and "Ready" not in unknown_q["why"], str(unknown_q))
         # Keduanya dulu cek teks. Yang pertama sudah digantikan cek perilaku WORK_DISPATCHED di
         # bawah (ia menuntut `pane_now` terisi padahal pengiriman tetap jalan); yang kedua diganti
         # uji langsung pada fungsi pembentuk path-nya.
@@ -1885,6 +1935,7 @@ def selftest():
         check("log malam ditulis sebagai JSONL yang dibaca baris per baris",
               path.exists() and json.loads(path.read_text().splitlines()[-1])["action"] == "SELFTEST")
     finally:
+        _cvx.pane_state = _orig_pane_state
         Path("/tmp/drainer_selftest.jsonl").unlink(missing_ok=True)
         Path("/tmp/drainer_canary_selftest").unlink(missing_ok=True)
         conn.close()
