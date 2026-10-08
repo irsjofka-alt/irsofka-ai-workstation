@@ -98,30 +98,28 @@ def log(action: str, **rest) -> None:
         NIGHT_LOG.parent.mkdir(parents=True, exist_ok=True)
         row = {"ts": __import__("time").strftime("%Y-%m-%dT%H:%M:%S%z"),
                "action": action, **rest}
+        # Satu peristiwa = satu baris. Versi pertama menulis barisnya, lalu menulis BARIS KEDUA
+        # dengan hasil banner, jadi jejak yang sama muncul dua kali dan pembaca log tidak bisa
+        # membedakan "hook menembak dua kali" dari "hook menulis hasil kirim". Hasil kirim sekarang
+        # dihitung lebih dulu dan menempel pada baris yang sama.
+        if action in BANNER_ACTIONS:
+            detail = " ".join(f"{k}={v}" for k, v in rest.items()
+                              if k in ("item", "title", "engine", "target", "why", "reason"))[:400]
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(TOOLS))
+                import notify
+                row["notify"] = notify.notify_event(action, detail,
+                                                    urgent=action != "SEMI_INJECTED")
+            except Exception as exc:  # noqa: BLE001 — banner yang gagal dilaporkan, tidak dikarang
+                row["notify"] = {"sent": False, "err": f"{type(exc).__name__}: {exc}"}
         with NIGHT_LOG.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
     except Exception:  # noqa: BLE001 — mencatat kegagalan tidak boleh ikut menggagalkan
         return
-    # Satu banner untuk tiap perintah yang benar-benar masuk ke CLI, dan untuk tiap kegagalan jalur
-    # ini. Yang lain (mesin belum selesai, tangan belum diangkat, baris proyek lain) tetap hanya di
-    # log: operator meminta notifikasi untuk AKSI dan ERROR, bukan untuk setiap detik yang dilewati
-    # mesin. Kegagalan banner tidak pernah boleh menggagalkan hook — hasilnya ditulis ke baris log
-    # yang sama, jadi jejaknya tetap ada kalau desktop sedang tidak bisa dihubungi.
-    if action in BANNER_ACTIONS:
-        detail = " ".join(f"{k}={v}" for k, v in rest.items()
-                          if k in ("item", "title", "engine", "target", "why", "reason"))[:400]
-        try:
-            import sys as _sys
-            _sys.path.insert(0, str(TOOLS))
-            import notify
-            row["notify"] = notify.notify_event(action, detail, urgent=action != "SEMI_INJECTED")
-        except Exception as exc:  # noqa: BLE001 — banner yang gagal dilaporkan, tidak dikarang
-            row["notify"] = {"sent": False, "err": f"{type(exc).__name__}: {exc}"}
-        try:
-            with NIGHT_LOG.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-        except Exception:
-            pass
+    # Catatan: keputusan banner sudah diambil di dalam blok tulis di atas. Yang lain (mesin belum
+    # selesai, tangan belum diangkat, baris proyek lain) tetap hanya di log tanpa banner — operator
+    # meminta notifikasi untuk AKSI dan ERROR, bukan untuk setiap detik yang dilewati mesin.
 
 
 def read_input() -> dict:

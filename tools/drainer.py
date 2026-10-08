@@ -526,8 +526,18 @@ def deliver_now(conn, engine, item_id, mode=None, sender=None, capture=None, bus
                 "why": f"jendela {wanted} lewat pada {window} — perintah tetap antre; "
                        "buka lagi dari Dashboard atau `autopilot semi`"}
     events = []
-    emit = log or (lambda action, **rest: events.append(
-        {"ts": wo.now(), "action": action, "level": lvl.get("level"), "mode": wanted, **rest}))
+
+    def emit(action, **rest):
+        # Selalu isi akumulator LEBIH DULU, baru serahkan ke logger pemanggil. Versi pertama
+        # memakai `log or lambda...`, jadi pemanggil yang menyuplai logger sendiri membuat
+        # akumulator ini tetap kosong — dan `sent` di bawah dihitung dari akumulator itu. Hasilnya:
+        # pengiriman yang sungguh-sungguh berhasil dilaporkan GAGAL, diam-diam, tepat pada jalur
+        # yang dipakai orang menulis perintah. Kegagalan palsu lebih murah daripada keberhasilan
+        # palsu, tapi tetap saja satu cara membuat orang berhenti mempercayai antreannya.
+        row = {"ts": wo.now(), "action": action, "level": lvl.get("level"), "mode": wanted, **rest}
+        events.append(row)
+        if log:
+            log(action, **rest)
     hand_new_work(conn, engine, wanted, runner=runner, sender=sender, emit=emit,
                   capture=capture, busy=busy, tab_project=tab_project, pane_cwd=pane_cwd,
                   gap=gap, sleeper=sleeper, for_item=row, dirty=dirty)
@@ -784,6 +794,11 @@ def selftest():
     orig_wo_deliver = wo.deliver_now
     wo.deliver_now = lambda conn, engine, item_id: {"sent": False, "queued": True,
                                                     "refused": "SELFTEST"}
+
+    def _restore_wo_deliver():
+        wo.deliver_now = orig_wo_deliver
+    import atexit as _ax
+    _ax.register(_restore_wo_deliver)   # dilepas walau tes meledak di tengah jalan
     check("jalur kirim work_order disuntik: tes ini tidak bisa mengetuk pane asli",
           wo.deliver_now is not orig_wo_deliver, str(wo.deliver_now))
 
@@ -1502,6 +1517,27 @@ def selftest():
         res_flat = deliver_now(conn, "SQLITE", fast_id, sender=sender, capture=quiet_pane,
                                busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
                                runner=runner, dirty=False)
+        # Logger dari pemanggil tidak boleh mengubah jawaban. Ini bukan hiasan antarmuka:
+        # `deliver_now` menghitung `sent` dari akumulatornya sendiri, jadi selama emit didelegasikan
+        # ke logger pemanggil, akumulator itu tetap kosong dan SETIAP pengiriman sungguhan dilaporkan
+        # gagal. Kegagalan palsu lebih murah daripada keberhasilan palsu — tapi tetap satu cara
+        # membuat orang berhenti mempercayai antreannya sendiri.
+        sink_rows = []
+        sent.clear()          # blok di bawah menghitung panjang `sent`; jangan warisi kiriman ini
+        res_logged = deliver_now(conn, "SQLITE", fast_id, sender=sender, capture=quiet_pane,
+                                 busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
+                                 runner=runner, dirty=False,
+                                 log=lambda a, **k: sink_rows.append((a, k)))
+        check("dengan logger pemanggil, keberhasilan masih terbaca berhasil dan peristiwanya sampai "
+              "ke dua-duanya",
+              res_logged["sent"] is True and bool(sink_rows)
+              and any(a == "WORK_DISPATCHED" for a, _k in sink_rows), str(res_logged)[:180])
+        check("balasan daemon dan tujuannya ikut dibawa pulang ke pemanggil",
+              res_logged.get("target") == "qoder",
+              str({k: res_logged.get(k) for k in ("reply", "target")}))
+        wo.release_claim(conn, "SQLITE", fast_id, "drainer")
+        wo.run(conn, "SQLITE", "UPDATE quest_tasks SET status='PENDING', claimed_by=NULL, "
+                               "lease_epoch=0 WHERE id=?", (fast_id,))
         check("SEMI dengan tangan masih observe TETAP mengantar perintah operator — `level` "
               "menjaga inisiatif mesin, bukan perintah manusia",
               res_flat["sent"] and len(sent) == 1, str(res_flat))
