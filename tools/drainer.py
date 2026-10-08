@@ -531,9 +531,23 @@ def deliver_now(conn, engine, item_id, mode=None, sender=None, capture=None, bus
     hand_new_work(conn, engine, wanted, runner=runner, sender=sender, emit=emit,
                   capture=capture, busy=busy, tab_project=tab_project, pane_cwd=pane_cwd,
                   gap=gap, sleeper=sleeper, for_item=row, dirty=dirty)
-    sent = any(e.get("action") == "WORK_DISPATCHED" for e in events)
-    return {"sent": sent, "item": int(item_id), "mode": wanted, "level": lvl.get("level"),
-            "events": [e.get("action") for e in events], "detail": events}
+    acts = [e.get("action") for e in events]
+    dispatched = [e for e in events if e.get("action") == "WORK_DISPATCHED"]
+    # `sent` bukan "ada baris WORK_DISPATCHED di suatu tempat". Yang diakui di sini adalah: ada
+    # penyerahan yang tercatat, DAN tidak ada kegagalan kirim pada putaran yang sama. Dua-duanya
+    # diperiksa karena `log=` dari pemanggil membuat akumulator lokal tetap kosong — dan kalau
+    # `sent` hanya dibaca dari akumulator itu, jalur yang disuntik pelapor akan SELALU menjawab
+    # False, sementara jalur tanpa pelapor menjawab True walau SEND_FAILED ikut tercatat.
+    sent = bool(dispatched) and "SEND_FAILED" not in acts
+    out = {"sent": sent, "item": int(item_id), "mode": wanted, "level": lvl.get("level"),
+           "events": acts, "detail": events}
+    if dispatched:
+        # Balasan daemon ikut dibawa pulang. `default_sender` sendiri sudah didokumentasikan sebagai
+        # klaim daemon, bukan bukti ketikan; pemanggil yang menampilkan "diserahkan" harus bisa
+        # menunjukkan apa yang daemon jawab, bukan hanya bahwa fungsinya kembali.
+        out["reply"] = str(dispatched[-1].get("reply") or "")[:200] or None
+        out["target"] = dispatched[-1].get("target")
+    return out
 
 
 def nudge_resting(conn, engine, mode, beats=None, sender=None, emit=None):
@@ -810,10 +824,39 @@ def selftest():
             if isinstance(first, _ast.Constant) and isinstance(first.value, str) \
                     and first.value.isupper():
                 emitted.add(first.value)
-    unclassified = sorted(a for a in emitted if notify.classify(a) == "unknown")
+    # Kata refusal juga ikut dipindai. `deliver_now` tidak meng-emit "WINDOW_CLOSED" sebagai
+    # peristiwa — ia mengembalikannya sebagai `refused=`, dan dari sana ia naik ke banner
+    # `QUEUED_NOT_DELIVERED`. Kalau hanya nama peristiwa yang diperiksa, sebuah refusal baru bisa
+    # lolos tanpa keranjang dan orang yang membacanya tidak akan pernah tahu itu nama apa.
+    refused = set()
+    for node in _ast.walk(_ast.parse(code)):
+        # Dua bentuk yang benar-benar dipakai kode. kwargs saja tidak cukup: `deliver_now` menjawab
+        # dengan dict (`{"refused": "WINDOW_CLOSED"}`), dan scan yang hanya mencari kwargs akan
+        # mengumpulkan nol nama lalu lulus tanpa memeriksa apa pun — kelas bug yang paling sering
+        # ditemukan di repo ini, jadi keduanya dipindai dan JUMLAH yang ditemukan ikut dinyatakan.
+        if isinstance(node, _ast.keyword) and node.arg == "refused" \
+                and isinstance(node.value, _ast.Constant) \
+                and isinstance(node.value.value, str) and node.value.value.isupper():
+            refused.add(node.value.value)
+        elif isinstance(node, _ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, _ast.Constant) and k.value == "refused" \
+                        and isinstance(v, _ast.Constant) and isinstance(v.value, str) \
+                        and v.value.isupper():
+                    refused.add(v.value)
+    # SATU perhitungan, atas kedua kumpulan. Baris kedua dari pasangan yang lama menimpa hasil
+    # pertama dengan daftar peristiwa saja, jadi cek "setiap kata refusal punya kelas" membaca
+    # angka yang sudah dibersihkan dari refusal — hijau, dan buta. Bentuk kegagalan seperti ini
+    # tidak meninggalkan jejak di output mana pun selain ketiadaan kegagalan.
+    unclassified = sorted(a for a in (emitted | refused) if notify.classify(a) == "unknown")
     check("setiap peristiwa yang bisa di-emit tick punya kelas di notify",
           len(emitted) >= 12 and not unclassified,
           f"emitted={len(emitted)} belum diklasifikasi={unclassified}")
+    check("pemindaian menemukan kata refusal untuk diklasifikasi (bukan lulus karena nol temuan)",
+          len(refused) >= 2 and {"WINDOW_CLOSED", "MODE_UNKNOWN"} <= refused, str(sorted(refused)))
+    check("setiap kata refusal punya kelas di notify",
+          not [u for u in unclassified if u in refused],
+          f"refused={sorted(refused)} unknown={unclassified}")
     check("nama peristiwa dibaca dari kode, bukan dari ingatan",
           "WORK_DISPATCHED" in emitted and "CLOSED_NIGHT" in emitted, str(sorted(emitted))[:200])
     # `capture_pane` / `pane_is_busy` AWAL-nya ada dalam daftar terlarang di atas, dan itu sekarang

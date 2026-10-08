@@ -125,21 +125,29 @@ def journal(path: Path, row: dict) -> None:
         pass
 
 
-def watch(until: int, sleeper=time.sleep, emit=None) -> dict:
+def watch(until: int, sleeper=time.sleep, emit=None, restart=None, probe=None) -> dict:
     """Pantau sampai `until`. `sleeper` dan `emit` disuntik supaya bisa diuji tanpa menunggu."""
     log = emit or (lambda row: journal(LOG_DIR / f"soak-{time.strftime('%Y-%m-%d')}.jsonl", row))
     restart_at = None
     seen = {"ok": 0, "restart": 0, "alert": 0}
     while int(time.time()) < until:
         now = int(time.time())
-        last = last_tick_epoch()
-        active = timer_state()
+        # `probe` adalah satu-satunya tempat pengawas ini membaca dunia. Ia bisa disuntik bukan
+        # untuk keindahan: tanpa itu, menguji cabang "restart gagal" berarti membuat berkas log
+        # sungguhan dan menghentikan unit sungguhan, dan tes yang seperti itu tidak akan pernah
+        # ditulis orang — jadi cabang itu akan tetap tidak terbukti.
+        last, active = (probe() if probe else (last_tick_epoch(), timer_state()))
         d = decide(now, last, active, restart_at)
         if d["action"] == "OK":
             seen["ok"] += 1
         elif d["action"] == "RESTART":
-            r = restart_timer()
-            restart_at = now
+            r = (restart or restart_timer)()
+            # Hanya keberhasilan yang membayar cooldown. Mencatat `restart_at` walau unit gagal
+            # dinyalakan akan membungkam tindakan perbaikan selama setengah jam berikutnya — dan
+            # yang terjadi sebenarnya adalah loop tetap mati sementara pengawasanya mengira sudah
+            # mencoba. Kegagalan dicatat dan kesempatan berikutnya tetap terbuka.
+            if r.get("ok"):
+                restart_at = now
             seen["restart"] += 1
             log({"action": "SOAK_RESTARTED", "why": d["why"], **r})
             notify.notify_event("SOAK_RESTARTED", f"{d['why']} → unit dinyalakan ulang: "
@@ -184,6 +192,44 @@ def selftest() -> int:
           decide(2000, 1000, True)["action"] == "RESTART")
     check("satu kesempatan ulang per cooldown; yang kedua hanya berteriak",
           decide(2000, 1000, True, restart_at=1900)["action"] == "ALERT")
+    # Jalur `watch` diuji dengan jam dan restart suntikan: tanpa ini, cabang "restart gagal tapi
+    # cooldown tetap dibayar" tidak punya satupun bukti, dan itu cabang yang membungkam pengawas
+    # tepat ketika mesin paling butuh ditolong.
+    import types as _t
+    calls = []
+
+    def fake_clock(start):
+        box = {"t": start}
+        return (lambda: box["t"], box)
+
+    def two_ticks(fail_first):
+        now_fn, box = fake_clock(1000)
+        # Tick "terakhir" dibuat relative terhadap jam palsu ini: 1000 - 1200 = 20 menit sunyi,
+        # melewati batas 540s, jadi cabang RESTART benar-benar dimasuki pada tiap pengamatan.
+        probe = lambda: (box["t"] - 1200, True)
+
+        def sleeper(_secs):
+            box["t"] += 600          # lompat 10 menit tiap putaran: dua pengamatan, cepat
+
+        def restart():
+            calls.append(box["t"])
+            return {"ok": not fail_first, "rc": 0 if not fail_first else 1}
+        real_time = time.time
+        time.time = now_fn
+        try:
+            seen = watch(2300, sleeper=sleeper, emit=lambda row: None, restart=restart,
+                         probe=probe)
+        finally:
+            time.time = real_time
+        return seen
+    seen_fail = two_ticks(True)
+    # Tiga pengamatan, tiga percobaan: loop berlari pada t=1000/1600/2200 sebelum `until`.
+    check("restart yang GAGAL tidak membeli cooldown: pengawas mencoba lagi pada tiap pengamatan "
+          "berikutnya, bukan diam setengah jam", len(calls) == 3, str(calls))
+    calls.clear()
+    seen_ok = two_ticks(False)
+    check("restart yang BERHASIL membeli cooldown: unit tidak diutak-atik dua kali untuk satu "
+          "kejadian", len(calls) == 1, str(calls))
     check("setelah cooldown habis, kesempatan ulang terbuka lagi",
           decide(2000, 1000, True, restart_at=100)["action"] == "RESTART")
     limit = TICK_PERIOD + GRACE

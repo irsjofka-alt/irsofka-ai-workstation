@@ -61,7 +61,11 @@ PROGRESS = {"WORK_DISPATCHED", "GATE_PASSED", "CONTINUE_SENT", "ANSWER_SENT", "C
 NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD", "ENGINE_BUSY",
         "SEMI_NOT_IDLE", "PANE_NOT_QUIET", "ANSWER_NOT_SENT", "COOLDOWN", "GATE_CHECKED",
         "GATE_DEFERRED", "STUCK_PARKED", "SKIP_NOT_OPERATOR", "SKIP_NOT_RESTING",
-        "RECONCILED", "RELEASED", "REFUSED_UNDOABLE", "QUEUE_EMPTY", "SEMI_QUEUED"}
+        "RECONCILED", "RELEASED", "REFUSED_UNDOABLE", "QUEUE_EMPTY", "SEMI_QUEUED",
+        # Rem yang dipatuhi bukan kegagalan: `WINDOW_CLOSED` berarti seseorang bilang berhenti dan
+        # jalur instan menurutinya. Kabarnya tetap sampai — lewat QUEUED_NOT_DELIVERED, yang urgent
+        # — jadi nama ini sendiri tidak boleh membunyikan alarm kedua untuk satu kejadian.
+        "WINDOW_CLOSED", "SELFTEST"}
 # CLOSED_OFF sengaja tidak ada di keranjang mana pun: OFF bukan lagi sebuah mode, jadi tidak ada
 # jalur yang bisa meng-emit-nya. Nama yang sudah dibuang tidak boleh punya perilaku diam — kalau
 # ia muncul lagi, `classify` membacanya `unknown`, dan `unknown` selalu berbanner.
@@ -120,7 +124,11 @@ def summarize(events, mode=None, level=None, clock=None) -> dict:
     """Judul + isi banner dari peristiwa tick. Murni: tidak spawning, tidak membaca database."""
     rows = [e for e in (events or []) if isinstance(e, dict)]
     acts = [(str(e.get("action") or "?"), e) for e in rows]
-    urgent = [a for a, e in acts if classify(a) == "urgent"]
+    # `unknown` ikut mengangkat suara. `worth_notifying` sudah memutuskan bahwa peristiwa yang belum
+    # diklasifikasi LAYAK berbanner; kalau `summarize` hanya mencari "urgent", peristiwa baru yang
+    # belum punya keranjang akan muncul sebagai banner biasa tanpa ⚠ dan tanpa urgency DBus —
+    # persis bentuk "diam yang tersamar" yang fungsi ini dibuat untuk cegah.
+    urgent = [a for a, e in acts if classify(a) in ("urgent", "unknown")]
     ts = time.strftime("%H:%M", time.localtime(clock() if callable(clock) else time.time()))
     head = "Autopilot" + ((" · " + str(mode)) if mode else "") + ((" · " + str(level)) if level else "")
     if urgent:
@@ -336,9 +344,16 @@ def selftest() -> int:
     check("peristiwa yang belum diklasifikasi TIDAK bisa lulus diam",
           classify("NAMA_BARU") == "unknown"
           and worth_notifying([{"action": "NAMA_BARU"}])[0] is True)
+    off_word = summarize([{"action": "CLOSED_OFF", "why": "kode lama"}], mode="SEMI")
     check("kata yang sudah dibuang (CLOSED_OFF) tidak punya keranjang diam",
           classify("CLOSED_OFF") == "unknown"
           and worth_notifying([{"action": "CLOSED_OFF"}])[0] is True, classify("CLOSED_OFF"))
+    # Lanjutan dari temuan verifier: `worth_notifying` sudah menyebut `unknown` layak berbanner,
+    # tapi kalau `summarize` hanya mencari "urgent", peristiwa baru keluar tanpa ⚠ dan tanpa
+    # urgency DBus — alarm yang berbunyi pelan tetap alarm yang tidak dibunyikan.
+    check("peristiwa yang belum diklasifikasi ikut mengangkat suara (⚠ + urgency), bukan lulus "
+          "sebagai banner biasa",
+          off_word["urgent"] is True and off_word["title"].startswith("⚠"), json.dumps(off_word))
     one = notify_event("ESCALATED", "tiga opsi, tidak ada meter yang bisa dibaca", runner=runner)
     check("pertanyaan yang naik ke antrean manusia punya jalurnya sendiri dan menyebut alasannya",
           "ESCALATED" in one["title"] and "meter" in one["body"], json.dumps(one, default=str))

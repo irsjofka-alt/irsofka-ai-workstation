@@ -216,9 +216,18 @@ def night_state(conn, engine, dirty=_MEASURE):
     # tanpa batas waktu). SEMI boleh berdiri tanpa jendela karena orangnya sedang di meja; tapi
     # kalau SEMI DIBUKA dengan menit (misalnya soak tiga jam yang diminta operator), jendela itu
     # juga menutup loop sendiri — dan kata berhenti (`off`) menutupnya dengan menulis now().
-    if (ap.get("mode") in MODES and on_since
-            and (until > 0 or ap.get("mode") == "ON") and until < now()):
-        why.append(f"jendela {ap.get('mode')} lewat")
+    # `<=`, bukan `<`. Kata berhenti menulis `until_epoch = sekarang`, dan pemeriksaan pada detik
+    # yang sama akan menyebut rem itu "belum kedaluwarsa" — satu detik di mana mesin masih boleh
+    # mengklaim padahal orang sudah menyuruhnya berhenti. Tidak ada alasan untuk meninggalkan satu
+    # detik itu terbuka.
+    #
+    # `on_since` TIDAK lagi ikut menahan klausa ini. Baris baru lahir dengan `on_epoch` NULL, jadi
+    # syarat sebelumnya membuat ON tanpa jendela terbaca sebagai "tidak ada jendela untuk kedaluwarsa"
+    # — yaitu ON tanpa batas waktu, tepat yang dilarang aturan "ON expires by itself". Sekarang ON
+    # tanpa jendela adalah jendela yang BELUM dibuka, dan itu menutup loop, bukan membukanya.
+    if ap.get("mode") in MODES and ((until > 0 and until <= now())
+                                    or (ap.get("mode") == "ON" and until <= 0)):
+        why.append(f"jendela {ap.get('mode')} {'lewat' if until > 0 else 'belum dibuka'}")
     if n_fail >= NIGHT_MAX_FAILURES:
         why.append(f"{n_fail} kegagalan beruntun tanpa satu pun keberhasilan "
                    f"(batas {NIGHT_MAX_FAILURES})")
@@ -1836,6 +1845,20 @@ def selftest():
         check("schema dibuat", all(not l.startswith("skip") for l in log), "; ".join(log))
         check("jalur kirim disuntik sebelum tes pertama: selftest TIDAK BISA mengetuk pane asli",
               globals()["deliver_now"] is not _deliver_now, str(globals()["deliver_now"]))
+        # Stub yang selalu menolak membuat cabang `if handed.get("sent")` tidak pernah dijalankan
+        # sama sekali, dan pesan "diserahkan ke CLI" tidak punya satu pun bukti. Jadi cabang itu
+        # diuji sendiri, dengan stub yang BERHASIL, lalu stub penolak dipasang kembali: yang tidak
+        # boleh terjadi adalah tes yang hijau karena jalur keberhasilannya tidak pernah ditempuh.
+        globals()["deliver_now"] = lambda conn, engine, item_id: {
+            "sent": True, "target": "qoder", "reply": "dispatched"}
+        ok_sent, msg_sent, id_sent = queue_command(conn, "SQLITE", "uji cabang terkirim", "qoder")
+        check("cabang penyerahan berhasil melaporkan 'diserahkan' dan membawa balasan daemon",
+              ok_sent and "diserahkan ke CLI" in msg_sent and "dispatched" in msg_sent, msg_sent)
+        check("penyerahan berhasil tidak menghapus barisnya dari ledger",
+              id_sent and get_item(conn, "SQLITE", int(id_sent)) is not None, str(id_sent))
+        run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (int(id_sent),))
+        globals()["deliver_now"] = lambda conn, engine, item_id: {
+            "sent": False, "queued": True, "refused": "SELFTEST"}
         # Keadaan awal fixture harus DINYATAKAN, bukan diwarisi dari default skema. Tanpa baris
         # ini, seluruh blok di bawah ikut bentuk baris pertama: begitu default berubah dari OFF
         # menjadi SEMI, keranjang SEMI menolak item roadmap yang dibuat `seed` dan setiap tes di
@@ -2726,6 +2749,13 @@ def selftest_live():
               "tidak mati",
               consecutive_failures(conn, engine) == 0,
               f"now={consecutive_failures(conn, engine)}")
+        # Dua baris pemutus DIHAPUS di sini, bukan di akhir tes. Sebuah baris COMPLETED yang
+        # tertinggal walau beberapa detik berarti `consecutive_failures` produksi membaca nol di
+        # tengah operasi sungguhan — tepat angka yang dipakai pemutus untuk memutuskan mesin boleh
+        # lanjut atau berhenti. Yang bersih adalah yang tidak pernah terlihat pembaca lain.
+        run(conn, engine, "DELETE FROM quest_tasks WHERE title IN "
+            + ("(%s, %s)" if engine == "POSTGRESQL" else "(?, ?)"),
+            (f"{mark}-breaker-fail", f"{mark}-breaker-win"))
         nxt = next_item(conn, engine)
         check("next_item tidak menawarkan baris UNAVAILABLE di produksi",
               not nxt or norm(nxt["status"]) not in ("UNAVAILABLE", "FAILED", "COMPLETED"),
