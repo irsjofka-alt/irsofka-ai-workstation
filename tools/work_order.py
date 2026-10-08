@@ -2814,10 +2814,17 @@ def selftest():
         # Dan keadaan yang sama harus benar di LEDGER, bukan hanya di sumber Python: gerbang yang
         # dibaca mesin adalah kolom check_command di barisnya. Kalau sumber diperbaiki tapi barisnya
         # tidak disegarkan, yang berjalan tetap grep lama — dan itu sudah terjadi malam ini.
+        seed(conn, "SQLITE", ROADMAP_ITEMS)   # baris roadmap nyata, supaya tes di bawah punya objek
         _g103 = run(conn, "SQLITE",
                     "SELECT check_command AS c FROM quest_tasks WHERE title LIKE 'F10.3%'")
+        # `not _g103 or ...` akan lulus tanpa satu baris pun — fixture SQLite memang tidak selalu
+        # punya baris F10.3, dan tes yang hijau karena tidak menemukan apa yang dicari bukan tes.
+        # Jadi kehadirannya dituntut lebih dulu, lewat seed yang sama yang dipakai produksi.
+        check("satu baris F10.3 benar-benar ada di ledger untuk diperiksa", bool(_g103),
+              "tidak ada baris F10.3 di fixture")
         check("baris ledger tidak menyimpan gerbang lama yang menuntut is-enabled",
-              not _g103 or "is-enabled" not in (_g103[0]["c"] or ""),
+              bool(_g103) and "is-enabled" not in (_g103[0]["c"] or "")
+              and "irsofka-autopilot.timer" in (_g103[0]["c"] or ""),
               str((_g103[0]["c"] if _g103 else "")[:120]))
 
         # --- pagar per-sha: dua grep global lulus selamanya, ini tidak ---------------------------
