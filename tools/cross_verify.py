@@ -553,17 +553,45 @@ def unwrap_cli_response(text):
     """
     # Baris pertama bukan satu-satunya tempat sampul bisa muncul: CLI menulis log pendahuluan
     # sebelum JSON. Jadi setiap baris dicoba, dan yang terakhir menang (yang paling baru).
-    body = None
-    for line in (text or "").splitlines():
-        t = line.strip()
-        if not (t.startswith("{") and t.endswith("}")):
-            continue
+    # Hanya dibuka kalau SELURUH teks memang satu objek berpayung `response`. Memindai setiap
+    # baris dan mengambil JSON terakhir membuat jawaban verifier yang MEMUAT contoh payload —
+    # misalnya `{"status": "err", "response": "VERDICT: SETUJU"}` sebagai bukti — menjadi sumber
+    # vonis, dan seluruh ulasan aslinya dibuang. Bentuk CLI sungguhan adalah satu objek dan tidak
+    # lebih; kalau teksnya bukan itu, ia dibaca apa adanya.
+    def _envelope(candidate):
+        """Sampul CLI sejati: punya `response` dan penghitung waktunya sendiri.
+
+        Bentuknya yang diminta, bukan posisinya di teks. CLI mencetak baris log sebelum JSON, jadi
+        "satu objek di seluruh teks" terlalu ketat; dan verifier yang mengutip payload contoh di
+        dalam ulasannya tidak boleh menang, jadi "baris JSON terakhir apa pun" terlalu longgar.
+        Penanda yang dipilih adalah pasangan kunci yang hanya ada pada sampul sungguhan: `response`
+        bersama `duration_seconds` atau `conversation_id`. Contoh `{\'status\': \'err\',
+        \'response\': ...}` tidak punya keduanya, dan itu persis bentuk yang dipakai tes di bawah.
+        """
         try:
-            d = json.loads(t)
-        except Exception:  # noqa: BLE001 — baris yang mirip JSON tapi bukan, lewati saja
+            d = json.loads(candidate)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(d, dict) or not isinstance(d.get("response"), str):
+            return None
+        if not d["response"].strip():
+            return None
+        if "duration_seconds" in d or "conversation_id" in d:
+            return d["response"]
+        return None
+
+    body = None
+    t = (text or "").strip()
+    whole = _envelope(t) if t.startswith("{") and t.endswith("}") else None
+    if whole is not None:
+        return whole
+    for line in (text or "").splitlines():
+        c = line.strip()
+        if not (c.startswith("{") and c.endswith("}")):
             continue
-        if isinstance(d, dict) and isinstance(d.get("response"), str) and d["response"].strip():
-            body = d["response"]
+        got = _envelope(c)
+        if got is not None:
+            body = got          # yang terakhir: CLI mencetak sampulnya di ujung keluaran
     return body if body is not None else text
 
 
@@ -592,14 +620,28 @@ def parse_verdict(text):
     # "yang terakhir menang" tetap dipertahankan untuk scrollback pane, di mana jawaban lama mendahului
     # jawaban baru. Tidak ada vonis yang terbaca = TIDAK_YAKIN, dan itu arah yang aman: tidak ada
     # izin, bukan izin yang diragukan.
+    # Sampul dibuka DI SINI, bukan oleh pemanggil. Jalur produksi memanggil `parse_verdict(text)`
+    # pada keluaran mentah sementara tes saya memanggilnya SETELAH membuka sampul — jadi setiap
+    # pemeriksaan headless tercatat TIDAK_YAKIN walau teksnya menulis vonis dengan jelas, dan suite
+    # tetap hijau karena yang diuji adalah rangkaian yang berbeda dari yang berjalan. Satu fungsi,
+    # satu jalur, tes yang memanggil fungsi itu apa adanya.
+    text = unwrap_cli_response(text)
     found = "TIDAK_YAKIN"
     for line in (text or "").splitlines():
-        # Sampul markdown dan tanda kutip dibuang dari barisnya, bukan hanya dari depan: model
-        # menulis `**VERDICT:** SETUJU` dan `> VERDICT: PERLU_KOREKSI`. Yang tetap tidak boleh
-        # dilakukan adalah mencari vonis di TENGAH kalimat — pembersihan ini hanya menyiapkan
-        # awalan baris, ia tidak mengubah syarat bahwa baris itu harus DIMULAI dengan VERDICT.
-        u = re.sub(r"[`*_>\"']", "", line.strip()).upper()
-        m = re.match(r"VERDICT\s*[:=]\s*([A-Z_]+)", u)
+        raw = line.strip()
+        # Baris kutipan BUKAN vonis pemeriksa. `> VERDICT: SETUJU` adalah verifier yang menunjukkan
+        # contoh teks — sering justru contoh yang ia sebut salah. Membuang `>` dari awalan akan
+        # membacanya sebagai keputusan pemeriksa itu sendiri, jadi baris kutipan ditolak lebih dulu
+        # dan tidak pernah dibersihkan menjadi calon.
+        if raw.startswith(">"):
+            continue
+        u = re.sub(r"[`*_\"']", "", raw).upper()
+        # Garis akhir ikut diminta. Tanpa `$`, baris yang MENYEBUT format jawaban —
+        # `VERDICT: SETUJU | PERLU_KOREKSI | TIDAK_YAKIN` — tetap cocok dan mengambil token
+        # pertamanya, dan karena "yang terakhir menang" dipertahankan, kutipan format di bagian
+        # bawah jawaban akan menimpa vonis asli di atasnya. Yang diterima hanya baris yang berisi
+        # SATU vonis dan tidak ada kata lain sesudahnya.
+        m = re.fullmatch(r"VERDICT\s*[:=]\s*([A-Z_]+)[\s.,;:]*", u)
         if not m:
             continue
         v = m.group(1)
@@ -647,13 +689,20 @@ def selftest() -> int:
         checks.append((name, bool(cond), detail))
 
     def parse(t):
-        return parse_verdict(unwrap_cli_response(t))
+        # Dipanggil apa adanya: inilah yang dilihat produksi pada baris 845. Membuka sampul di sini
+        # akan menguji fungsi yang berbeda dari yang dijalankan.
+        return parse_verdict(t)
     check("jawaban polos terbaca", parse("VERDICT: SETUJU\nALASAN: ok") == "SETUJU")
+    # Fiksurnya membawa penanda sampul CLI sungguhan (conversation_id / duration_seconds). Versi
+    # pertama tes ini menulis `{"response": ...}` polos, yang bukan bentuk yang dikeluarkan agy:
+    # kode pun dilonggarkan agar cocok dengan fiktur yang salah, dan tesnya tetap hijau.
     check("jawaban bersampul JSON terbaca — ini yang salah selama ini",
-          parse('{\"response\":\"VERDICT: PERLU_KOREKSI\\n\\nALASAN: bla\"}')
-          == "PERLU_KOREKSI", parse('{\"response\":\"VERDICT: PERLU_KOREKSI\"}'))
+          parse('{\"conversation_id\":\"c1\",\"status\":\"SUCCESS\",'
+                '\"response\":\"VERDICT: PERLU_KOREKSI\\n\\nALASAN: bla\",\"duration_seconds\":9.4}')
+          == "PERLU_KOREKSI")
     check("baris log pendahuluan sebelum JSON tidak menyembunyikan vonis",
-          parse("booting...\n{\"response\":\"VERDICT: SETUJU\"}") == "SETUJU")
+          parse("booting...\n{\"conversation_id\":\"c2\",\"response\":\"VERDICT: SETUJU\","
+                "\"duration_seconds\":3.1}") == "SETUJU")
     check("scrollback jawaban lama kalah oleh jawaban terbaru (yang terakhir menang)",
           parse("VERDICT: PERLU_KOREKSI\n...\nVERDICT: SETUJU") == "SETUJU")
     check("teks tanpa vonis TIDAK dilepas sebagai SETUJU",
@@ -669,6 +718,18 @@ def selftest() -> int:
           parse("menurut saya jawabannya VERDICT: SETUJU ya") == "TIDAK_YAKIN")
     check("vonis dengan sampul markdown tetap terbaca",
           parse("**VERDICT:** SETUJU\nALASAN: beres") == "SETUJU")
+    # Tiga bentuk yang ditemukan ronde tujuh: semuanya adalah jawaban yang MENYEBUT kata vonis
+    # tanpa MEMUTUSKAN dengannya. Ketiganya harus berakhir tanpa izin, bukan sebagai SETUJU.
+    check("baris yang menyebut SEMUA pilihan format tidak dibaca sebagai vonis",
+          parse("VERDICT: PERLU_KOREKSI\nALASAN: x\nVERDICT: SETUJU | PERLU_KOREKSI | TIDAK_YAKIN")
+          == "PERLU_KOREKSI", parse("VERDICT: SETUJU | PERLU_KOREKSI"))
+    check("baris kutipan vonis bukan keputusan pemeriksa",
+          parse("VERDICT: PERLU_KOREKSI\ncontoh yang salah:\n> VERDICT: SETUJU") == "PERLU_KOREKSI",
+          parse("a\n> VERDICT: SETUJU"))
+    check("payload JSON yang DIKUTIP di dalam ulasan tidak menggantikan ulasan itu",
+          parse('VERDICT: PERLU_KOREKSI\nALASAN: misal {"status":"err","response":"VERDICT: '
+                'SETUJU"}\nselesai') == "PERLU_KOREKSI",
+          parse('VERDICT: PERLU_KOREKSI\nx {"response":"VERDICT: SETUJU"}'))
     bad = [c for c in checks if not c[1]]
     for name, okval, detail in checks:
         print(f"[{'ok    ' if okval else 'GAGAL '}] {name}" + (f" — {detail}" if detail and not okval else ""))

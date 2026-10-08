@@ -2169,7 +2169,7 @@ def selftest():
         # membuat setiap pencarian izin gagal lebih awal karena "no such column", dan itu membuat
         # tes penolakan lulus tanpa membuktikan apa pun tentang vonis.
         conn.execute("CREATE TABLE action_log (engine TEXT, ts TEXT, kind TEXT, tab TEXT, "
-                     "model TEXT, exit_code INTEGER, summary TEXT)")
+                     "model TEXT, exit_code INTEGER, summary TEXT, raw_ref TEXT)")
         conn.commit()
         rows = heartbeat(conn, "SQLITE", 180, GAP, capture=still, busy=calm)
         check("tabel terbaca tapi kosong atas nama pemegang = UNKNOWN, bukan AT_REST",
@@ -2912,10 +2912,23 @@ def selftest():
         check("baris exit_code!=0 tidak dihitung sebagai izin walau teksnya menyebut SETUJU",
               ok1b is False, str(ok1b))
         conn.execute("DELETE FROM action_log WHERE kind='cross_verify'")
-        conn.execute("INSERT INTO action_log (engine, ts, kind, tab, model, exit_code, summary) "
-                     "VALUES ('station', datetime('now'), 'cross_verify', 'gemini-verify', "
-                     "'gemini-3.8-flash-high', 0, 'verifikasi: COMPLETED verdict=SETUJU')")
+        # Vonis harus menunjuk BERKAS BUKTI yang memuat sha-nya. Tanpa ikatan itu, satu pemeriksaan
+        # apa pun yang lolos — bahkan soal aritmatika — memberi izin mendorong commit mana pun,
+        # karena yang dicari hanyalah "ada baris SETUJU dari model ini dalam 3 jam".
+        _evd = _d2 / "evidence.diff"
+        _evd.write_text("# commits under review: " + head + "\n\ndiff --git a/x b/x\n",
+                        encoding="utf-8")
+        conn.execute("INSERT INTO action_log (engine, ts, kind, tab, model, exit_code, summary, "
+                     "raw_ref) VALUES ('station', datetime('now'), 'cross_verify', 'gemini-verify', "
+                     "'gemini-3.8-flash-high', 0, 'verifikasi: COMPLETED verdict=SETUJU', ?)",
+                     (str(_evd),))
         conn.commit()
+        okx, whyx, _ex = record_push_verified(conn, "SQLITE", "gemini-3.8-flash-high",
+                                              ["0123456789abcdef0123456789abcdef01234567"],
+                                              events_path=_ev2)
+        check("vonis yang berkas buktinya tidak menyebut sha ini TIDAK membebaskan push",
+              okx is False and "bukan untuk commit ini" in whyx and not _ev2.exists(),
+              str(whyx)[:150])
         ok2, why2, w2 = record_push_verified(conn, "SQLITE", "gemini-3.8-flash-high",
                                              [head[:8], "zzzzzzz"], events_path=_ev2)
         check("sha yang bukan commit di repo ini membatalkan SEMUA penulisan, bukan hanya miliknya",
@@ -2944,6 +2957,7 @@ def selftest():
               okf is False, str(okf))
         conn.execute("DELETE FROM action_log WHERE kind='cross_verify'")
         conn.commit()
+        _evd.unlink(missing_ok=True)
         _ev2.unlink(missing_ok=True); _d2.rmdir()
         conn.execute("DELETE FROM action_log WHERE kind='cross_verify'")
         conn.commit()
@@ -3260,9 +3274,41 @@ def push_clearance(conn, engine, model_id, within_minutes=CLEARANCE_WINDOW_MINUT
     return ok[0] if ok else None
 
 
+def clearance_covers(clearance, shas):
+    """Apakah bukti yang sama benar-benar memuat commit yang akan didorong.
+
+    Tanpa ini, satu pemeriksaan apa pun yang kebetulan lolos — sebuah klaim aritmatika, satu baris
+    kode yang tidak berhubungan — memberi izin untuk mendorong SEMUA commit, karena yang dicari
+    hanyalah "ada baris SETUJU dari model ini". Itu izin tanpa cakupan, dan pendorong yang jujur
+    harus bisa menunjukkan bukti mana yang ia rujuk.
+
+    Cakupan dibaca dari berkas bukti yang dicatat bersama vonisnya (`raw_ref`): berkas itu harus ada
+    dan harus menyebut setiap sha yang akan berangkat. Bukti untuk pekerjaan lain tidak bisa dipakai
+    silang tanpa memalsukan berkasnya sendiri, dan pemalsuan itu meninggalkan jejak di disk.
+    """
+    if not clearance:
+        return False, "tidak ada catatan vonis"
+    ref = str(clearance.get("raw_ref") or "")
+    if not ref:
+        return False, "catatan vonis tidak menyebut berkas bukti"
+    path = Path(ref)
+    if not path.exists():
+        return False, f"berkas bukti tidak ada lagi: {ref}"
+    try:
+        body = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return False, f"berkas bukti tidak terbaca: {exc}"
+    missing = [x for x in shas if x[:12] not in body]
+    if missing:
+        return False, (f"berkas bukti tidak menyebut {len(missing)} sha yang akan berangkat "
+                       f"(contoh {missing[0][:12]}) — vonis ini bukan untuk commit ini")
+    return True, ref
+
+
 def _push_clearance_rows(conn, engine, model_id, within_minutes, ph):
     return run(conn, engine,
-               f"SELECT ts, tab, model, summary FROM action_log WHERE kind = 'cross_verify' "
+               f"SELECT ts, tab, model, summary, raw_ref FROM action_log "
+               f"WHERE kind = 'cross_verify' "
                f"AND model = {ph} AND exit_code = 0 AND ts >= " +
                ("NOW() - ({ph} || ' minutes')::interval" if engine == "POSTGRESQL"
                 else "datetime('now', '-' || {ph} || ' minutes')").format(ph=ph) +
@@ -3291,6 +3337,9 @@ def record_push_verified(conn, engine, model_id: str, shas: list[str], events_pa
                        f"{'/'.join(CLEARANCE_VERDICTS)} dari {model_id!r} dalam "
                        f"{CLEARANCE_WINDOW_MINUTES} menit terakhir — vonis tidak bisa ditulis dari "
                        "sini, hanya bisa dibaca dari action_log"), []
+    covers, why_cover = clearance_covers(clearance, shas)
+    if not covers:
+        return False, f"vonis tidak menutup commit ini: {why_cover}", []
     good, bad = [], []
     for sha in shas:
         s = (sha or "").strip()
