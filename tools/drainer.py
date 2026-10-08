@@ -1685,6 +1685,8 @@ def main(argv=None):
     sub.add_parser("gate")
     p_del = sub.add_parser("deliver", help="antar jawaban yang barusan ditulis operator ke pane-nya")
     p_del.add_argument("--decision", type=int, required=True)
+    p_wake = sub.add_parser("wake", help="coba antarkan satu baris yang sudah antre, sekarang juga")
+    p_wake.add_argument("--item", type=int, required=True)
     sub.add_parser("selftest")
     a = p.parse_args(argv)
 
@@ -1702,6 +1704,18 @@ def main(argv=None):
     if a.cmd == "gate":
         print(json.dumps(read_gate(conn, engine), default=str, indent=2))
         return 0
+    if a.cmd == "wake":
+        # Jalur ulang untuk perintah yang tertahan oleh sebuah pagar (tree kotor, jendela lewat,
+        # engine sedang sibuk). Tanpa ini, perintah yang ditolak sekali hanya bisa diantar oleh
+        # tick berikutnya — dan tick tetap butuh `dispatch`, jadi perintah operator tidak punya
+        # jalan kedua selain menulis ulang barisnya. Yang dipanggil tetap `deliver_now` yang sama,
+        # jadi tidak ada pagar kedua di tempat ini.
+        out = deliver_now(conn, engine, a.item)
+        events = out.pop("detail", []) or []
+        if events:
+            write_events(events)
+        print(json.dumps(out, default=str, indent=2))
+        return 0 if out.get("sent") else 1
     events = []
     tick(conn, engine, log=events.append)
     path = write_events(events)
