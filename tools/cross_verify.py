@@ -667,7 +667,14 @@ def record(subject_ref, engine, model, status, verdict, text, duration_ms):
             "summary": f"verifikasi oleh {engine}: {status} verdict={verdict} :: "
                        f"{(text or '')[:200]}",
             "exit_code": 0 if status == "COMPLETED" else 1,
-            "duration_ms": duration_ms, "raw_ref": str(subject_ref),
+            "duration_ms": duration_ms,
+            # `subject_ref` adalah berkas --file yang benar-benar dikirim ke model. Untuk subjek
+            # teks polos (tanpa --file) tidak ada berkasnya, dan jalur rekaman TIDAK boleh mengarang
+            # satu: gerbang push membaca berkas ini untuk memutuskan apakah vonis itu menutup commit
+            # yang akan berangkat. Menunjuk berkas bukti run lain akan meminjam izin dari pekerjaan
+            # yang berbeda — cara paling halus untuk mendorong kode yang tidak pernah dibaca siapa
+            # pun. Kosong berarti tidak ada cakupan, dan tidak ada cakupan berarti tidak ada izin.
+            "raw_ref": str(subject_ref) if subject_ref else None,
         })
         return True
     except Exception as exc:  # noqa: BLE001
