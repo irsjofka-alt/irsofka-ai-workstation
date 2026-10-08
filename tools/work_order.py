@@ -1479,7 +1479,14 @@ ROADMAP_ITEMS = [
      # benar kalau berkasnya terpasang DAN timer-nya di-enable; hari ini keduanya belum, dan itu
      # memang sisanya: seorang yang bangun yang menyalakannya.
      "test -f ~/.config/systemd/user/irsofka-autopilot.timer && "
-     "systemctl --user is-enabled irsofka-autopilot.timer"),
+     # BUKAN `is-enabled`. Operator menutup itu pagi ini: "SEMI tidak boleh auto start saat boot".
+     # Unit yang di-enable adalah unit yang menyala sendiri setelah restart, jadi gerbang yang
+     # menuntut enable akan membayar pembayaran F10.3 dengan melanggar §6 — dan ia akan hijau
+     # justru di keadaan yang paling berbahaya. Yang ditanya sekarang: unitnya terpasang, dan
+     # detaknya sungguh berjalan (aktif sekarang, atau satu tick tercatat hari ini).
+     "test -f ~/.config/systemd/user/irsofka-autopilot.timer && "
+     "(systemctl --user is-active --quiet irsofka-autopilot.timer || "
+     "grep -q '\"action\"' ~/.ai-station/logs/drainer-$(date +%F).jsonl)"),
     ("f91", "F9.1 deterministic environment state: exit code + process tree + delta pane "
             "disuapkan ke prompt (jalan paralel, tidak bergantung antrean)", "build", None,
      "bash bin/deploy_engine.sh --check"),
@@ -2795,6 +2802,23 @@ def selftest():
         check("pembaca peristiwa menguraikan JSON dan menolak bentuk `sha=` polos",
               "json.loads" in _pg and '\"sha=\"' not in _pg and "sha=" not in _pg,
               "pembacaan peristiwa bukan JSON")
+
+        # Gerbang F10.3 pernah menuntut `is-enabled`, yaitu menuntut unit yang menyala sendiri
+        # setelah boot — persis yang operator larang enam jam kemudian. Dua aturan yang keduanya
+        # hijau bisa tidak bisa keduanya dipatuhi; yang diuji di sini adalah bahwa gerbangnya tidak
+        # lagi meminta keadaan itu, supaya perbaikan ini tidak kembali tumbuh lewat "cuma tes".
+        gate103 = [i[4] for i in ROADMAP_ITEMS if i[0] == "f103"][0]
+        check("gerbang F10.3 tidak menuntut timer yang menyala sendiri setelah boot",
+              "is-enabled" not in gate103 and "irsofka-autopilot.timer" in gate103
+              and ("is-active" in gate103 and "drainer-" in gate103), gate103[:140])
+        # Dan keadaan yang sama harus benar di LEDGER, bukan hanya di sumber Python: gerbang yang
+        # dibaca mesin adalah kolom check_command di barisnya. Kalau sumber diperbaiki tapi barisnya
+        # tidak disegarkan, yang berjalan tetap grep lama — dan itu sudah terjadi malam ini.
+        _g103 = run(conn, "SQLITE",
+                    "SELECT check_command AS c FROM quest_tasks WHERE title LIKE 'F10.3%'")
+        check("baris ledger tidak menyimpan gerbang lama yang menuntut is-enabled",
+              not _g103 or "is-enabled" not in (_g103[0]["c"] or ""),
+              str((_g103[0]["c"] if _g103 else "")[:120]))
 
         # --- pagar per-sha: dua grep global lulus selamanya, ini tidak ---------------------------
         _d3 = Path(_tf.mkdtemp(prefix="pushgate_"))
