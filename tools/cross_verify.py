@@ -551,14 +551,20 @@ def unwrap_cli_response(text):
 
     Hanya dibuka kalau teksnya memang JSON dengan kunci 'response'; teks polos lewat utuh.
     """
-    try:
-        first = text.split("\n", 1)[0]
-        d = json.loads(first) if first.lstrip().startswith("{") else None
-    except Exception:  # noqa: BLE001
-        return text
-    if isinstance(d, dict) and isinstance(d.get("response"), str):
-        return d["response"]
-    return text
+    # Baris pertama bukan satu-satunya tempat sampul bisa muncul: CLI menulis log pendahuluan
+    # sebelum JSON. Jadi setiap baris dicoba, dan yang terakhir menang (yang paling baru).
+    body = None
+    for line in (text or "").splitlines():
+        t = line.strip()
+        if not (t.startswith("{") and t.endswith("}")):
+            continue
+        try:
+            d = json.loads(t)
+        except Exception:  # noqa: BLE001 — baris yang mirip JSON tapi bukan, lewati saja
+            continue
+        if isinstance(d, dict) and isinstance(d.get("response"), str) and d["response"].strip():
+            body = d["response"]
+    return body if body is not None else text
 
 
 def parse_verdict(text):
@@ -567,16 +573,22 @@ def parse_verdict(text):
     Layar pane menyimpan jawaban sebelumnya di scrollback. Mengambil kecocokan pertama
     membuat audit mencatat verdict dari pemeriksaan lama — salah catat yang tampak meyakinkan.
     """
+    # Dicari di SELURUH teks, tidak di baris yang DIAWALI kata VERDICT. Jawaban CLI datang
+    # bersampul JSON — `{"response":"VERDICT: SETUJU\n..."}` — dan kalau sampulnya tidak terbuka
+    # sempurna, baris pertama tidak pernah mulai dengan VERDICT: setiap vonis terbaca TIDAK_YAKIN,
+    # termasuk SETUJU yang sungguh-sungguh. Terukur 2026-10-08 14:35: empat pemeriksaan tercatat
+    # TIDAK_YAKIN padahal teksnya menulis PERLU_KOREKSI. Karena gerbang push sekarang MEMBACA
+    # catatan ini untuk memutuskan apakah sebuah commit boleh berangkat, salah label di sini berarti
+    # pekerjaan yang sudah diloloskan tidak akan pernah bisa didorong — dan kegagalan itu akan
+    # terlihat seperti "verifier belum menyetujui", bukan seperti pembaca yang buta.
     found = "TIDAK_YAKIN"
-    for line in (text or "").splitlines():
-        u = line.upper()
-        if not u.startswith("VERDICT"):
-            continue
-        if "PERLU_KOREKSI" in u:
+    for m in re.finditer(r"VERDICT\s*[:=]\s*([A-Z_]+)", (text or "").upper()):
+        v = m.group(1)
+        if v.startswith("PERLU"):
             found = "PERLU_KOREKSI"
-        elif "TIDAK_YAKIN" in u:
+        elif v.startswith("TIDAK"):
             found = "TIDAK_YAKIN"
-        elif "SETUJU" in u:
+        elif v.startswith("SETUJU"):
             found = "SETUJU"
     return found
 
@@ -600,6 +612,40 @@ def record(subject_ref, engine, model, status, verdict, text, duration_ms):
     except Exception as exc:  # noqa: BLE001
         print(f"[verify] hasil tidak tercatat ke SQL: {exc}", file=sys.stderr)
         return False
+
+
+def selftest() -> int:
+    """Pembacaan vonis diuji pada bentuk jawaban yang benar-benar dikirim CLI.
+
+    Ini bukan tes utilitas: catatan `verdict=` adalah bahan yang dibaca gerbang push malam ini.
+    Jawaban bersampul JSON yang gagal dibuka terbaca sebagai TIDAK_YAKIN untuk SETUJU yang asli,
+    dan itu mengurung pekerjaan yang sudah diloloskan verifier di dalam keadaan "belum diverifikasi"
+    selamanya — kegagalan yang dari luar terlihat sangat hati-hati.
+    """
+    checks = []
+
+    def check(name, cond, detail=""):
+        checks.append((name, bool(cond), detail))
+
+    def parse(t):
+        return parse_verdict(unwrap_cli_response(t))
+    check("jawaban polos terbaca", parse("VERDICT: SETUJU\nALASAN: ok") == "SETUJU")
+    check("jawaban bersampul JSON terbaca — ini yang salah selama ini",
+          parse('{\"response\":\"VERDICT: PERLU_KOREKSI\\n\\nALASAN: bla\"}')
+          == "PERLU_KOREKSI", parse('{\"response\":\"VERDICT: PERLU_KOREKSI\"}'))
+    check("baris log pendahuluan sebelum JSON tidak menyembunyikan vonis",
+          parse("booting...\n{\"response\":\"VERDICT: SETUJU\"}") == "SETUJU")
+    check("scrollback jawaban lama kalah oleh jawaban terbaru (yang terakhir menang)",
+          parse("VERDICT: PERLU_KOREKSI\n...\nVERDICT: SETUJU") == "SETUJU")
+    check("teks tanpa vonis TIDAK dilepas sebagai SETUJU",
+          parse("saya tidak bisa memeriksa") == "TIDAK_YAKIN")
+    check("sampul JSON dengan response kosong tidak menutupi teks aslinya",
+          parse('{\"response\":\"\"}\nVERDICT: TIDAK_YAKIN') == "TIDAK_YAKIN")
+    bad = [c for c in checks if not c[1]]
+    for name, okval, detail in checks:
+        print(f"[{'ok    ' if okval else 'GAGAL '}] {name}" + (f" — {detail}" if detail and not okval else ""))
+    print(f"\ncross_verify selftest: {len(checks) - len(bad)}/{len(checks)} sesuai")
+    return 1 if bad else 0
 
 
 def _gate_selftest_cases():
@@ -701,6 +747,8 @@ def main():
     ap.add_argument("--focus", default="", help="sudut yang harus diperiksa")
     ap.add_argument("--timeout", type=int, default=TIMEOUT)
     ap.add_argument("--remember", action="store_true", help="catat ke action_log (default: ya)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="uji pembacaan vonis tanpa mengirim prompt ke mana pun")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--gate-selftest", action="store_true",
                     help="uji tabel keadaan meter terhadap quota gate: tanpa daemon, "
@@ -717,6 +765,10 @@ def main():
 
     if args.gate_selftest:
         return gate_selftest()
+    # Sebelum pemeriksaan "engine wajib": tanpa itu `--selftest` tanpa argumen posisi akan jatuh ke
+    # cabang pencetakan daftar dan menampilkan registry, seolah-olah itu hasil tes.
+    if getattr(args, "selftest", False):
+        return selftest()
 
     reg = load_registry()
     if args.list or not args.engine:

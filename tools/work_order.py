@@ -63,22 +63,38 @@ def _banner(action, detail, urgent=False):
         import notify
         out = notify.notify_event(action, detail, urgent=urgent)
     except Exception as exc:  # noqa: BLE001 — banner yang gagal bukan alasan untuk menggagalkan kerja
+        # Jejak ditulis DI SINI juga. Cabang ini adalah kegagalan yang paling mungkin terjadi di
+        # mesin ini — `notify-send` hilang selama berhari-hari tanpa satu pun jalur yang mengaku —
+        # dan kalau import module-nya saja gagal lalu hanya mengembalikan dict, satu-satunya saksi
+        # adalah pemanggil yang tidak membacanya.
+        _trace_banner_failure(action, f"{type(exc).__name__}: {exc}", BANNER_LOG)
         return {"sent": False, "err": f"{type(exc).__name__}: {exc}"}
     if not out.get("sent"):
-        try:
-            import datetime as _dt
-            ev = REPO / "logs" / "station_events.jsonl"
-            ev.parent.mkdir(parents=True, exist_ok=True)
-            with ev.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"ts": _dt.datetime.now().astimezone().isoformat(
-                    timespec="seconds"), "kind": "banner_failed", "event": action,
-                    "why": str(out.get("err") or out)[:200]}, ensure_ascii=False) + "\n")
-        except Exception:  # noqa: BLE001 — tidak ada jalur kedua untuk mengeluh
-            pass
+        _trace_banner_failure(action, out.get("err") or out, BANNER_LOG)
     return out
 
 
+def _trace_banner_failure(action, why, events_path=None):
+    """Satu baris `banner_failed` — supaya 'tidak ada notifikasi' bisa dibedakan dari 'tidak ada yang perlu'.
+
+    Jalur berkasnya bisa dipindah supaya tes tidak menulis ke berkas peristiwa sungguhan: sebuah tes
+    yang meninggalkan jejak `banner_failed` di berkas nyata akan dibaca gerbang sebagai keadaan
+    produksi, dan itu bukti palsu yang dibuat oleh alat yang seharusnya membuktikan.
+    """
+    try:
+        import datetime as _dt
+        ev = Path(events_path or (REPO / "logs" / "station_events.jsonl"))
+        ev.parent.mkdir(parents=True, exist_ok=True)
+        with ev.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": _dt.datetime.now().astimezone().isoformat(
+                timespec="seconds"), "kind": "banner_failed", "event": str(action)[:60],
+                "why": str(why)[:200]}, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 — tidak ada jalur kedua untuk mengeluh
+        pass
+
+
 banner = _banner   # sambatan uji — pola yang sama dipakai `tree_dirty` di atas
+BANNER_LOG = None  # jalur peristiwa jejak banner; None = berkas nyata, disuntik oleh selftest
 
 
 def _deliver_now(conn, engine, item_id):
@@ -2000,6 +2016,35 @@ def selftest():
         missing = [w for w in [m.lower() for m in (MODES + STOP_WORDS)] if w not in listed]
         check("parser CLI mengenal seluruh kosakata dari konstanta, bukan dari daftar salinan",
               bad.returncode == 2 and not missing, f"rc={bad.returncode} hilang={missing}")
+        # --- kegagalan banner harus meninggalkan jejak, di KEDUA cabang ---------------------------
+        # Cabang pertama (daemon menolak) punya jejak; cabang kedua (modul notify tidak bisa
+        # diimpor sama sekali) tidak, dan itu justru yang paling mungkin terjadi di mesin ini —
+        # `notify-send` pernah hilang berhari-hari tanpa satu jalur pun mengaku. Keduanya diuji.
+        import tempfile as _tf0
+        _bl_d = Path(_tf0.mkdtemp(prefix="banner_"))
+        globals()["BANNER_LOG"] = _bl_d / "events.jsonl"
+        import notify as _nv
+        _real_ev = _nv.notify_event
+        try:
+            _nv.notify_event = lambda *a, **k: {"sent": False, "err": "daemon menolak (id 0)"}
+            # Dipanggil lewat `_banner`, bukan `banner`: nama yang terakhir sudah ditukar dengan
+            # perekam di awal selftest, dan menguji boneka akan lulus tanpa menyentuh satu baris pun
+            # dari jalur yang sedang diuji.
+            r_refused = _banner("WORK_DISPATCHED", "item 1 → qoder")
+            _nv.notify_event = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("gdbus hilang"))
+            r_broken = _banner("ESCALATED", "pertanyaan")
+        finally:
+            _nv.notify_event = _real_ev
+            globals()["BANNER_LOG"] = None
+        _txt = (_bl_d / "events.jsonl").read_text(encoding="utf-8").strip().splitlines() \
+            if (_bl_d / "events.jsonl").exists() else []
+        check("banner yang DITOLAK daemon meninggalkan jejak banner_failed",
+              r_refused["sent"] is False and any('"banner_failed"' in x for x in _txt), str(_txt[:1]))
+        check("banner yang MELEDAK (modul/perintah tidak ada) juga meninggalkan jejak — bukan "
+              "kembali diam-diam", r_broken["sent"] is False and len(_txt) >= 2
+              and "gdbus hilang" in _txt[-1], str(_txt[-1:])[:160])
+        (_bl_d / "events.jsonl").unlink(missing_ok=True)
+        (_bl_d).rmdir()
         check("jalur kirim disuntik sebelum tes pertama: selftest TIDAK BISA mengetuk pane asli",
               globals()["deliver_now"] is not _deliver_now, str(globals()["deliver_now"]))
         # Stub yang selalu menolak membuat cabang `if handed.get("sent")` tidak pernah dijalankan
