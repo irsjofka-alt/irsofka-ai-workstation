@@ -40,7 +40,53 @@ EVIDENCE_LIMIT = 900
 REPO = Path.home() / ".ai-station"
 NIGHT_MAX_FAILURES = 3
 NIGHT_MAX_ITEMS = 25
+FAILURE_LOOKBACK = 12 * 3600   # detik; rentetan di luar ini bukan tanggungan malam ini
+# Dua keadaan mesin, bukan tiga. `SEMI` = otomatis dengan orang di meja (hanya perintah yang dia
+# tulis sendiri yang diambil); `ON` = seluruh antrean roadmap. OFF dibuang dari kosakata karena
+# operator hanya pernah memakai dua posisi itu; jalannya berhenti sekarang adalah `STOP_WORDS`,
+# yang menurunkan tangan dan menutup jendela tanpa menulis mode ketiga.
+MODES = ("SEMI", "ON")
+STOP_WORDS = ("OFF", "STOP", "BERHENTI", "MATI")
 _MEASURE = object()          # pembeda "belum diukur" dari "diukur tapi gagal dibaca"
+
+
+def _banner(action, detail, urgent=False):
+    """Satu-satunya jalur modul ini ke desktop. Tidak pernah melempar; kegagalan dilaporkan apa ada."""
+    try:
+        import notify
+        return notify.notify_event(action, detail, urgent=urgent)
+    except Exception as exc:  # noqa: BLE001 — banner yang gagal bukan alasan untuk menggagalkan kerja
+        return {"sent": False, "err": f"{type(exc).__name__}: {exc}"}
+
+
+banner = _banner   # sambatan uji — pola yang sama dipakai `tree_dirty` di atas
+
+
+def _deliver_now(conn, engine, item_id):
+    """Antarkan satu perintah yang barusan ditulis, lewat jalur drainer yang sama dengan tick."""
+    import drainer
+    return drainer.deliver_now(conn, engine, int(item_id))
+
+
+deliver_now = _deliver_now   # sambatan uji — lihat `check("jalur kirim disuntik ...")` di selftest
+
+
+def _mute_banners():
+    """Pasang sambatan uji; kembalikan (daftar panggilan, fungsi asli).
+
+    Yang direkam bukan hanya "jangan kirim": panggilan yang tercatat membuat jalur banner bisa
+    DIUJI seperti jalur lain — tes bahwa pertanyaan ESCALATED benar-benar menghasilkan satu
+    banner, dan bukan tes hening yang lulus karena tidak ada yang memantau sama sekali.
+    """
+    calls = []
+    orig = globals()["banner"]
+
+    def fake(action, detail="", urgent=False):
+        calls.append((action, str(detail), bool(urgent)))
+        return {"sent": False, "muted": True}
+
+    globals()["banner"] = fake
+    return calls, orig
 
 
 def tree_dirty() -> bool | None:
@@ -92,31 +138,90 @@ def items_done_in_window(conn, engine, on_epoch):
     return int(rows[0]["n"]) if rows else 0
 
 
+def consecutive_failures(conn, engine):
+    """Kegagalan BERURUTAN sejak keberhasilan terakhir — bukan jumlah kegagalan semalam.
+
+    Perbedaannya adalah seluruh isi fungsi ini, dan ia ditemukan karena labelnya menipu:
+    `night_state` melaporkan "kegagalan berturut-turut" sambil menghitung SETIAP baris
+    FAILED/PARKED dalam 12 jam. Dalam satu malam panjang, tiga kegagalan yang tidak saling
+    berhubungan — item A gagal, lalu B dan C selesai dengan baik, lalu D gagal — sudah cukup
+    untuk menutup seluruh loop, dan loop yang tertutup berarti komputer diam sampai pagi.
+    Itulah kegagalan yang ingin dicegah operator, dan pagar yang salah bentuk inilah yang
+    menyebabkannya.
+
+    Yang benar-benar harus menghentikan sebuah loop adalah *rentetan* kegagalan tanpa satu pun
+    keberhasilan di antaranya: itu tanda mesin mengunyah baris yang sama atau gerbang yang tidak
+    akan pernah lolos, bukan tanda bahwa satu item ternyata sulit.
+
+    Dua hal yang membuat hitungan ini mudah salah bentuk, keduanya terukur di selftest:
+
+    1. `completed_at` beresolusi SATU DETIK. Memakai `>` membuang kegagalan pada detik yang sama
+       dengan keberhasilan terakhir; memakai `>=` menghitung SEMUA kegagalan di detik itu,
+       termasuk yang terjadi SEBELUM keberhasilan. Dua-duanya salah dan dua-duanya diam. Maka
+       urutannya (detik, id) — `id` naik bersama tulisan, jadi ia memecah seri ke arah yang
+       benar: kegagalan yang ditulis sesudah keberhasilan terakhir dihitung, yang sebelumnya tidak.
+    2. Tanpa batas tengok, tiga kegagalan dari dua minggu lalu yang tidak pernah diikuti
+       keberhasilan mana pun akan menutup loop hari ini juga — dan loop yang tertutup berarti
+       komputer diam sampai pagi, kegagalan yang persis ingin dicegah operator. `FAILURE_LOOKBACK`
+       membuat pagar hanya melihat yang masih mungkin terjadi malam ini.
+    """
+    ts = ("EXTRACT(EPOCH FROM completed_at::timestamptz)::bigint"
+          if engine == "POSTGRESQL" else "CAST(strftime('%s', completed_at) AS INTEGER)")
+    ph = "%s" if engine == "POSTGRESQL" else "?"
+    last_win = run(conn, engine,
+                   f"SELECT {ts} AS e, id FROM quest_tasks WHERE status='COMPLETED' "
+                   # Filter ini bukan hiasan dan hilangnya terukur: `ORDER BY e DESC` menempatkan
+                   # NULL PALING AWAL di kedua backend, jadi satu baris COMPLETED warisan tanpa
+                   # `completed_at` menjadi "keberhasilan terakhir" dengan e NULL dan id besar.
+                   # `int(None or 0)` mengubahnya menjadi 0, dan rentetan pun dihitung seolah tidak
+                   # pernah ada yang berhasil — pemutus menutup loop yang sedang bekerja. Ini
+                   # justru kegagalan yang pagar ini klaim cegah.
+                   f"AND completed_at IS NOT NULL ORDER BY e DESC, id DESC LIMIT 1")
+    since_e = int((last_win[0]["e"] if last_win else 0) or 0)
+    since_id = int((last_win[0]["id"] if last_win else 0) or 0)
+    rows = run(conn, engine,
+               f"SELECT COUNT(*) AS n FROM quest_tasks WHERE status IN ('FAILED','PARKED') "
+               f"AND {ts} >= {ph} "
+               f"AND ({ts} > {ph} OR ({ts} = {ph} AND id > {ph}))",
+               (now() - FAILURE_LOOKBACK, since_e, since_e, since_id))
+    return int(rows[0]["n"]) if rows else 0
+
+
 def night_state(conn, engine, dirty=_MEASURE):
-    """Apakah malam ini masih aman mengklaim pekerjaan baru."""
-    ap = autopilot(conn, engine)
+    """Apakah malam ini masih aman mengklaim pekerjaan baru.
+
+    Tiga hal yang boleh menutup loop, dan ketiganya harus berarti "berhenti akan lebih aman
+    daripada lanjut": jendela yang lewat, rentetan kegagalan tanpa keberhasilan, dan batas item
+    per sesi. Yang TIDAK termasuk di sini: satu baris yang gagal. Itu urusan `cooldown` baris itu
+    sendiri — ia ditunda dan antrean melanjutkan ke baris berikutnya, karena menghentikan semalam
+    gara-gara satu item sulit adalah cara mengubah satu kegagalan menjadi nol pekerjaan.
+    """
+    ap = autopilot(conn, engine) or {}
     dirty = tree_dirty() if dirty is _MEASURE else dirty
     on_since = int((ap or {}).get("on_epoch") or 0)
-    fails = run(conn, engine,
-                "SELECT COUNT(*) AS n FROM quest_tasks WHERE status IN ('FAILED','PARKED') "
-                "AND completed_at >= CURRENT_TIMESTAMP - INTERVAL '12 hours'"
-                if engine == "POSTGRESQL" else
-                "SELECT COUNT(*) AS n FROM quest_tasks WHERE status IN ('FAILED','PARKED') "
-                "AND completed_at >= datetime('now','-12 hours')")
-    n_fail = int(fails[0]["n"]) if fails else 0
+    until = int((ap or {}).get("until_epoch") or 0)
+    n_fail = consecutive_failures(conn, engine)
     done = int((ap or {}).get("items_done") or 0)
     why = []
-    if (ap or {}).get("mode") == "ON" and on_since and int(ap.get("until_epoch") or 0) < now():
-        why.append("jendela ON lewat")
+    # Jendela ON harus punya batas: `until_epoch` NULL di bawah ON berarti 0, dan 0 < sekarang,
+    # jadi ON tanpa menit adalah ON yang mati seketika — itu memang aturannya (tidak ada lari
+    # tanpa batas waktu). SEMI boleh berdiri tanpa jendela karena orangnya sedang di meja; tapi
+    # kalau SEMI DIBUKA dengan menit (misalnya soak tiga jam yang diminta operator), jendela itu
+    # juga menutup loop sendiri — dan kata berhenti (`off`) menutupnya dengan menulis now().
+    if (ap.get("mode") in MODES and on_since
+            and (until > 0 or ap.get("mode") == "ON") and until < now()):
+        why.append(f"jendela {ap.get('mode')} lewat")
     if n_fail >= NIGHT_MAX_FAILURES:
-        why.append(f"{n_fail} kegagalan berturut-turut (batas {NIGHT_MAX_FAILURES})")
+        why.append(f"{n_fail} kegagalan beruntun tanpa satu pun keberhasilan "
+                   f"(batas {NIGHT_MAX_FAILURES})")
     if dirty is True:
         why.append("working tree kotor")
     if dirty is None:
         why.append("git tidak terbaca — UNKNOWN, bukan bersih")
     if done >= NIGHT_MAX_ITEMS:
         why.append(f"batas {NIGHT_MAX_ITEMS} item per sesi terlampaui")
-    return {"mode": (ap or {}).get("mode"), "failures_12h": n_fail, "items_done": done,
+    return {"mode": (ap or {}).get("mode"), "failures_run": n_fail, "items_done": done,
+            "lookback_seconds": FAILURE_LOOKBACK,
             "tree_dirty": dirty, "ok": not why, "why": why}
 
 
@@ -142,7 +247,7 @@ CREATE_PG = [
         note TEXT, created_epoch BIGINT, resolved_epoch BIGINT,
         item_id BIGINT, answered_by VARCHAR(60))""",
     """CREATE TABLE IF NOT EXISTS autopilot_state (
-        id SMALLINT PRIMARY KEY DEFAULT 1, mode VARCHAR(10) DEFAULT 'OFF',
+        id SMALLINT PRIMARY KEY DEFAULT 1, mode VARCHAR(10) DEFAULT 'SEMI',
         on_epoch BIGINT, until_epoch BIGINT, item_budget INT DEFAULT 12,
         items_done INT DEFAULT 0, off_reason TEXT, changed_by VARCHAR(60) DEFAULT 'operator',
         level VARCHAR(16) DEFAULT 'observe', level_until BIGINT)""",
@@ -164,7 +269,7 @@ CREATE_SQLITE = [
         answer TEXT, state TEXT DEFAULT 'OPEN', note TEXT,
         created_epoch INTEGER, resolved_epoch INTEGER, item_id INTEGER, answered_by TEXT)""",
     """CREATE TABLE IF NOT EXISTS autopilot_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1), mode TEXT DEFAULT 'OFF',
+        id INTEGER PRIMARY KEY CHECK (id = 1), mode TEXT DEFAULT 'SEMI',
         on_epoch INTEGER, until_epoch INTEGER, item_budget INTEGER DEFAULT 12,
         items_done INTEGER DEFAULT 0, off_reason TEXT, changed_by TEXT DEFAULT 'operator',
         level TEXT DEFAULT 'observe', level_until INTEGER)""",
@@ -267,6 +372,15 @@ def ensure_schema(conn, engine: str) -> list[str]:
         cur.execute("INSERT OR IGNORE INTO autopilot_state (id) VALUES (1)")
     else:
         cur.execute("INSERT INTO autopilot_state (id) VALUES (1) ON CONFLICT DO NOTHING")
+    # OFF bukan lagi sebuah mode, tapi barisnya masih ada di database yang hidup. Nilai lama
+    # dipindahkan ke SEMI dengan TANGAN yang tetap turun: `off_reason` mencatat penghentian,
+    # `level='observe'` sudah ditulis jalur OFF, dan jendela tidak dibuka ulang. Jadi perpindahan
+    # ini tidak bisa menyalakan sesuatu yang orang matikan — ia hanya mengganti kata untuk keadaan
+    # yang sama, dan tick yang membaca 'OFF' tidak lagi bangun sebagai MODE_UNKNOWN setiap 5 menit.
+    try:
+        cur.execute("UPDATE autopilot_state SET mode='SEMI' WHERE mode NOT IN ('SEMI','ON')")
+    except Exception:  # noqa: BLE001 — kolom lama yang belum ada bukan alasan untuk menolak start
+        pass
     # Baris yang lebih tua dari kolomnya tidak bisa diklasifikasikan dengan menebak. Yang bisa
     # diukur: `seed` selalu menulis `phase`, dan tidak ada jalur lain yang menulisnya — jadi baris
     # ber-phase adalah butir ROADMAP, dan sisanya benar-benar tidak diketahui asalnya. Menebak
@@ -870,37 +984,38 @@ def autopilot(conn, engine, mode=None, minutes=None, budget=None, who="operator"
     ph = "%s" if engine == "POSTGRESQL" else "?"
     until = now() + int(minutes) * 60 if minutes else None
     wanted = (mode or "").upper()
-    if wanted == "ON":
-        # `level` ikut direset, sama seperti cabang SEMI dan OFF. Tanpa ini, tangan yang diangkat
-        # dari TTY saat keranjang masih SEMI (hanya perintah operator) otomatis berlaku untuk
-        # keranjang ON (seluruh roadmap) tanpa ada satu pun tindakan TTY baru — dan alasan yang
-        # sudah tertulis untuk cabang OFF berlaku persis sama di sini.
+    if wanted in MODES:
+        # `level` ikut direset di kedua cabang. Tanpa ini, tangan yang diangkat dari TTY saat
+        # keranjang masih SEMI (hanya perintah operator) otomatis berlaku untuk keranjang ON
+        # (seluruh roadmap) tanpa satu pun tindakan TTY baru.
+        # Jendela waktu dibuka untuk SEMI juga — bukan hanya untuk ON — karena
+        # `items_done_in_window` dan pemutus malam membacanya: tanpa `on_epoch` yang benar,
+        # laporan "berapa item selesai malam ini" menjadi nol selamanya di bawah SEMI, dan laporan
+        # yang salah lebih berbahaya daripada laporan yang tidak ada.
         run(conn, engine,
-            f"UPDATE autopilot_state SET mode='ON', on_epoch={ph}, until_epoch={ph}, "
+            f"UPDATE autopilot_state SET mode={ph}, on_epoch={ph}, until_epoch={ph}, "
             f"item_budget={ph}, items_done=0, off_reason=NULL, changed_by={ph}, "
             f"level='observe', level_until=NULL WHERE id=1",
-            (now(), until, budget or 12, who))
-    elif wanted == "SEMI":
-        # SEMI = otomatis dengan manusia di meja. Bedanya dengan ON bukan derajat otonomi tangan
-        # (tangga `level` tetap milik keduanya) melainkan APA yang boleh diambil dari antrean:
-        # hanya perintah yang operator tulis sendiri ke SQL. Jendela waktu ikut dibuka di sini
-        # karena `items_done_in_window` dan pemutus malam membacanya — tanpa on_epoch yang benar,
-        # laporan "berapa item selesai malam ini" menjadi nol untuk SEMI, dan laporan yang salah
-        # lebih berbahaya daripada laporan yang tidak ada.
+            (wanted, now(), until, budget or 12, who))
+    elif wanted in STOP_WORDS:
+        # OFF dibuang sebagai MODE, bukan sebagai jalan mati. Yang operator minta adalah dua
+        # pilihan kerja (SEMI / FULL AUTO); yang tetap harus ada adalah rem, dan rem tidak boleh
+        # berupa nilai ketiga yang membuat kosakata punya dua definisi (§12). Jadi kata berhenti
+        # menurunkan TANGAN dan menutup JENDELA — dua fakta yang sudah dimiliki kolom ini —
+        # tanpa menulis mode baru. Invarian 6 berlaku penuh: jalur ini tidak butuh TTY dan tidak
+        # butuh kerja sama AI, dan sebuah typo ("off") tetap berarti berhenti, bukan berarti lolos.
         run(conn, engine,
-            f"UPDATE autopilot_state SET mode='SEMI', on_epoch={ph}, until_epoch={ph}, "
-            f"item_budget={ph}, items_done=0, off_reason=NULL, changed_by={ph}, "
-            f"level='observe', level_until=NULL WHERE id=1",
-            (now(), until, budget or 12, who))
+            f"UPDATE autopilot_state SET until_epoch={ph}, level='observe', level_until=NULL, "
+            f"off_reason={ph}, changed_by={ph} WHERE id=1",
+            (now(), reason or "loop dihentikan — tangan diturunkan, jendela ditutup", who))
     else:
-        # OFF juga menutup tangan. Level `resume` yang dibiarkan menggantung akan dibuka lagi
-        # oleh ON berikutnya tanpa ada orang yang menaikkannya malam itu. Cabang ini tetap jadi
-        # SATU-SATUNYA tempat nilai tak dikenal mendarat: invarian 6 menyatakan mematikan mesin
-        # tidak boleh butuh kerja sama AI, jadi jalur mati harus tetap mati walau ada typo.
-        run(conn, engine,
-            f"UPDATE autopilot_state SET mode='OFF', off_reason={ph}, changed_by={ph}, "
-            f"level='observe', level_until=NULL WHERE id=1",
-            (reason or "dimatikan", who))
+        row = autopilot(conn, engine) or {}
+        # Menolak, bukan memilihkan. Mode yang tidak dikenal tidak boleh diam-diam jadi SEMI
+        # (itu memperluas keranjang) atau diam-diam berhenti (itu menghapus rem yang orang sangka
+        # masih ada). Yang ditulis hanya pesan penolakannya; baris tidak disentuh.
+        row["refused"] = (f"mode {wanted!r} bukan kosakata: {'/'.join(MODES)} — untuk berhenti "
+                          "pakai 'off' (menurunkan tangan + menutup jendela) atau `disarm`")
+        return row
     return autopilot(conn, engine)
 
 
@@ -982,9 +1097,28 @@ def set_level(conn, engine, level, minutes=ARM_DEFAULT_MINUTES, who="operator", 
                        "terbuka dari proses ini. Menurunkan (`disarm`) tidak butuh tty.")
     until = None if level == "observe" else now() + int(minutes) * 60
     ph = "%s" if engine == "POSTGRESQL" else "?"
-    run(conn, engine,
-        f"UPDATE autopilot_state SET level={ph}, level_until={ph}, changed_by={ph} WHERE id=1",
-        (level, until, who))
+    # Menaikkan tangan juga MEMBUKA JENDELA, dan itu bukan kenyamanan melainkan penutup jebakan.
+    # `off`/`disarm` menutup jendela (lihat cabang STOP_WORDS di `autopilot`); kalau `arm` hanya
+    # menulis `level`, orang yang mengetik `arm dispatch` setelah memakai rem akan menemukan tangannya
+    # naik sementara setiap klaim ditolak "jendela ON lewat" — rem yang hanya bisa dipakai sekali, dan
+    # kegagalan yang paling sulit ditebak karena layar menunjukkan level yang benar.
+    # Aturan gabungannya sengaja satu arah: jendela yang masih terbuka TIDAK pernah dipendekkan
+    # (naik ke `resume` selama 20 menit tidak boleh merampas 4 jam yang orang lain sudah setujui),
+    # tapi jendela yang sudah lewat atau belum pernah dibuka menjadi sejauh menit yang diketik ini.
+    if level == "observe":
+        run(conn, engine,
+            f"UPDATE autopilot_state SET level={ph}, level_until=NULL, until_epoch={ph}, "
+            f"changed_by={ph} WHERE id=1",
+            (level, now(), who))
+    else:
+        open_from = int(((autopilot(conn, engine) or {}).get("until_epoch")) or 0)
+        window_until = max(open_from, now() + int(minutes) * 60)
+        window_from = now() if open_from <= now() else int(
+            ((autopilot(conn, engine) or {}).get("on_epoch")) or now())
+        run(conn, engine,
+            f"UPDATE autopilot_state SET level={ph}, level_until={ph}, on_epoch={ph}, "
+            f"until_epoch={ph}, off_reason=NULL, changed_by={ph} WHERE id=1",
+            (level, until, window_from, window_until, who))
     return True, json.dumps(drain_level(conn, engine), default=str)
 
 
@@ -1012,7 +1146,23 @@ def decide(conn, engine, question, options=None, weight="heavy", item_id=None):
          "invarian 3: pilihan yang tidak bisa dibatalkan tidak didelegasikan ke mesin mana pun"
          if state == "ESCALATED" else None,
          now(), item_id))
-    return run(conn, engine, "SELECT * FROM decisions ORDER BY id DESC LIMIT 1")
+    rows = run(conn, engine, "SELECT * FROM decisions ORDER BY id DESC LIMIT 1")
+    # "beri tahu aku saat nanya keputusan" — permintaan operator 2026-10-08. Yang dikirim hanya
+    # fakta yang barusan ditulis: id baris, item yang menunggu, dan berapa opsi yang ditawarkan.
+    # Pertanyaan yang mendarat di antrean manusia tapi tidak pernah dilihat siapa pun adalah
+    # pertanyaan yang membuat sebuah item berhenti selamanya, dan diamnya item itu tidak bedanya
+    # dengan diamnya loop.
+    row = rows[0] if rows else {}
+    if state == "ESCALATED":
+        try:
+            n_opts = len(json.loads(row.get("options") or "[]"))
+        except (TypeError, ValueError):
+            n_opts = 0          # dilaporkan sebagai nol opsi, bukan sebagai angka karangan
+        banner("ESCALATED",
+               f"keputusan {row.get('id')} butuh manusia · item={row.get('item_id') or '?'} · "
+               f"{n_opts} opsi · {question[:90]}",
+               urgent=True)
+    return rows
 
 
 # --- F10.1 decision broker ---------------------------------------------------
@@ -1584,8 +1734,29 @@ def queue_command(conn, engine, title: str, cli_engine: str, gate: str = "",
         cur.close()
     if not new_id:
         return False, "id tidak kembali setelah INSERT — dilaporkan gagal, bukan dikira berhasil", None
+    # "begitu perintah masuk, backend harus langsung mengirim ke CLI" — permintaan operator
+    # 2026-10-08, dan dia menyebut sendiri bentuk cacatnya: jalur SQL→CLI hanya hidup di dalam tick,
+    # jadi perintahnya menggantung sampai giliran berikutnya dan tidak ada yang tahu kenapa.
+    # Yang dipanggil di sini adalah jalur tick yang sama, pada saat penulisan: tidak ada aturan
+    # kedua, tidak ada pagar kedua. Tangga `level` tetap menahan — kalau tangan belum diangkat,
+    # barisnya TETAP antre dan penolakannya dilaporkan sebagai kata, bukan sebagai "terkirim".
+    handed = {}
+    try:
+        handed = deliver_now(conn, engine, new_id) or {}
+    except Exception as exc:  # noqa: BLE001 — perintah yang sudah tertulis tidak boleh hilang karena kirim
+        handed = {"sent": False, "queued": True, "refused": f"jalur kirim tidak terpanggil: "
+                  f"{type(exc).__name__}: {exc}"}
+    if handed.get("sent"):
+        banner("WORK_DISPATCHED", f"perintah {new_id} langsung masuk ke {target}", urgent=False)
+    else:
+        banner("QUEUED_NOT_DELIVERED",
+               f"perintah {new_id} untuk {target} sudah antre tapi belum terkirim · "
+               f"{handed.get('refused') or handed.get('why') or (handed.get('events') or '?')}",
+               urgent=True)
     return True, (f"perintah antre sebagai item {new_id} untuk {target}"
-                  + (f" di {where}" if where else " (tanpa proyek → REPO)")), int(new_id)
+                  + (f" di {where}" if where else " (tanpa proyek → REPO)")
+                  + (" — langsung terkirim ke CLI" if handed.get("sent") else
+                     f" — belum terkirim: {handed.get('refused') or handed.get('why') or handed.get('events')}")), int(new_id)
 
 
 def semi_status(conn, engine) -> dict:
@@ -1620,19 +1791,52 @@ def semi_status(conn, engine) -> dict:
 def selftest():
     globals()["_push_src"] = __import__("inspect").getsource(push_state)
     """Jalankan di SQLite sementara. Tes tidak boleh menyentuh produksi: satu selftest yang
-    menulis ke DB bersama akan mengacaukan antrean yang sedang dibaca engine lain."""
+    membuat orang mematikan notifikasi yang sebenarnya dia butuhkan."""
     tmp = Path(f"/tmp/work_order_selftest_{now()}.db")
     conn = sqlite3.connect(str(tmp))
     conn.row_factory = sqlite3.Row
+    banners, orig_banner = _mute_banners()
+    checks = []
+    # Kedua sambatan dipasang SEBELUM try dan dilepas di finally. Kalau dipasang di dalam try,
+    # satu ledakan di `ensure_schema` membuat finally membaca nama yang belum pernah ada — dan
+    # NameError itu menutupi ledakan asli yang sedang dicarinya.
+    # `night_state()` dibaca oleh `claim()` begitu fixture di bawah menyalakan ON, dan ia mengukur
+    # working tree SUNGGUHAN — yang selama tes ini berjalan pasti kotor oleh tesnya sendiri.
+    # Tanpa sambatan ini ratusan klaim fixture ditolak karena berkas yang sedang diedit modul ini.
+    orig_tree_dirty = globals()["tree_dirty"]
+    globals()["tree_dirty"] = lambda: False
+    # `queue_command` sekarang MENGANTARKAN perintahnya, dan jalur kirim asli berbicara ke daemon
+    # pane sungguhan. Selftest yang tidak menukar sambatan ini akan mengetik ke terminal operator
+    # saat orang sedang tidur, jadi pagarnya dipasang sebelum satu baris tes pun berjalan dan
+    # keberadaan pagar itu sendiri diperiksa di bawah.
+    orig_deliver = globals()["deliver_now"]
+    globals()["deliver_now"] = lambda conn, engine, item_id: {
+        "sent": False, "queued": True, "refused": "SELFTEST"}
     fails = []
     try:
         log = ensure_schema(conn, "SQLITE")
-        checks = []
 
         def check(name, cond, detail=""):
             checks.append((name, bool(cond), detail))
 
         check("schema dibuat", all(not l.startswith("skip") for l in log), "; ".join(log))
+        check("jalur kirim disuntik sebelum tes pertama: selftest TIDAK BISA mengetuk pane asli",
+              globals()["deliver_now"] is not _deliver_now, str(globals()["deliver_now"]))
+        # Keadaan awal fixture harus DINYATAKAN, bukan diwarisi dari default skema. Tanpa baris
+        # ini, seluruh blok di bawah ikut bentuk baris pertama: begitu default berubah dari OFF
+        # menjadi SEMI, keranjang SEMI menolak item roadmap yang dibuat `seed` dan setiap tes di
+        # bawahnya runtuh karena alasan yang tidak sedang diuji. Urutannya penting: default dibaca
+        # dulu, baru fixture mengambil keadaannya sendiri.
+        fresh = autopilot(conn, "SQLITE")
+        check("baris baru lahir sebagai SEMI — OFF bukan lagi sebuah keadaan mesin",
+              fresh and fresh["mode"] == "SEMI", str(fresh))
+        check("tangan lahir turun: default SEMI tidak bergerak sendiri",
+              fresh and fresh["level"] == "observe", str(fresh and fresh["level"]))
+        check("jendela belum dibuka di baris baru: boot tidak menemukan loop yang sudah jalan",
+              fresh and not fresh.get("until_epoch"), str(fresh and fresh.get("until_epoch")))
+        conn.execute("UPDATE autopilot_state SET mode='ON', on_epoch=?, until_epoch=?, "
+                     "level='observe' WHERE id=1", (now(), now() + 3600))
+        conn.commit()
         made = seed(conn, "SQLITE", [("kA", "A", "build", None, "true"),
                                      ("kB", "B", "build", ["kA"], "true")])
         ids = {t: i for i, _, t in made}
@@ -1781,12 +1985,22 @@ def selftest():
               borrowed == ["capture_pane", "pane_is_busy"], str(borrowed))
 
         ap = autopilot(conn, "SQLITE")
-        check("autopilot default OFF", ap and ap["mode"] == "OFF", str(ap))
+        check("fixture membaca jendela yang dibuka di atas, bukan default skema",
+              ap["mode"] == "ON" and int(ap["until_epoch"] or 0) > now(), str(ap))
         ap = autopilot(conn, "SQLITE", "ON", minutes=30, budget=4)
         check("ON menyimpan budget dan expiry", ap["mode"] == "ON" and ap["item_budget"] == 4
               and ap["until_epoch"] > now(), str(ap))
-        ap = autopilot(conn, "SQLITE", "OFF", reason="selftest selesai")
-        check("OFF menyimpan alasan", ap["mode"] == "OFF" and "selftest" in (ap["off_reason"] or ""))
+        ap = autopilot(conn, "SQLITE", "off", reason="selftest selesai")
+        check("kata berhenti menyimpan alasan di kolom yang sama",
+              "selftest" in (ap["off_reason"] or ""), str(ap))
+        check("kata berhenti TIDAK menulis mode ketiga — mode tetap yang sedang berlaku",
+              ap["mode"] == "ON", str(ap["mode"]))
+        check("kata berhenti menutup jendela dan menurunkan tangan (rem tanpa TTY)",
+              int(ap["until_epoch"] or 0) <= now() and ap["level"] == "observe",
+              str({k: ap[k] for k in ("until_epoch", "level")}))
+        ap = autopilot(conn, "SQLITE", "nanti-dulu", reason="typo")
+        check("mode di luar kosakata DITOLAK dengan menyebut kosakata, tidak dipilihkan diam-diam",
+              "bukan kosakata" in (ap.get("refused") or "") and ap["mode"] == "ON", str(ap))
 
         # --- F10.3: tangga tangan, dan pagar yang membuatnya tak bisa dinaikkan sendiri ---
         lvl = drain_level(conn, "SQLITE")
@@ -1831,12 +2045,13 @@ def selftest():
         lvl = drain_level(conn, "SQLITE")
         check("resume tanpa batas waktu terbaca tertutup: lupa bukan izin",
               lvl["level"] == "observe" and not lvl["allows_resume"], str(lvl))
-        # OFF pada sakelar ikut menutup tangan; kalau tidak, ON berikutnya menemukan level yang
+        # Kata berhenti ikut menutup tangan; kalau tidak, ON berikutnya menemukan level yang
         # diangkat orang lain pada malam yang berbeda.
         set_level(conn, "SQLITE", "resume", 30, "selftest", tty=True)
-        ap = autopilot(conn, "SQLITE", "OFF", reason="selftest: pagar OFF menutup tangan")
-        check("OFF pada sakelar ikut menutup tangan",
-              drain_level(conn, "SQLITE")["level"] == "observe" and ap["mode"] == "OFF")
+        ap = autopilot(conn, "SQLITE", "off", reason="selftest: kata berhenti menutup tangan")
+        check("kata berhenti ikut menutup tangan",
+              drain_level(conn, "SQLITE")["level"] == "observe" and ap["level"] == "observe",
+              str(drain_level(conn, "SQLITE")))
         check("has_tty adalah ukuran, bukan dugaan", isinstance(has_tty(), bool), str(has_tty()))
 
         # --- F10.3: anggaran sentuhan ditegakkan di tempat tulisannya terjadi, bukan di timer.
@@ -2040,6 +2255,62 @@ def selftest():
             check("3 kegagalan mematikan klaim berikutnya", not ok and "circuit breaker" in msg, msg)
             st = night_state(conn, "SQLITE", dirty=False)
             check("batas kegagalan terlihat di night_state", not st["ok"], str(st["why"]))
+            # --- sifat yang diminta operator: satu malam panjang tidak boleh mati ---
+            # Ini bukan variasi dari tes di atas; ini sisi lain dari pagar yang sama. Tiga
+            # kegagalan yang SELING-BERSELING dengan keberhasilan adalah mesin yang sedang
+            # bekerja, bukan mesin yang mengunyah satu baris rusak. Di bawah perhitungan lama
+            # ("semua kegagalan dalam 12 jam") keadaan ini menutup loop dan komputer diam
+            # sampai pagi — persis waktu yang dia bilang tidak boleh terbuang.
+            conn.execute("UPDATE quest_tasks SET completed_at=datetime('now','-3 days') "
+                         "WHERE status='COMPLETED'")
+            conn.execute("DELETE FROM quest_tasks WHERE title LIKE 'gagal%'")
+            conn.commit()
+            for k in range(4):
+                conn.execute("INSERT INTO quest_tasks (title,status,completed_at) "
+                             "VALUES (?,?,datetime('now'))", (f"selang-gagal{k}", "FAILED"))
+                conn.execute("INSERT INTO quest_tasks (title,status,completed_at) "
+                             "VALUES (?,?,datetime('now'))", (f"selang-sukses{k}", "COMPLETED"))
+            conn.commit()
+            st_mix = night_state(conn, "SQLITE", dirty=False)
+            check("4 gagal + 4 sukses berselang-seling TIDAK menutup loop — yang menutup hanya "
+                  "rentetan tanpa satu pun keberhasilan",
+                  st_mix["ok"] and consecutive_failures(conn, "SQLITE") == 0,
+                  f"{st_mix['why']} beruntun={consecutive_failures(conn, 'SQLITE')}")
+            # Sisi lain dari perataan sedetik, dan ini yang membuat `>` bukan jawaban. Loop di atas
+            # berakhir pada keberhasilan, jadi kegagalan SESUDahnya pada detik yang sama harus tetap
+            # dihitung — kalau tidak, mesin yang mengunyah satu baris rusak dalam satu detik yang
+            # sama dengan keberhasilan terakhir tidak akan pernah ditutup, dan pagar itu hanya
+            # berbunyi pada malam yang lambat. Di bawah `>` angkanya 0; di bawah `>=` keempat
+            # kegagalan di atas ikut terseret jadi 4. Hanya (detik, id) yang memberi 1.
+            conn.execute("INSERT INTO quest_tasks (title,status,completed_at) "
+                         "VALUES ('selang-gagal-tail','FAILED',datetime('now'))")
+            conn.commit()
+            check("kegagalan pada DETIK yang sama dengan keberhasilan terakhir, tapi ditulis "
+                  "sesudahnya, tetap dihitung — dan hanya itu yang dihitung",
+                  consecutive_failures(conn, "SQLITE") == 1,
+                  f"beruntun={consecutive_failures(conn, 'SQLITE')}")
+            # Baris COMPLETED tanpa completed_at itu nyata di database lama, dan tanpa filter
+            # `IS NOT NULL` ia MENANG di ORDER BY DESC. Dengan id terbesar di tabel saat ini,
+            # tanpa filter itu rentetan terbaca sebagai "sejak nol" — pemutus menutup loop yang
+            # sedang bekerja dengan baik. Baris ini diberi id tertinggi secara sengaja.
+            conn.execute("INSERT INTO quest_tasks (title,status,completed_at) "
+                         "VALUES ('selang-sukses-null','COMPLETED',NULL)")
+            conn.commit()
+            check("COMPLETED tanpa completed_at tidak menyamar jadi keberhasilan terakhir",
+                  consecutive_failures(conn, "SQLITE") == 1,
+                  f"beruntun={consecutive_failures(conn, 'SQLITE')}")
+            conn.execute("DELETE FROM quest_tasks WHERE title LIKE 'selang-%'")
+            conn.commit()
+            for k in range(NIGHT_MAX_FAILURES):
+                conn.execute("INSERT INTO quest_tasks (title,status,completed_at) "
+                             "VALUES (?,?,datetime('now'))", (f"rentetan{k}", "FAILED"))
+            conn.commit()
+            check("rentetan SUNGGUHAN tanpa keberhasilan tetap menutup loop",
+                  consecutive_failures(conn, "SQLITE") >= NIGHT_MAX_FAILURES
+                  and not night_state(conn, "SQLITE", dirty=False)["ok"],
+                  str(night_state(conn, "SQLITE", dirty=False)["why"]))
+            conn.execute("DELETE FROM quest_tasks WHERE title LIKE 'rentetan%'")
+            conn.commit()
         finally:
             globals()["tree_dirty"] = orig_tree_dirty
 
@@ -2101,20 +2372,21 @@ def selftest():
         check("setiap butir ROADMAP yang di-seed membawa gerbang", not no_gate, str(no_gate))
 
         # --- Dashboard: SEMI, asal baris, dan identitas proyek ----------------
-        # Kegagalan yang diincar blok ini bukan crash, melainkan DUA laporan yang berbeda: mode
-        # yang tersimpan sebagai OFF padahal tombolnya SEMI, antrean roadmap yang ikut dikerjakan
-        # "karena toh sudah antri", dan dua tempat yang boleh menyatakan proyek mana yang aktif.
+        # Kegagalan yang diincar blok ini bukan crash, melainkan DUA laporan yang berbeda: tombol
+        # yang menulis satu nilai tapi layar membacakan nilai lain, antrean roadmap yang ikut
+        # dikerjakan "karena toh sudah antri", dan dua tempat yang boleh menyatakan proyek mana
+        # yang aktif.
         # Ketiganya tidak kelihatan dari layar — karena itu ketiganya diuji di sini.
         conn.execute("UPDATE quest_tasks SET completed_at=datetime('now','-2 days') "
                      "WHERE status IN ('FAILED','PARKED')")
         conn.commit()
 
         ap = autopilot(conn, "SQLITE", "SEMI", minutes=30, who="selftest")
-        check("SEMI tersimpan sebagai SEMI, tidak jatuh ke cabang OFF",
+        check("SEMI tersimpan sebagai SEMI dengan tangan turun",
               ap["mode"] == "SEMI" and ap["level"] == "observe", str(ap))
         ap = autopilot(conn, "SQLITE", "semii", who="selftest")
-        check("nilai mode yang tidak dikenal mendarat di OFF (invarian 6: mati tetap mati)",
-              ap["mode"] == "OFF" and ap["level"] == "observe", str(ap))
+        check("nilai mode yang tidak dikenal tidak mengubah apa pun (invarian 6: typo bukan izin)",
+              ap.get("refused") and ap["mode"] == "SEMI" and ap["level"] == "observe", str(ap))
         autopilot(conn, "SQLITE", "SEMI", minutes=30, who="selftest")
 
         seed(conn, "SQLITE", [("kRM", "RM-only", "build", None, "true")])
@@ -2144,8 +2416,12 @@ def selftest():
         # Yang sedang dibuktikan adalah bahwa TIGA BARIS GAGAL menutup SEMI, jadi hanya itu yang
         # boleh menutupnya.
         blocked = claim(conn, "SQLITE", op2, "drainer", dirty=False)
+        # Kata yang diuji adalah kata yang ditulis kode, dan angkanya ikut: kontrak pemutus bilang
+        # `claim` menolak DENGAN angka yang menjatuhkannya, jadi penolakan tanpa angka itu adalah
+        # pagar yang berbunyi tanpa mengatakan apa yang dimakannya.
         check("pemutus malam menutup SEMI persis seperti menutup ON",
-              not blocked[0] and "kegagalan berturut-turut" in blocked[1], str(blocked))
+              not blocked[0] and "kegagalan beruntun" in blocked[1]
+              and str(NIGHT_MAX_FAILURES) in blocked[1], str(blocked))
 
         ok, msg, _ = queue_command(conn, "SQLITE", "tanpa engine", "")
         check("queue menolak baris tanpa cli_engine alih-alih memilih favorit",
@@ -2330,8 +2606,17 @@ def selftest():
               and semi["known_engines"],
               str({k: semi[k] for k in ("operator_pending", "known_engines")}))
     finally:
+        globals()["tree_dirty"] = orig_tree_dirty
+        globals()["banner"] = orig_banner
+        globals()["deliver_now"] = orig_deliver
         conn.close()
         tmp.unlink(missing_ok=True)
+
+    check("pertanyaan yang butuh manusia benar-benar mengirim satu banner darurat — jalur ini bukan "
+          "kode yang lulus karena tidak ada yang memantau",
+          any(a == "ESCALATED" and u for a, _d, u in banners), str(banners[:3]))
+    check("selftest tidak pernah menyentuh desktop: semua banner tercatat, none dikirim",
+          all(isinstance(b, str) for _a, b, _u in banners) and banners, str(len(banners)))
 
     bad = [c for c in checks if not c[1]]
     for name, okval, detail in checks:
@@ -2352,6 +2637,10 @@ def selftest_live():
     conn, engine = connect()
     mark = f"selftest-live-{now()}"
     checks = []
+    # Jalur live menjalankan `decide()` sungguhan, dan `decide()` sekarang berbanner saat sebuah
+    # pertanyaan mendarat di antrean manusia. Tes yang membangunkan orang lewat desktop-nya sendiri
+    # bukan tes yang baik: banner direkam, tidak dikirim.
+    banners_live, orig_banner_live = _mute_banners()
 
     def check(name, cond, detail=""):
         checks.append((name, bool(cond), detail))
@@ -2361,9 +2650,14 @@ def selftest_live():
         rows = run(conn, engine, "SELECT 1 AS one")
         check(f"SELECT mengembalikan dict di {engine}", rows and rows[0].get("one") == 1, str(rows))
         ph = "%s" if engine == "POSTGRESQL" else "?"
+        # Baris uji ini diberi `origin='operator'` karena itu memang kenyataannya: selftest ini
+        # berjalan atas nama orang yang menyuruhnya. Tanpa label itu, sejak OFF dibuang dari
+        # kosakata dan default menjadi SEMI, klaim di bawah ditolak keranjang SEMI ("hanya perintah
+        # operator") dan tes yang merah itu tidak sedang menguji apa pun selain labelnya sendiri.
         run(conn, engine,
-            f"INSERT INTO quest_tasks (title, status, phase, check_command) "
-            f"VALUES ({ph}, 'PENDING', 'test', {ph})", (f"{mark}-A", "true"))
+            f"INSERT INTO quest_tasks (title, status, phase, check_command, origin) "
+            f"VALUES ({ph}, 'PENDING', 'test', {ph}, {ph})",
+            (f"{mark}-A", "true", ORIGIN_OPERATOR))
         got = run(conn, engine, f"SELECT id FROM quest_tasks WHERE title={ph}", (f"{mark}-A",))
         check("baris uji bisa dibaca kembali", got, str(got))
         try:
@@ -2384,10 +2678,40 @@ def selftest_live():
             ok, msg = finish(conn, engine, iid, "COMPLETED", evidence="selftest_live")
             check("COMPLETED dengan bukti diterima", ok, msg)
         ap = autopilot(conn, engine)
-        check("autopilot_state terbaca", ap and ap.get("mode") in ("ON", "OFF"), str(ap))
-        check("default autopilot OFF di produksi", (ap or {}).get("mode") == "OFF", str(ap))
+        check("autopilot_state terbaca", ap and ap.get("mode") in MODES, str(ap))
+        # Yang diuji di sini adalah keadaan PRODUKSI sesudah migrasi yang berjalan di
+        # `ensure_schema`: baris 'OFF' warisan menjadi SEMI dengan tangan tetap turun. Kalau
+        # migrasi itu salah — misalnya ia membuka jendela atau mengangkat tangan — cek kedua di
+        # bawah ini yang merah, bukan cek mode.
+        check("produksi tidak menyimpan mode di luar kosakata",
+              (ap or {}).get("mode") in MODES, str(ap))
+        check("rem produksi terbaca dari kolom tangan, bukan dari mode",
+              (ap or {}).get("level") in LEVELS, str((ap or {}).get("level")))
         st = night_state(conn, engine)
         check("night_state terbaca tanpa crash", isinstance(st.get("ok"), bool), str(st))
+        # `consecutive_failures` punya dua cabang SQL dan yang satu hanya jalan di sini. Menulis
+        # `EXTRACT(EPOCH FROM ...)` yang salah ketik akan tetap hijau di SQLite dan menolak setiap
+        # klaim di produksi pada tick pertama — jadi yang diuji adalah ANGKANYA, bukan hanya
+        # keberadaannya. Baris yang ditulis paling baru selalu paling akhir urut (detik, id),
+        # jadi selisihnya pasti, berapa pun isi tabel yang sedang dibaca engine lain.
+        base = consecutive_failures(conn, engine)
+        run(conn, engine,
+            f"INSERT INTO quest_tasks (title, status, completed_at) VALUES "
+            f"({ph}, 'FAILED', CURRENT_TIMESTAMP)" if engine == "POSTGRESQL" else
+            f"INSERT INTO quest_tasks (title, status, completed_at) VALUES "
+            f"({ph}, 'FAILED', datetime('now'))", (f"{mark}-breaker-fail",))
+        check("satu kegagalan baru menaikkan rentetan persis satu di backend produksi",
+              consecutive_failures(conn, engine) == base + 1,
+              f"base={base} now={consecutive_failures(conn, engine)}")
+        run(conn, engine,
+            f"INSERT INTO quest_tasks (title, status, completed_at) VALUES "
+            f"({ph}, 'COMPLETED', CURRENT_TIMESTAMP)" if engine == "POSTGRESQL" else
+            f"INSERT INTO quest_tasks (title, status, completed_at) VALUES "
+            f"({ph}, 'COMPLETED', datetime('now'))", (f"{mark}-breaker-win",))
+        check("satu keberhasilan memotong rentetan sampai nol — itu yang membuat malam panjang "
+              "tidak mati",
+              consecutive_failures(conn, engine) == 0,
+              f"now={consecutive_failures(conn, engine)}")
         nxt = next_item(conn, engine)
         check("next_item tidak menawarkan baris UNAVAILABLE di produksi",
               not nxt or norm(nxt["status"]) not in ("UNAVAILABLE", "FAILED", "COMPLETED"),
@@ -2622,6 +2946,7 @@ def status(conn, engine, older_than=180):
         "drain": drain_level(conn, engine),
         "night": night_state(conn, engine),
         "limits": {"max_failures": NIGHT_MAX_FAILURES, "max_items": NIGHT_MAX_ITEMS,
+                   "failure_lookback": FAILURE_LOOKBACK,
                    "lease_seconds": LEASE_SECONDS, "max_resume": MAX_RESUME,
                    "arm_default_minutes": ARM_DEFAULT_MINUTES, "arm_max_minutes": ARM_MAX_MINUTES,
                    "levels": list(LEVELS)},
@@ -2786,8 +3111,13 @@ def main(argv=None):
         print(json.dumps(stalled(conn, engine), default=str, indent=2))
     elif a.cmd == "autopilot":
         mode = None if a.mode in (None, "show") else a.mode.upper()
-        print(json.dumps(autopilot(conn, engine, mode, a.minutes, a.budget, a.by, a.reason),
-                         default=str, indent=2))
+        state = autopilot(conn, engine, mode, a.minutes, a.budget, a.by, a.reason)
+        print(json.dumps(state, default=str, indent=2))
+        # Keluar non-zero saat ditolak. `arm`/`disarm` sudah begitu, dan pemanggil yang sama
+        # (Rust, shell, engine) tidak boleh punya dua kontrak: dengan exit 0 di sini, sebuah
+        # penulisan mode yang DITOLAK terbaca sebagai keberhasilan oleh siapa pun yang hanya
+        # melihat kode keluar — persis kelas "UNAVAILABLE bukan COMPLETED" yang dilarang invarian 5.
+        return 1 if (state or {}).get("refused") else 0
     elif a.cmd == "arm":
         ok, msg = set_level(conn, engine, a.level, a.minutes, a.by)
         print(msg)

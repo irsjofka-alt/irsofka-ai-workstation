@@ -229,6 +229,13 @@
   .card .kv strong { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--ink);
                      text-align: right; word-break: break-word; }
   /* Sakelar satu kata, tiga keadaan. Tiga checkbox terpisah adalah tiga laporan tentang satu hal. */
+  .seg.seg-2 { grid-template-columns: repeat(2, 1fr); }
+  .stopbtn {
+    margin-top: 8px; width: 100%; padding: 7px 10px; border-radius: 8px; cursor: pointer;
+    border: 1px solid #4a2020; background: #1b1211; color: #c88a8a; font: inherit; font-size: 12px;
+  }
+  .stopbtn:hover { color: var(--red, #e0736b); background: #241615; }
+  .stopbtn[disabled] { opacity: .4; cursor: default; }
   .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px;
          background: #0c1218; border: 1px solid var(--line); border-radius: 10px; }
   .seg button {
@@ -975,30 +982,41 @@
   }
 
   function switchCard(host) {
-    var mode = ((ap.autopilot || {}).mode || "OFF").toUpperCase();
-    var card = dashCard("Autopilot", "Siapa yang memegang mesin malam ini. OFF = ada manusia di "
-      + "meja. SEMI = otomatis, tapi yang dikerjakan hanya perintah yang kamu tulis sendiri ke "
-      + "SQL. ON = komputer ini sepenuhnya milik engine, termasuk antrean ROADMAP.");
-    var seg = el("div", "seg");
-    ["OFF", "SEMI", "ON"].forEach(function (m) {
-      var b = el("button", m === mode ? "on" : null, m);
+    var a = ap.autopilot || {};
+    var mode = ((a.mode || "").toUpperCase()) || "—";
+    // Dua posisi, bukan tiga. OFF dibuang dari kosakata mesin atas perintah operator ("OFF dibuang
+    // saja, hanya SEMI dan FULL AUTO"), dan halaman ini tidak menyimpan salinan kosakata itu
+    // sendiri — kata yang berlaku ditetapkan `work_order.MODES`, dan penolakan datang dari sana
+    // dalam field `refused` yang ditampilkan apa adanya di bawah.
+    // Rem tidak hilang: ia tombol "berhenti", yang menulis kata berhenti ke jalur yang sama dan
+    // tidak butuh persetujuan engine mana pun (invarian 6).
+    var card = dashCard("Autopilot", "Siapa yang memegang mesin. SEMI = otomatis dengan kamu di "
+      + "meja: yang dikerjakan hanya perintah yang kamu tulis sendiri ke SQL. FULL AUTO = mesin "
+      + "ini milik engine, termasuk antrean ROADMAP. Untuk berhenti: tombol berhenti di bawah.");
+    var seg = el("div", "seg seg-2");
+    ["SEMI", "ON"].forEach(function (m) {
+      var b = el("button", m === mode ? "on" : null, m === "ON" ? "FULL AUTO" : m);
       b.dataset.mode = m;
       b.disabled = !!apBusySend;
       b.addEventListener("click", function () { dashSwitch(m, b); });
       seg.appendChild(b);
     });
     card.appendChild(seg);
-    var a = ap.autopilot || {};
-    var parts = ["tercatat: " + mode, "oleh " + (a.changed_by || "—")];
-    if (mode === "ON" || mode === "SEMI") { parts.push("jendela " + timeLeft(a.until_epoch)); }
-    if (a.off_reason) { parts.push("alasan: " + a.off_reason); }
-    var led = el("div", "ledger", parts.join(" · "));
-    card.appendChild(led);
+    var stop = el("button", "stopbtn", "berhenti");
+    stop.disabled = !!apBusySend;
+    stop.title = "Menurunkan tangan dan menutup jendela. Tidak butuh TTY, tidak butuh AI.";
+    stop.addEventListener("click", function () { dashSwitch("off", stop); });
+    card.appendChild(stop);
+    var parts = ["tercatat: " + mode, "oleh " + (a.changed_by || "—"),
+      "tangan: " + ((ap.drain || {}).level || "—")];
+    if (a.until_epoch) { parts.push("jendela " + timeLeft(a.until_epoch)); }
+    if (a.off_reason) { parts.push("alasan berhenti: " + a.off_reason); }
+    card.appendChild(el("div", "ledger", parts.join(" · ")));
     var box = el("div", "reply");
     box.id = "switch-reply";
     card.appendChild(box);
     if (ap.off_paths) {
-      card.appendChild(fold("empat jalan mati yang tidak butuh AI", function (host2) {
+      card.appendChild(fold("jalan mati yang tidak butuh AI", function (host2) {
         (ap.off_paths || []).forEach(function (p) { host2.appendChild(el("div", "step", "· " + p)); });
       }));
     }
@@ -1019,7 +1037,13 @@
       apBusySend = false;
       if (!box) { render(); return; }
       showReply(box, res);
-      box.className = "reply " + (res.status === 200 ? "good" : "bad");
+      // HTTP 200 dengan `refused` di dalamnya BUKAN keberhasilan. Rust meneruskan apa yang
+      // dikatakan work_order apa adanya, dan halaman ini membacanya sebagai penolakan — kalau yang
+      // diperiksa hanya status, tombol yang ditolak kosakata akan menyala hijau dan orang akan
+      // mengira mesinnya sudah berpindah mode.
+      var j = res.json || {};
+      var refused = !!j.refused || !!j.error || !!(j.result && j.result.refused);
+      box.className = "reply " + ((res.status === 200 && !refused) ? "good" : "bad");
       loadAutopilot();
     }).catch(function () { apBusySend = false; if (box) { box.textContent = "gagal"; box.className = "reply bad"; } });
   }
@@ -1031,7 +1055,7 @@
       ["mode", a.mode],
       ["tangan (level)", d.level + (d.allows_dispatch ? " · dispatch" : "") + (d.allows_resume ? " · resume" : "")],
       ["item selesai di jendela", a.items_done],
-      ["kegagalan 12 jam", n.failures_12h],
+      ["kegagalan beruntun", n.failures_run + " (tanpa satu pun keberhasilan, dalam " + Math.round((n.lookback_seconds || 0) / 3600) + " jam terakhir)"],
       ["working tree", n.tree_dirty === true ? "kotor — klaim tertutup" : (n.tree_dirty === false ? "bersih" : "UNKNOWN")],
       ["antrean perintahmu", w.operator_pending + " menunggu"],
       ["engine yang memegang klaim", (w.engines_with_a_claim || []).join(", ") || "tidak ada"],

@@ -8,16 +8,20 @@
 //!
 //! Tiga hal yang dijaga di file ini:
 //!
-//! 1. Bentuk masukan, bukan kebijakan. `mode` harus `on`/`off`; `minutes`/`budget` harus bilangan
-//!    bulat positif; string dipotong. Apakah sebuah jendela boleh diterima atau tidak diputuskan
-//!    `work_order.py`, satu kali, di satu tempat.
+//! 1. Bentuk masukan, bukan kebijakan. `mode` harus sebuah kata (maksimal 24 karakter);
+//!    `minutes`/`budget` harus bilangan bulat positif; string dipotong. Kata mana yang berarti
+//!    "jalan", "pantau", atau "berhenti" diputuskan `work_order.py` satu kali, di satu tempat —
+//!    daftar kata yang disalin ke file ini adalah cara penyelenggara ini dulu menolak OFF sambil
+//!    halaman masih menampilkannya.
 //! 2. Tidak ada satu byte pun yang pernah masuk ke shell. Argumen disusun sebagai array dan
 //!    diberangkatkan lewat `run_bounded`, yang memberi grup proses sendiri dan memotong seluruh
 //!    grup itu saat batas lewat (kontrak §4) — panggilan yang menggantung tidak boleh meninggalkan
 //!    worker yang memegang RAM.
-//! 3. Mode OFF adalah jalur yang paling tidak boleh gagal. Kalau proses anak mati, responsnya
+//! 3. Kata berhenti adalah jalur yang paling tidak boleh gagal. Kalau proses anak mati, responsnya
 //!    menyebut jalur lain yang tetap jalan tanpa bantuan AI — `OFF_PATHS` di bawah, dan setiap
-//!    barisnya dibuktikan ada lebih dulu sebelum ditulis ke sana (kontrak §6).
+//!    barisnya dibuktikan ada lebih dulu sebelum ditulis ke sana (kontrak §6). OFF sebagai MODE sudah
+//!    dibuang; rem sekarang adalah menurunkan tangan (`disarm`) dan menutup jendela, dan keduanya
+//!    tetap tidak butuh TTY maupun kerja sama AI.
 use axum::body::Body;
 use axum::extract::Json;
 use axum::http::header::CONTENT_TYPE;
@@ -143,24 +147,29 @@ fn positive_int(v: Option<&Value>) -> Option<u64> {
     }
 }
 
-/// POST /api/autopilot — `on`, `semi`, `off`; selain itu ditolak sebelum proses berangkat.
+/// POST /api/autopilot — memvalidasi BENTUK badan, bukan kosakata.
 ///
-/// Badan yang sah: `{"mode":"on","minutes":240,"budget":8,"reason":"...","by":"operator-gui"}`.
+/// Badan yang sah: `{"mode":"semi","minutes":180,"budget":8,"reason":"...","by":"operator-gui"}`.
 ///
-/// `semi` diterima di sini karena SEMI adalah jawaban ketiga atas pertanyaan yang sama
-/// ("siapa yang memegang mesin") dan bukan tangga baru: ia menulis `mode='SEMI'` ke baris
-/// sakelar yang sama. Yang TIDAK berubah adalah `level` — naik tangga tetap hanya lewat `arm`
-/// dari `/dev/tty`, dan tidak ada tombol HTTP yang mengangkat tangan (invarian 6).
+/// Daftar kata yang diterima TIDAK ada di sini, dan itu perubahan yang disengaja. Penyelenggara
+/// ini dulunya menyimpan salinan `on/semi/off` sendiri; ketika operator membuang OFF dari
+/// kosakata mesin, salinan di sinilah yang akan tetap menolak kata itu selama berminggu-minggu
+/// sambil halaman membacakan mode yang berbeda dari yang diikat kode — dua definisi untuk satu
+/// kata adalah dua laporan yang boleh berbeda (§12). Yang diikat di sini hanyalah bentuk: sebuah
+/// kata, panjangnya terbatas, dan angka yang memang angka. Yang mana yang berarti SEMI, ON, atau
+/// kata berhenti, itu milik `work_order.MODES` dan `STOP_WORDS`, dan penolakannya datang dari
+/// sana bersama alasannya.
 pub(crate) async fn post_state(Json(body): Json<Value>) -> Response {
     let mode = match body.get("mode").and_then(Value::as_str) {
-        Some(m) if m.eq_ignore_ascii_case("on") => "on",
-        Some(m) if m.eq_ignore_ascii_case("semi") => "semi",
-        Some(m) if m.eq_ignore_ascii_case("off") => "off",
-        Some(other) => {
-            return envelope(
-                StatusCode::BAD_REQUEST,
-                json!({"ok": false, "error": format!("mode {other:?} bukan on/semi/off — status tidak disentuh")}),
-            )
+        Some(m) => {
+            let clean: String = m.trim().to_lowercase().chars().take(24).collect();
+            if clean.is_empty() {
+                return envelope(
+                    StatusCode::BAD_REQUEST,
+                    json!({"ok": false, "error": "mode wajib diisi"}),
+                );
+            }
+            clean
         }
         None => {
             return envelope(
@@ -170,27 +179,26 @@ pub(crate) async fn post_state(Json(body): Json<Value>) -> Response {
         }
     };
 
-    let mut args: Vec<String> = vec!["autopilot".to_string(), mode.to_string()];
-    // Jendela dan anggaran boleh dipasang untuk SEMI juga: `items_done_in_window` dan pemutus
-    // malam membaca `on_epoch`, dan jendela SEMI tanpa `on_epoch` akan melaporkan "0 item malam
-    // ini" selamanya — laporan yang salah lebih berbahaya daripada tidak ada laporan.
-    if mode != "off" {
-        if let Some(m) = positive_int(body.get("minutes")) {
-            args.extend(["--minutes".to_string(), m.to_string()]);
-        } else if body.get("minutes").is_some() {
-            return envelope(
-                StatusCode::BAD_REQUEST,
-                json!({"ok": false, "error": "minutes harus bilangan bulat positif; jendela ON tidak dipasang"}),
-            );
-        }
-        if let Some(b) = positive_int(body.get("budget")) {
-            args.extend(["--budget".to_string(), b.to_string()]);
-        } else if body.get("budget").is_some() {
-            return envelope(
-                StatusCode::BAD_REQUEST,
-                json!({"ok": false, "error": "budget harus bilangan bulat positif; jendela ON tidak dipasang"}),
-            );
-        }
+    let mut args: Vec<String> = vec!["autopilot".to_string(), mode.clone()];
+    // Jendela dan anggaran ikut dikirim untuk kata apa pun, termasuk kata berhenti: `off` sekarang
+    // menulis `until_epoch = sekarang` dan menulis kolom yang sama dengan yang dibaca laporan
+    // "berapa item selesai malam ini". Menyaringnya di sini berarti jalur berhenti dan jalur jalan
+    // punya dua bentuk tulisan — dan yang salah bentuk adalah yang orang pakai saat panik.
+    if let Some(m) = positive_int(body.get("minutes")) {
+        args.extend(["--minutes".to_string(), m.to_string()]);
+    } else if body.get("minutes").is_some() {
+        return envelope(
+            StatusCode::BAD_REQUEST,
+            json!({"ok": false, "error": "minutes harus bilangan bulat positif; tidak ada yang ditulis"}),
+        );
+    }
+    if let Some(b) = positive_int(body.get("budget")) {
+        args.extend(["--budget".to_string(), b.to_string()]);
+    } else if body.get("budget").is_some() {
+        return envelope(
+            StatusCode::BAD_REQUEST,
+            json!({"ok": false, "error": "budget harus bilangan bulat positif; tidak ada yang ditulis"}),
+        );
     }
     let by = body
         .get("by")

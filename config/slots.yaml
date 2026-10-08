@@ -1,3 +1,8 @@
+# Peta peran → engine untuk workstation ini: `resolver`, `verifier`, `decider`, `drainer`
+# dan rekan satu tim. Berkas ini adalah KONTRAK nama peran; `config/engines.json` memegang
+# siapa di balik tiap nama (model, meter kuota, batas tangan). Engine dilarang memilih model
+# dari ingatan — ia membaca berkas ini pada saat dipakai (§12), dan operator menyuntingnya
+# dari Station.
 version: 1.0.0
 active_team: programmer_squad
 teams:

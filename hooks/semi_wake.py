@@ -44,6 +44,9 @@ SESSION_ENGINE = (sys.argv[1] if len(sys.argv) > 1 else "qoder")
 # kegagalan yang dari luar terlihat sukses.
 BLOCK_DECISION = {"qoder": "block", "antigravity": "continue"}.get(SESSION_ENGINE, "block")
 NIGHT_LOG = Path.home() / ".ai-station" / "logs" / "semi_wake.jsonl"
+# Peristiwa yang boleh menyentuh desktop dari jalur ini. Satu nama = satu makna yang sama dengan
+# yang ditulis ke log, jadi banner dan baris log tidak pernah bisa berbeda cerita (§12).
+BANNER_ACTIONS = {"SEMI_INJECTED", "SEMI_BROKE", "SEMI_EMIT_FAILED", "SEND_FAILED"}
 # Plafon ini TIDAK sama dengan milik auto_restore.py (3200) dan tidak lagi mengaku begitu:
 # dinaikkan karena anggaran dibagi per berkas, dan dengan 3200 setiap berkas kontrak hanya
 # kebagian ~800 karakter.
@@ -98,7 +101,27 @@ def log(action: str, **rest) -> None:
         with NIGHT_LOG.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 — mencatat kegagalan tidak boleh ikut menggagalkan
-        pass
+        return
+    # Satu banner untuk tiap perintah yang benar-benar masuk ke CLI, dan untuk tiap kegagalan jalur
+    # ini. Yang lain (mesin belum selesai, tangan belum diangkat, baris proyek lain) tetap hanya di
+    # log: operator meminta notifikasi untuk AKSI dan ERROR, bukan untuk setiap detik yang dilewati
+    # mesin. Kegagalan banner tidak pernah boleh menggagalkan hook — hasilnya ditulis ke baris log
+    # yang sama, jadi jejaknya tetap ada kalau desktop sedang tidak bisa dihubungi.
+    if action in BANNER_ACTIONS:
+        detail = " ".join(f"{k}={v}" for k, v in rest.items()
+                          if k in ("item", "title", "engine", "target", "why", "reason"))[:400]
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(TOOLS))
+            import notify
+            row["notify"] = notify.notify_event(action, detail, urgent=action != "SEMI_INJECTED")
+        except Exception as exc:  # noqa: BLE001 — banner yang gagal dilaporkan, tidak dikarang
+            row["notify"] = {"sent": False, "err": f"{type(exc).__name__}: {exc}"}
+        try:
+            with NIGHT_LOG.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            pass
 
 
 def read_input() -> dict:
@@ -205,7 +228,17 @@ def main() -> int:
     conn, engine = wo.connect()
     ap = wo.autopilot(conn, engine) or {}
     if (ap.get("mode") or "").upper() != "SEMI":
-        return 0                      # OFF/ON: jalur ini tidak pernah ikut campur, tanpa jejak
+        return 0                      # ON: jalur ini tidak pernah ikut campur, tanpa jejak
+
+    # Tangga `level` TIDAK menahan jalur ini, dan itu keputusan yang bisa dibaca, bukan kelalaian.
+    # Yang dijaga `arm` adalah mesin yang bergerak sendiri: timer yang mengetik ke pane milik orang
+    # lain tanpa ada yang memintanya. Peristiwa di sini bentuknya berbeda — sebuah sesi yang ORANG
+    # itu sendiri mulai baru saja berhenti, dan yang akan disuntik adalah perintah yang dia tulis
+    # sendiri ke antrean (keranjang SEMI ditegakkan `claim()`, bukan di sini). Memakai rem yang
+    # sama di kedua tempat membuat permintaannya sendiri ("perintahku harus nyampe ke CLI, bukan
+    # nunggu tick") tidak bisa dipenuhi tanpa mengangkat tangan lewat TTY setiap kali dia menulis
+    # satu baris. Boot tetap diam: timer tidak pernah di-enable, dan jalur timer tetap butuh
+    # `dispatch`. Yang berubah malam ini hanya bahwa perintah orang tidak lagi menunggu timer.
 
     if not is_really_idle(data):
         # Yang diminta operator: "kalau melihat kamu Working, nunggu sampai selesai". Antigravity

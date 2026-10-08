@@ -33,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import notify  # noqa: E402
 import work_order as wo  # noqa: E402
 
 REPO = Path.home() / ".ai-station"
@@ -340,8 +341,14 @@ def _as_path(text):
 
 def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
                   capture=None, busy=None, tab_project=None, pane_cwd=None, gap=MIN_PANE_GAP,
-                  sleeper=None, dirty=wo._MEASURE):
+                  sleeper=None, dirty=wo._MEASURE, for_item=None):
     """Serahkan satu item baru ke engine yang ditunjuk barisnya. Tidak pernah menebak tujuan.
+
+    `for_item` adalah jalur perintah instan (operator baru saja menulis perintahnya dan jawabannya
+    tidak boleh menunggu tick berikutnya): barisnya sudah diketahui, jadi tidak perlu diambil dari
+    kepala antrean. Semuanya tetap lewat pagar yang sama persis — gerbang, pane tenang, direktori
+    tab, klaim bersyarat, pelepasan saat kirim gagal. Dua jalur dengan dua set pagar adalah dua
+    aturan, dan yang lebih longgar akan menjadi yang benar-benar berjalan.
 
     Mesin mana yang mengerjakan adalah milik kolom `cli_engine` pada baris itu — operator menyuntingnya
     dari Station, dan kontrak melarang memilih engine dari ingatan (§12). Baris tanpa tujuan ditolak,
@@ -369,15 +376,21 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
     # salah tulis; selama branch-nya "else = keranjang penuh", mode yang tidak dikenal memberi
     # akses ke antrean roadmap. Yang tidak dikenal bukan "ON", melainkan "tidak mengirim apa pun".
     wanted = (mode or "").upper()
-    if wanted not in ("ON", "SEMI"):
-        emit("MODE_UNKNOWN", mode=str(mode), why="bukan ON/SEMI — tidak ada yang diambil, "
-             "tidak ada yang diketik")
+    if wanted not in wo.MODES:
+        emit("MODE_UNKNOWN", mode=str(mode), why=f"bukan {'/'.join(wo.MODES)} — tidak ada yang "
+             "diambil, tidak ada yang diketik")
         return None
     origin = wo.ORIGIN_OPERATOR if wanted == "SEMI" else None
-    item = next_ready(conn, engine, origin=origin)
-    if not item:
-        emit("QUEUE_EMPTY", origin=origin or "apa pun")
-        return None
+    if for_item is not None:
+        # Jalur instan: barisnya sudah ditunjuk oleh orang yang menulis perintahnya. Keranjang SEMI
+        # TETAP ditegakkan — oleh `claim()`, pada saat penulisan — jadi memanggil jalur ini dengan
+        # mode SEMI atas satu baris roadmap berakhir CLAIM_REFUSED, bukan pengiriman.
+        item = for_item
+    else:
+        item = next_ready(conn, engine, origin=origin)
+        if not item:
+            emit("QUEUE_EMPTY", origin=origin or "apa pun")
+            return None
     full = wo.get_item(conn, engine, int(item["id"])) or item
     # Baseline dulu, sebelum klaim: item yang gerbangnya sudah lolos tidak pernah perlu dikerjakan.
     verdict = gate_item(conn, engine, full, runner=runner, stage="before", emit=emit)
@@ -469,6 +482,58 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
         return {"item": int(item["id"]), "target": target, "sent": False,
                 "why": f"{type(exc).__name__}: {exc}"}
     return {"item": int(item["id"]), "target": target, "sent": True}
+
+
+def deliver_now(conn, engine, item_id, mode=None, sender=None, capture=None, busy=None,
+                tab_project=None, pane_cwd=None, gap=MIN_PANE_GAP, sleeper=None, runner=None,
+                log=None, dirty=wo._MEASURE):
+    """Antarkan satu baris yang BARUSAN ditulis orang — jawaban untuk "jangan tunggu tick".
+
+    Operator mengatakannya langsung: jalur SQL→CLI selama ini hanya hidup di dalam timer, jadi
+    perintah yang dia tulis bisa menggantung sampai lima menit dan dia tidak pernah melihat kenapa.
+    Fungsi ini memanggil jalur yang sama pada saat penulisan, dengan pagar yang sama, dan TIDAK
+    menambahkan aturan baru: keranjang, klaim bersyarat, pane tenang, direktori tab semuanya
+    milik `hand_new_work` dan `claim()`.
+
+    Yang tetap tidak boleh dilakukannya: bergerak tanpa tangan. Tangga `level` diperiksa di sini,
+    dan kalau masih `observe` barisnya TIDAP dikirim dan TIDAK dilepas — tetap PENDING, dan
+    penolakannya dilaporkan sebagai kata, bukan sebagai keberhasilan semu. Sebuah API yang membalas
+    "terkirim" padahal tidak ada yang diketik adalah cara tercepat membuat orang percaya pada
+    antrean yang sebenarnya tidak berjalan.
+    """
+    row = wo.get_item(conn, engine, int(item_id))
+    if not row:
+        return {"sent": False, "refused": f"item {item_id} tidak ditemukan di ledger"}
+    ap = wo.autopilot(conn, engine) or {}
+    wanted = (mode or ap.get("mode") or "").upper()
+    if wanted not in wo.MODES:
+        return {"sent": False, "queued": True, "refused": "MODE_UNKNOWN",
+                "why": f"mode {ap.get('mode')!r} bukan {'/'.join(wo.MODES)}"}
+    # Tangga `level` TIDAK menahan jalur ini, dan itu keputusan yang diminta operator langsung:
+    # "kalau saya mode semi, saya tidak perlu arm dispatch, saat saya kirim command AI harus jawab".
+    # `level` menjaga gerakan yang DIMULAI MESIN — timer yang mengambil antrean, CONTINUE yang
+    # diketik ke pane orang. Sebuah perintah yang barusan ditulis orang adalah niat manusia yang
+    # sudah ada di ledger sebelum fungsi ini dipanggil, jadi menyimpan satu pagar lagi di depannya
+    # hanya membuat SEMI terasa mati. Yang tetap menahan: keranjang (`claim()` menolak baris roadmap
+    # di bawah SEMI), satu perintah aktif per engine, pane yang harus terbukti tenang dan benar
+    # proyeknya, dan JENDELA di bawah ini — rem `berhenti` menulis jendela ke masa lalu, dan selama
+    # jendela tertutup perintah pun tidak diantar. `disarm` masih menurunkan tangan: mesin berhenti
+    # berinisiatif, perintah orang tetap sampai.
+    lvl = wo.drain_level(conn, engine)
+    window = int(ap.get("until_epoch") or 0)
+    if window and window <= wo.now():
+        return {"sent": False, "queued": True, "refused": "WINDOW_CLOSED",
+                "why": f"jendela {wanted} lewat pada {window} — perintah tetap antre; "
+                       "buka lagi dari Dashboard atau `autopilot semi`"}
+    events = []
+    emit = log or (lambda action, **rest: events.append(
+        {"ts": wo.now(), "action": action, "level": lvl.get("level"), "mode": wanted, **rest}))
+    hand_new_work(conn, engine, wanted, runner=runner, sender=sender, emit=emit,
+                  capture=capture, busy=busy, tab_project=tab_project, pane_cwd=pane_cwd,
+                  gap=gap, sleeper=sleeper, for_item=row, dirty=dirty)
+    sent = any(e.get("action") == "WORK_DISPATCHED" for e in events)
+    return {"sent": sent, "item": int(item_id), "mode": wanted, "level": lvl.get("level"),
+            "events": [e.get("action") for e in events], "detail": events}
 
 
 def nudge_resting(conn, engine, mode, beats=None, sender=None, emit=None):
@@ -626,8 +691,14 @@ def tick(conn, engine, gate=None, beats=None, runner=None, sender=None, log=None
     if lvl.get("readable") is not True:
         ev("CLOSED_UNKNOWN", why=lvl.get("why"))
         return events
-    if ap.get("mode") not in ("ON", "SEMI"):
-        ev("CLOSED_OFF", why=ap.get("off_reason") or "sakelar OFF")
+    if ap.get("mode") not in wo.MODES:
+        # OFF sudah bukan sebuah mode, jadi cabang ini tidak pernah berarti "sakelar mati" lagi.
+        # Yang tersisa di sini adalah keadaan yang harus berteriak: baris mode berisi nilai di
+        # luar kosakata — kolom yang rusak, database yang belum dimigrasi, atau seseorang yang
+        # menulis SQL mentah. Tick diam-diam berhenti di sini adalah persis "auto mati, komputer
+        # IDLE" yang operator takutkan, jadi namanya MODE_UNKNOWN dan ia masuk keranjang darurat.
+        ev("MODE_UNKNOWN", why=f"mode {ap.get('mode')!r} bukan {'/'.join(wo.MODES)} — tidak ada "
+                               "satu pun tangan yang bergerak")
         return events
     # SEMI membuka pintu yang sama dengan ON dan mengambil keranjang yang lebih kecil. Yang membedakan
     # keduanya di sini bukan seberapa jauh tangan boleh pergi — itu tangga `level`, dan ia tidak punya
@@ -692,6 +763,16 @@ def selftest():
         results.append((bool(cond), name, detail))
         print(f"[{'ok    ' if cond else 'FAIL  '}] {name}" + ("" if cond else f"  <- {detail}"))
 
+    # `wo.queue_command` mengantar perintah lewat `wo.deliver_now`. Di dalam suite ini yang boleh
+    # mengantar hanya `deliver_now` MILIK drainer yang dipanggil tes dengan `sender` suntikan;
+    # sambatan di work_order ditutup supaya tidak ada satu jalur pun dari tes ini yang bisa sampai
+    # ke daemon pane sungguhan.
+    orig_wo_deliver = wo.deliver_now
+    wo.deliver_now = lambda conn, engine, item_id: {"sent": False, "queued": True,
+                                                    "refused": "SELFTEST"}
+    check("jalur kirim work_order disuntik: tes ini tidak bisa mengetuk pane asli",
+          wo.deliver_now is not orig_wo_deliver, str(wo.deliver_now))
+
     src = Path(__file__).read_text()
     code = src.partition("def selftest(")[0]
     # Sumber modul adalah bagian dari klaim. Ini tangan: ia tidak boleh bisa menyimpulkan
@@ -717,6 +798,24 @@ def selftest():
     for banned in ("ydotool", "send-keys", "action_log", "set_level(", "subprocess.run",
                    "check_output", "Popen", "tmux"):
         check(f"jalur timer tidak memakai {banned!r}", banned not in timer_code)
+    # Kosakata peristiwa adalah kontrak antara tick dan banner. Yang ditegakkan di sini bukan
+    # daftarnya (itu akan membusuk) melainkan fakta bahwa SETIAP nama yang bisa di-emit modul ini
+    # sudah diklasifikasi `notify`. Peristiwa baru yang lupa dikelompokkan dibaca notify sebagai
+    # `unknown` — dan `unknown` selalu berbanner, jadi ia tidak bisa lulus diam; yang merah di sini
+    # adalah tanda bahwa seseorang harus memutuskan apakah ia gerakan, catatan, atau kegagalan.
+    emitted = set()
+    for node in _ast.walk(_ast.parse(code)):
+        if isinstance(node, _ast.Call) and getattr(node.func, "id", None) in ("ev", "emit", "log"):
+            first = node.args[0] if node.args else None
+            if isinstance(first, _ast.Constant) and isinstance(first.value, str) \
+                    and first.value.isupper():
+                emitted.add(first.value)
+    unclassified = sorted(a for a in emitted if notify.classify(a) == "unknown")
+    check("setiap peristiwa yang bisa di-emit tick punya kelas di notify",
+          len(emitted) >= 12 and not unclassified,
+          f"emitted={len(emitted)} belum diklasifikasi={unclassified}")
+    check("nama peristiwa dibaca dari kode, bukan dari ingatan",
+          "WORK_DISPATCHED" in emitted and "CLOSED_NIGHT" in emitted, str(sorted(emitted))[:200])
     # `capture_pane` / `pane_is_busy` AWAL-nya ada dalam daftar terlarang di atas, dan itu sekarang
     # salah arah: yang berbahaya bukan membaca pane, tapi MENULIS ke pane tanpa membacanya dulu.
     # Jadi klaimnya diganti dari "tidak pernah menyentuh pane" menjadi "selalu membaca sebelum
@@ -924,8 +1023,12 @@ def selftest():
         out = tick(conn, "SQLITE", gate=gate_for("observe", mode="OFF"), beats=[],
                    sender=sender, runner=runner, capture=quiet_pane, busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
                       dirty=False)
-        check("sakelar OFF = tidak ada yang bergerak sama sekali",
-              [e["action"] for e in out] == ["CLOSED_OFF"] and not sent and not ran, str(out))
+        # OFF sudah dibuang dari kosakata, jadi baris mode berisi "OFF" bukan lagi "orang mematikan
+        # mesin" — itu baris yang tidak dikenali. Yang tetap harus sama: TIDAK ADA yang bergerak,
+        # dan sekarang disertai satu teriakan, karena keadaan ini berarti loop berhenti oleh sebab
+        # yang tidak seharusnya (kolom rusak, migrasi belum jalan), bukan oleh pilihan.
+        check("mode di luar kosakata = tidak ada yang bergerak sama sekali, dan ia berteriak",
+              [e["action"] for e in out] == ["MODE_UNKNOWN"] and not sent and not ran, str(out))
 
         unreadable = {"level": {"readable": False, "level": None, "allows_dispatch": False,
                                 "allows_resume": False, "why": ["tidak terbaca"]},
@@ -1178,8 +1281,8 @@ def selftest():
                    sender=sender, runner=runner, capture=quiet_pane, busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
                       dirty=False)
         acts = [e["action"] for e in out]
-        check("SEMI tidak disalahtafsir sebagai OFF — pintu dibuka, tangan belum diangkat",
-              "CLOSED_OFF" not in acts and "SEMI_HAND_FLAT" in acts and not sent, str(out))
+        check("SEMI tidak disalahtafsir sebagai keadaan diam — pintu dibuka, tangan belum diangkat",
+              "MODE_UNKNOWN" not in acts and "SEMI_HAND_FLAT" in acts and not sent, str(out))
 
         sent.clear()
         out = tick(conn, "SQLITE", gate=gate_for("dispatch", mode="SEMI"), beats=[],
@@ -1311,6 +1414,75 @@ def selftest():
                       pane_cwd=cwd_of, gap=0, dirty=False)
         check("klaim roadmap yang lease-nya sudah mati tidak membekukan antrean operator selamanya",
               sent and out[-1]["action"] == "WORK_DISPATCHED", str(out[-1:]))
+
+        # --- jalur instan: perintah yang barusan ditulis harus sampai TANPA satu tick pun --------
+        # Ini permintaan operator, dan bentuk buktinya harus bentuk yang dia pakai: tulis perintah,
+        # CLI menjawab. Klaim serupa sebelumnya bisa lulus karena tick kebetulan berjalan di antara
+        # dua perintah; di sini `tick()` tidak dipanggil sama sekali, jadi yang diketik hanya bisa
+        # datang dari `deliver_now`.
+        sent.clear()
+        ran.clear()
+        # Mesin harus benar-benar bebas: blok (C) di atas meninggalkan satu klaim qoder yang
+        # lease-nya masih hidup, dan aturan satu-perintah-aktif menolak yang baru — penolakan yang
+        # benar, tapi bukan yang sedang diukur di sini.
+        wo.run(conn, "SQLITE", "UPDATE quest_tasks SET status='PENDING', claimed_by=NULL, "
+                               "lease_epoch=0 WHERE status IN ('WORKING','CLAIMED')")
+        # Fixture drainer lahir dengan mode 'OFF' warisan; jalur instan membaca mode dari ledger
+        # persis seperti tick, jadi keadaan yang diuji harus dinyatakan di sini, bukan diwarisi.
+        wo.run(conn, "SQLITE", "UPDATE autopilot_state SET mode='SEMI', level='dispatch', "
+                               "level_until=strftime('%s','now')+3600, "
+                               "until_epoch=strftime('%s','now')+3600")
+        wo.run(conn, "SQLITE", "INSERT INTO quest_tasks (title,status,origin,cli_engine,"
+                               "check_command,ws_path) VALUES ('instan-pertama','PENDING',"
+                               "'operator','qoder','true',?)", (str(cwd_of("qoder")),))
+        fast_row = wo.run(conn, "SQLITE",
+                          "SELECT id FROM quest_tasks WHERE title='instan-pertama'")
+        fast_id = int(fast_row[0]["id"])
+        res = deliver_now(conn, "SQLITE", fast_id, sender=sender, capture=quiet_pane,
+                          busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
+                          runner=runner, dirty=False)
+        check("perintah baru terkirim ke CLI TANPA satu tick pun",
+              res["sent"] and len(sent) == 1 and sent[0][0] == "qoder", str(res))
+        check("yang diketik adalah judul perintahnya, bukan pesan kosong",
+              sent and "instan-pertama" in sent[0][1], str(sent)[:160])
+        wo.release_claim(conn, "SQLITE", fast_id, wo.HOLDER if hasattr(wo, "HOLDER") else "drainer")
+        # Sisi yang operator minta dengan kalimat langsung: "kalau saya mode semi, saya tidak perlu
+        # arm dispatch — saat saya kirim command, AI harus jawab". Tangan TURUN, jendela TERBUKA,
+        # perintah operator: harus tetap sampai. Sebelum perubahan ini jalur ini menolak keadaan
+        # tersebut, jadi SEMI terasa mati bagi orang yang justru sedang mengawasi.
+        wo.run(conn, "SQLITE", "UPDATE autopilot_state SET level='observe', level_until=NULL, "
+                               "until_epoch=strftime('%s','now')+3600")
+        wo.release_claim(conn, "SQLITE", fast_id, "drainer")
+        wo.run(conn, "SQLITE", "UPDATE quest_tasks SET status='PENDING', claimed_by=NULL, "
+                               "lease_epoch=0 WHERE id=?", (fast_id,))
+        sent.clear()
+        res_flat = deliver_now(conn, "SQLITE", fast_id, sender=sender, capture=quiet_pane,
+                               busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
+                               runner=runner, dirty=False)
+        check("SEMI dengan tangan masih observe TETAP mengantar perintah operator — `level` "
+              "menjaga inisiatif mesin, bukan perintah manusia",
+              res_flat["sent"] and len(sent) == 1, str(res_flat))
+        wo.release_claim(conn, "SQLITE", fast_id, "drainer")
+        wo.run(conn, "SQLITE", "UPDATE quest_tasks SET status='PENDING', claimed_by=NULL, "
+                               "lease_epoch=0 WHERE id=?", (fast_id,))
+        # Remnya `berhenti`: kata berhenti menutup jendela, dan jendela yang lewat harus menahan
+        # jalur instan juga — kalau tidak, tombol berhenti hanya menghentikan timer sementara
+        # perintah masih mengetik ke pane, dan itu bukan rem, itu jeda.
+        wo.run(conn, "SQLITE", "UPDATE autopilot_state SET until_epoch=strftime('%s','now')-5")
+        sent.clear()
+        res2 = deliver_now(conn, "SQLITE", fast_id, sender=sender, capture=quiet_pane,
+                           busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
+                           runner=runner, dirty=False)
+        check("jendela yang ditutup rem menolak jalur instan dan menyebut namanya",
+              not res2["sent"] and res2.get("refused") == "WINDOW_CLOSED"
+              and res2.get("queued") is True and not sent, str(res2))
+        check("penolakan instan tidak meninggalkan klaim: barisnya tetap PENDING untuk tick",
+              (wo.get_item(conn, "SQLITE", fast_id) or {}).get("status") == "PENDING",
+              str(wo.get_item(conn, "SQLITE", fast_id)))
+        wo.run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (fast_id,))
+        wo.run(conn, "SQLITE", "UPDATE autopilot_state SET mode='SEMI', level='dispatch', "
+                               "level_until=strftime('%s','now')+3600, "
+                               "until_epoch=strftime('%s','now')+3600")
 
         # (D) mode yang tidak dikenal harus gagal-TERTUTUP, bukan jatuh ke keranjang FULL AUTO.
         for bad in ("semi", "OFF", "", "ngawur"):
@@ -1533,8 +1705,17 @@ def main(argv=None):
     events = []
     tick(conn, engine, log=events.append)
     path = write_events(events)
+    # Satu banner untuk tiap tick yang BERGERAK, BERTANYA, atau GAGAL (permintaan operator
+    # 2026-10-08: loop yang tidak kelihatan tidak ada bedanya dengan loop yang mati bagi orang yang
+    # bangun dan menemukan komputer diam). Tick yang hanya melihat tetap di log malam saja —
+    # bukan karena mahal, tapi karena orang yang dihujani banner akan belajar mengabaikan banner,
+    # dan itu membuat banner yang harus dia baca ikut terlewat.
+    seen = [(e.get("mode"), e.get("level")) for e in events if isinstance(e, dict)]
+    mode_seen = next((m for m, _ in seen if m), None)
+    level_seen = next((l for _, l in seen if l), None)
+    banner = notify.notify_tick(events, mode=mode_seen, level=level_seen)
     print(json.dumps(events, default=str, indent=2))
-    print(f"\nlog: {path}", file=sys.stderr)
+    print(json.dumps({"notify": banner, "log": str(path)}, default=str), file=sys.stderr)
     return 0
 
 

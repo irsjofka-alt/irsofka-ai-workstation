@@ -755,6 +755,48 @@ that skips the order cannot claim.
   twice — first `SEMI_NOT_IDLE`, then `SEMI_INJECTED` for item 87 with `decision=continue` and 62
   lines of locked guidelines — while item 88, addressed to qoder, correctly stayed `PENDING`. Engine
   isolation is `next_item(for_engine=…)`, in the module that owns "what is next".
+- ✅ **F10.11 The loop must not die quietly, and OFF stops being a mode.** The operator's boundary for
+  tonight was explicit: *"sekali saja auto mati maka Komputer jadi IDLE … ketika full auto saya tidak di
+  desk tiba tiba berhenti ini akan jadi waktu yang terbuang."* Four defects matched that sentence, and all
+  four are now closed by measurement rather than by intent.
+  1. **The breaker was miscounted, not mislabelled.** `night_state` reported *"kegagalan berturut-turut"*
+     while its SQL summed **every** `FAILED`/`PARKED` row in twelve hours, so over a long night three
+     unrelated failures (A fails, B and C finish, D fails) closed the loop permanently and the machine sat
+     idle until morning. `consecutive_failures()` counts a *run* since the last success instead. Two
+     boundaries it had to get right, both found by test rather than argument: `completed_at` resolves to
+     one second, so ordering is `(timestamp, id)` — `>` loses a failure written after the last success in
+     the same second, `>=` drags in every failure written before it; and `ORDER BY … DESC` puts **NULL
+     first** in both backends, so one legacy `COMPLETED` row without `completed_at` became "the last
+     success" with `e = NULL`, which Python read as `0` and turned into a breaker that closed on a machine
+     that was working fine. The PostgreSQL branch of that query is only exercised by `selftest --live`, and
+     it was the live run that caught it.
+  2. **Nothing reached the operator.** Every tick ran, logged to a file nobody opened, and said nothing on
+     the desktop. `tools/notify.py` is now the single owner of the banner and fires on exactly three
+     things — work that actually arrived at a CLI, a question that needs a human, and an error or refusal
+     that stops the loop — because a banner every five minutes trains a person to ignore the banners that
+     matter. `drainer`'s selftest derives the emitted vocabulary from its own AST and fails while any name
+     has no basket, so a new event cannot silently default to "safe"; it found `PANE_WRONG_DIR` unfiled on
+     the first run. What it took to notice: `notify-send` **does not exist on this machine** (`which`
+     empty, no `/usr/bin/notify-send`), and all three call sites swallowed the error — `let _ =
+     Command::new(...)`, `except Exception: pass` — so the workstation's entire notification surface had
+     been dead since it was written, and every test of it had passed. The path is now DBus
+     `org.freedesktop.Notifications` via `gdbus`, the daemon's returned id is read back as the proof, and
+     the banner was confirmed by screenshot.
+  3. **A command waited for the timer.** *"begitu perintah masuk, backend harus langsung mengirim ke
+     CLI."* `queue_command` now calls `drainer.deliver_now()`, which hands the row to the same
+     `hand_new_work` gates the tick uses — no second rulebook — and when the hand is still `observe` the
+     row stays PENDING and the refusal comes back named (`HAND_FLAT`) instead of as a successful-looking
+     "queued". Proven by a test that never calls `tick()` at all.
+  4. **OFF was a mode nobody used.** Two positions, not three: `MODES = ("SEMI","ON")`, default `SEMI`,
+     and `off`/`stop` demoted to *words that lower the hand and close the window* (`STOP_WORDS`) — the
+     brake survives, the third value does not, so §12 keeps one word per state. Boot stays inert by
+     structure, not by a mode value: the timer is `start`ed and never `enable`d, and `level` is born
+     `observe`. The Rust route stopped carrying its own copy of the word list, which is the copy that
+     would have gone on rejecting `off` for weeks after the machine stopped knowing it; it validates shape
+     and forwards, and a refusal now exits non-zero so no caller can read a rejected write as success.
+  Measured acceptance: `work_order selftest 162/162`, `selftest --live 34/34` (PostgreSQL), `drainer
+  selftest 134/134`, `notify selftest 20/20`, and a 30-round tick soak against the live ledger with
+  injected hands — 0 rounds silent, 0 exceptions, 0 keystrokes.
 - ⬜ **F10.9 Push gate — the answer to decision 6 has to stop being a sentence.** The operator allowed an
   unattended run to commit and push *on condition* that a verifier clears the work first. That condition
   currently lives only in §6 prose, which means it binds exactly as far as an engine remembers it — and

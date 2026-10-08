@@ -199,27 +199,56 @@ False status reports harm system reliability because subsequent engines build up
 - Reload interface: `refresh_workstation_ui`.
 - Restart daemon (safe, tmux preserves tabs): `restart_workstation_daemon(reason="...")` — `reason` is required and logged.
 
-**Autopilot (`ROADMAP` F10.8).** The cockpit carries one toggle. ON entrusts the machine to the engines
-for a bounded run; OFF means a human is at the desk and watching. The rules below are load-bearing:
+**Autopilot (`ROADMAP` F10.8, modes revised 2026-10-08).** The cockpit carries one switch with two
+positions. **SEMI** is automatic with a human at the desk; **FULL AUTO (ON)** entrusts the machine to the
+engines for a bounded run. There is no OFF position: stopping is a verb (`berhenti` / `off` / `disarm` /
+stop the timer), not a mode. The rules below are load-bearing:
 
 - **Turning it off must not need the AI's cooperation.** Every route below was proven from a headless
-  context before it was named here: the GUI toggle, `ai-station autopilot off` from any shell,
-  `systemctl --user stop irsofka-autopilot.timer` (ends the tick even with the daemon untouched), and
-  `python3 tools/work_order.py disarm` (drops the hand to `observe`, needs no TTY). If stopping requires
-  asking the loop politely, it is not a switch. An escape route named before it exists is worse than one
-  fewer route: it teaches an operator to type a command that fails at the exact moment they have lost
-  control of the machine. Raising the hand is the deliberate opposite — `arm` refuses wherever `/dev/tty`
-  cannot be opened, which was measured to fail from systemd units, headless spawns and this assistant's
-  own shell tool, so no unattended process can widen its own reach.
-- **Three answers to "who owns the machine": OFF, SEMI, ON.** They differ by *basket*, not by
-  strength of hand. OFF = a human is at the desk and nothing moves. **SEMI** = still automatic, but
-  the only work it may take is a command the operator typed himself into SQL (`origin='operator'`);
-  roadmap items are refused by name, in the queue filter *and* inside `claim()`. ON = the computer is
-  given to the engines and anything available may be taken. The `level` ladder is shared by SEMI and
-  ON and has no SEMI variant — raising a hand is still a TTY-only act. SEMI's trigger is the engine's
-  own turn boundary (`hooks/semi_wake.py`, a `Stop` hook): it may block a stop **only as the
-  consequence of having claimed a real PENDING row**, so an empty queue injects nothing and the queue
-  itself is the loop guard. Silence is the failure state this exists to remove.
+  context before it was named here: the Dashboard's **berhenti** button, `ai-station autopilot off` from
+  any shell, `systemctl --user stop irsofka-autopilot.timer` (ends the tick even with the daemon
+  untouched), and `python3 tools/work_order.py disarm` (drops the hand to `observe`, needs no TTY). If
+  stopping requires asking the loop politely, it is not a switch. An escape route named before it exists
+  is worse than one fewer route: it teaches an operator to type a command that fails at the exact moment
+  they have lost control of the machine. Raising the hand is the deliberate opposite — `arm` refuses
+  wherever `/dev/tty` cannot be opened, re-measured on 2026-10-08 as `False` from this assistant's own
+  shell tool even after the operator redirected the CLI's stdin, so no unattended process can widen its
+  own reach.
+- **Two answers to "who owns the machine": SEMI and ON.** OFF was removed as a *mode* on 2026-10-08 by
+  operator order ("OFF dibuang saja, hanya SEMI dan FULL AUTO") because he only ever used two of the
+  three positions. The brake did not go with it: `off`/`stop` are now *words that lower the hand and close
+  the window* (`STOP_WORDS`), and they write no third value into `mode`. That keeps one word for one state
+  (§12) while leaving four independent ways to stop. The two modes differ by *basket*, not by strength of
+  hand. **SEMI** = automatic with a human at the desk, and the only work it may take is a command the
+  operator typed himself into SQL (`origin='operator'`); roadmap items are refused by name, in the queue
+  filter *and* inside `claim()`. **ON** = the computer is given to the engines and anything available may
+  be taken. The `level` ladder is shared by both and has no SEMI variant — raising a hand is still a
+  TTY-only act.
+- **A boot leaves the machine still.** `mode` defaults to SEMI and `level` to `observe`, and
+  `irsofka-autopilot.timer` is *started*, never `enable`d — so a reboot cannot resume a run nobody
+  approved, which is the operator's own boundary ("SEMI tidak boleh auto start saat boot, saya tidak
+  tahu task apa yang di dispatch"). Starting a run is one deliberate act from a terminal.
+- **Every command an operator writes is delivered on write, not on the next tick.** `queue_command`
+  calls `drainer.deliver_now()` — the same gates, the same conditional claim, the same pane evidence as
+  the timer path, with no second rulebook. The `level` ladder does **not** gate this: it guards motion
+  the *machine* starts (a timer picking up a queue, a `CONTINUE` typed into someone's pane), while a
+  command that just arrived in the ledger is already a human intention. Operator's words on 2026-10-08:
+  *"kalau saya mode semi, saya tidak perlu arm dispatch — saat saya kirim command, AI harus jawab."*
+  The brake is the window, not the hand: `berhenti`/`off` closes it, and while it is closed even an
+  operator command is refused by name (`WINDOW_CLOSED`) and stays PENDING. `disarm` still lowers the
+  hand — the machine stops initiating, the operator's commands still land. An API that answered "sent"
+  when nothing was typed is how a queue stops being believed.
+- **The operator is told when it matters.** `tools/notify.py` is the single owner of the desktop
+  banner, and it fires on three things only: work that actually reached a CLI, a question that needs a
+  human, and an error or refusal that stops the loop. A tick that merely observes stays in the night
+  log — a banner every five minutes trains a person to ignore the banners that matter. `notify-send`
+  does not exist on this machine (measured: `which` empty, no `/usr/bin/notify-send`), so the path is
+  DBus `org.freedesktop.Notifications` through `gdbus`, and the daemon's own id is read back as the
+  proof of delivery; every older call site swallowed the missing binary with `let _ =` / `except: pass`,
+  which is why the whole notification surface had been dead without ever reporting it.
+- SEMI's trigger is the engine's own turn boundary (`hooks/semi_wake.py`, a `Stop` hook): it may block a
+  stop **only as the consequence of having claimed a real PENDING row**, so an empty queue injects
+  nothing and the queue itself is the loop guard. Silence is the failure state this exists to remove.
 - **ON grants panes and headless APIs; it does not grant `ydotool`.** Moving the real mouse and typing
   real keys steals the desktop of a sleeping person, and a misclick into whatever window is frontmost at
   03:00 is the one failure the ledger cannot undo — no `action_log` row restores a file deleted inside an
