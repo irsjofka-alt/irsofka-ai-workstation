@@ -1843,6 +1843,18 @@ def selftest():
             checks.append((name, bool(cond), detail))
 
         check("schema dibuat", all(not l.startswith("skip") for l in log), "; ".join(log))
+        # Kosakata CLI dibaca dari konstanta yang sama, dan itu dibuktikan dengan menjalankan
+        # parser sungguhan atas satu kata yang memang salah: argparse keluar SEBELUM menyentuh
+        # database, jadi ini aman di tengah soak. Yang diperiksa adalah pesan kesalahan itu
+        # menyebut SETIAP kata yang dikenal kode — kalau ada yang menyalin daftar secara manual,
+        # salinan itu akan berhenti menyebut salah satunya di sini.
+        import subprocess as _sp
+        bad = _sp.run([sys.executable, str(Path(__file__).resolve()), "autopilot", "zzz-tidak-sah"],
+                      capture_output=True, text=True, timeout=60)
+        listed = (bad.stderr or "") + (bad.stdout or "")
+        missing = [w for w in [m.lower() for m in (MODES + STOP_WORDS)] if w not in listed]
+        check("parser CLI mengenal seluruh kosakata dari konstanta, bukan dari daftar salinan",
+              bad.returncode == 2 and not missing, f"rc={bad.returncode} hilang={missing}")
         check("jalur kirim disuntik sebelum tes pertama: selftest TIDAK BISA mengetuk pane asli",
               globals()["deliver_now"] is not _deliver_now, str(globals()["deliver_now"]))
         # Stub yang selalu menolak membuat cabang `if handed.get("sent")` tidak pernah dijalankan
@@ -3033,8 +3045,14 @@ def main(argv=None):
                                                help="batasi pada satu asal baris; kosong = apa pun")
     sub.add_parser("list")
     sub.add_parser("stalled")
-    p = sub.add_parser("autopilot"); p.add_argument("mode", nargs="?",
-                                                   choices=["on", "semi", "off", "show"])
+    p = sub.add_parser("autopilot")
+    # Daftarnya DIPINDAI dari kosakata, tidak ditulis ulang. Selama ini argparse menyimpan
+    # ["on","semi","off"] sebagai salinan ketiga — setelah Rust berhenti menyalinnya dan setelah
+    # MODES berubah, parser inilah yang akan menolak kata lebih dulu dengan rc=2, sehingga
+    # `autopilot()` tidak pernah sempat menjelaskan kenapa sebuah kata ditolak dan cabang
+    # STOP_WORDS tidak bisa dicapai sama sekali. Satu daftar, satu pemilik.
+    p.add_argument("mode", nargs="?",
+                   choices=[w.lower() for w in (MODES + STOP_WORDS)] + ["show"])
     p.add_argument("--minutes", type=int); p.add_argument("--budget", type=int)
     p.add_argument("--reason", default=None); p.add_argument("--by", default="operator")
     p = sub.add_parser("queue", help="satu perintah operator masuk antrean quest_tasks "
