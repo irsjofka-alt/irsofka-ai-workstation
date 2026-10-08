@@ -160,6 +160,14 @@ def consecutive_failures(conn, engine):
        termasuk yang terjadi SEBELUM keberhasilan. Dua-duanya salah dan dua-duanya diam. Maka
        urutannya (detik, id) — `id` naik bersama tulisan, jadi ia memecah seri ke arah yang
        benar: kegagalan yang ditulis sesudah keberhasilan terakhir dihitung, yang sebelumnya tidak.
+    Batas yang jujur: `id` adalah urutan PEMBUATAN baris, bukan urutan penyelesaian. Dua baris
+    yang selesai pada detik yang sama bisa berurutan terbalik dari id-nya — tugas lama yang baru
+    sekarang gagal, tugas baru yang lebih dulu selesai — dan pada detik itu juga hitungannya bisa
+    meleset satu. Yang tidak boleh dilakukan adalah menutup mata terhadap kemungkinan ini: sebuah
+    pagar yang dikira tepat padahal hanya kira-kira akan dipakai sebagai alasan untuk tidak
+    membangun pagar lain. Di luar satu detik itu urutannya benar, dan `FAILURE_LOOKBACK` menjaga
+    agar kesalahan seukuran satu detik tidak pernah mengendap menjadi keadaan permanen.
+
     2. Tanpa batas tengok, tiga kegagalan dari dua minggu lalu yang tidak pernah diikuti
        keberhasilan mana pun akan menutup loop hari ini juga — dan loop yang tertutup berarti
        komputer diam sampai pagi, kegagalan yang persis ingin dicegah operator. `FAILURE_LOOKBACK`
@@ -1755,8 +1763,14 @@ def queue_command(conn, engine, title: str, cli_engine: str, gate: str = "",
                urgent=True)
     return True, (f"perintah antre sebagai item {new_id} untuk {target}"
                   + (f" di {where}" if where else " (tanpa proyek → REPO)")
-                  + (" — langsung terkirim ke CLI" if handed.get("sent") else
-                     f" — belum terkirim: {handed.get('refused') or handed.get('why') or handed.get('events')}")), int(new_id)
+                  # "diserahkan", bukan "terkirim": `default_sender` mencatat balasan daemon apa
+                  # adanya, dan `/api/cli/run` bisa menjawab "dispatched" untuk sesi yang tidak ada.
+                  # Kata yang lebih kuat dari buktinya adalah awal dari laporan yang tidak dipercaya
+                  # lagi saat laporan itu dibutuhkan.
+                  + (" — diserahkan ke CLI" + (f" (balasan: {handed.get('reply')})"
+                                               if handed.get("reply") else "")
+                     if handed.get("sent") else
+                     f" — belum diserahkan: {handed.get('refused') or handed.get('why') or handed.get('events')}")), int(new_id)
 
 
 def semi_status(conn, engine) -> dict:

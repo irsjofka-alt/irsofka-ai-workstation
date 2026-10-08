@@ -152,6 +152,17 @@ def watch(until: int, sleeper=time.sleep, emit=None) -> dict:
             seen["ok"] += 1
             log({"action": "SOAK_WATCHING", "why": d["why"]})
         sleeper(POLL)
+    # Penutup yang mengirim kabar sendiri. Operator meminta "nanti kalau selesai tolong chat aku di
+    # notif desktop", dan penjadwal yang bergantung pada sesi seorang AI bisa mati bersama sesi itu —
+    # sebuah janji yang hanya ditepati selama proses lain tetap hidup bukan janji. Jadi yang
+    # membangunkan orang adalah proses yang sama yang menjaganya tidur: watchdog ini.
+    last = last_tick_epoch()
+    log({"action": "SOAK_ENDED", **seen, "last_tick": last})
+    notify.notify_event(
+        "SOAK_ENDED",
+        f"soak selesai · {seen['ok']} pengamatan aman · {seen['restart']} kali detak dinyalakan "
+        f"ulang · {seen['alert']} kali dibunyikan tanpa ulang · tick terakhir "
+        + (f"{int(time.time()) - last}s lalu" if last else "tidak terbaca"))
     return seen
 
 

@@ -170,6 +170,12 @@ def _dbus_argv(title: str, body: str, urgent: bool) -> list[str]:
 def send(title: str, body: str, urgent: bool = False, timeout: float = SEND_TIMEOUT) -> dict:
     """Satu banner. Tidak pernah melempar — kegagalan dilaporkan apa adanya.
 
+    `ok: True` berarti **daemon notifikasi menerima dan memberi id**. Itu bukan bukti bahwa seorang
+    manusia melihatnya: Do-Not-Disturb, layar terkunci, atau session bus tanpa compositor semuanya
+    bisa menghasilkan id tanpa satu piksel pun di desktop. Yang bisa dijanjikan jalur ini hanya
+    "sudah diserahkan ke daemon", dan kata itu yang dipakai di mana-mana — bukan "dibaca".
+
+
     Kenapa bukan `notify-send`: biner itu TIDAK ADA di mesin ini (diukur 2026-10-08: `which` kosong,
     `/usr/bin/notify-send` tidak ada), dan daemon COSMIC memegang `org.freedesktop.Notifications`
     di session bus. Setiap call site lama memakai `notify-send` sambil menelan errornya —
@@ -184,12 +190,22 @@ def send(title: str, body: str, urgent: bool = False, timeout: float = SEND_TIME
     cmd = _dbus_argv(title, body, urgent)
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-        # `(uint32 43,)` adalah id yang diberikan daemon. Kalau stdout tidak berbentuk itu, daemon
-        # menolak atau tidak ada — dan `ok: True` karena rc 0 akan menjadi kebohongan kedua.
-        accepted = p.returncode == 0 and p.stdout.strip().startswith("(uint32")
-        return {"ok": accepted, "rc": p.returncode,
-                "id": (p.stdout.strip().split()[1].rstrip(",)") if accepted else None),
-                "err": None if accepted else ((p.stderr or p.stdout or "").strip()[:200] or None)}
+        # `(uint32 43,)` adalah id yang diberikan daemon. rc 0 saja tidak cukup: spesifikasi
+        # freedesktop menetapkan `replaces_id = 0` sebagai jawaban atas Notifikasi yang TIDAK bisa
+        # ditampilkan, jadi menerima angka nol sebagai keberhasilan berarti melapor terkirim tepat
+        # ketika desktop menolak menampilkannya — dan itu satu-satunya kegagalan yang tidak akan
+        # pernah diketahui orang.
+        out = p.stdout.strip()
+        rid = None
+        if p.returncode == 0 and out.startswith("(uint32"):
+            try:
+                rid = int(out.split()[1].rstrip(",)"))
+            except (IndexError, ValueError):
+                rid = None
+        accepted = p.returncode == 0 and rid is not None and rid > 0
+        return {"ok": accepted, "rc": p.returncode, "id": rid,
+                "err": None if accepted else ((p.stderr or p.stdout or "").strip()[:200]
+                                              or ("daemon menolak (id 0)" if rid == 0 else None))}
     except Exception as exc:  # noqa: BLE001 — banner yang gagal tidak boleh membunuh tick
         return {"ok": False, "rc": None, "err": f"{type(exc).__name__}: {exc}"}
 
@@ -272,6 +288,31 @@ def selftest() -> int:
     # `_dbus_argv` tidak boleh membuat tes ini merah tanpa alasan, dan tidak boleh membuatnya hijau
     # padahal argumen bertukar tempat.
     i = argv.index("--method")
+    # Balasan daemon diuraikan tanpa menyentuh desktop: id 0 adalah penolakan, dan rc 0 saja
+    # tidak boleh cukup untuk menyebut sebuah banner "terkirim".
+    def fake_run(reply, rc=0, stderr=""):
+        class R:
+            returncode, stdout, stderr_ = rc, reply, stderr
+            def __init__(self):
+                self.stderr = stderr
+        return lambda *a, **k: R()
+    import types
+    _real = subprocess.run
+    try:
+        subprocess.run = fake_run("(uint32 0,)")
+        refused = send("a", "b")
+        subprocess.run = fake_run("(uint32 77,)")
+        shown = send("a", "b")
+        subprocess.run = fake_run("", rc=1, stderr="The connection is closed")
+        broken = send("a", "b")
+    finally:
+        subprocess.run = _real
+    check("id 0 dari daemon dibaca sebagai PENOLAKAN, bukan keberhasilan",
+          refused["ok"] is False and refused["id"] == 0 and refused["err"], json.dumps(refused))
+    check("id bukan-nol dibaca sebagai diterima, dengan id itu sendiri sebagai bukti",
+          shown["ok"] is True and shown["id"] == 77, json.dumps(shown))
+    check("dbus mati dilaporkan mati — bukan rc 0 yang disalahartikan",
+          broken["ok"] is False and "closed" in (broken["err"] or ""), json.dumps(broken))
     check("argv dbus menyebut tujuan dan metode freedesktop yang benar",
           argv[0] == "gdbus" and argv[argv.index("--dest") + 1] == "org.freedesktop.Notifications"
           and argv[i + 1] == "org.freedesktop.Notifications.Notify", str(argv[:i + 2]))
