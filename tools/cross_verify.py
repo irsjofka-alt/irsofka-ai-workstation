@@ -581,8 +581,27 @@ def parse_verdict(text):
     # catatan ini untuk memutuskan apakah sebuah commit boleh berangkat, salah label di sini berarti
     # pekerjaan yang sudah diloloskan tidak akan pernah bisa didorong — dan kegagalan itu akan
     # terlihat seperti "verifier belum menyetujui", bukan seperti pembaca yang buta.
+    # Jangkar baris, bukan seluruh teks. Versi "cari di mana saja, ambil yang terakhir" tercatat
+    # memalsukan dirinya sendiri dalam sebelas menit: jawaban yang benar `VERDICT: PERLU_KOREKSI`
+    # diikuti paragraf yang mengutip instruksi saya — `... jawab VERDICT: SETUJU` — dan kecocokan
+    # TERAKHIR itu yang terbaca sebagai vonis. Karena gerbang push sekarang membeli izin dari angka
+    # ini, sebuah kalimat yang kebetulan menyebut kata sakti akan cukup untuk mendorong kode apa pun
+    # ke origin. Jadi yang dihitung hanyalah baris yang MEMANG vonis: setelah dibersihkan dari
+    # sampul markdown, barisnya harus dimulai dengan VERDICT.
+    #
+    # "yang terakhir menang" tetap dipertahankan untuk scrollback pane, di mana jawaban lama mendahului
+    # jawaban baru. Tidak ada vonis yang terbaca = TIDAK_YAKIN, dan itu arah yang aman: tidak ada
+    # izin, bukan izin yang diragukan.
     found = "TIDAK_YAKIN"
-    for m in re.finditer(r"VERDICT\s*[:=]\s*([A-Z_]+)", (text or "").upper()):
+    for line in (text or "").splitlines():
+        # Sampul markdown dan tanda kutip dibuang dari barisnya, bukan hanya dari depan: model
+        # menulis `**VERDICT:** SETUJU` dan `> VERDICT: PERLU_KOREKSI`. Yang tetap tidak boleh
+        # dilakukan adalah mencari vonis di TENGAH kalimat — pembersihan ini hanya menyiapkan
+        # awalan baris, ia tidak mengubah syarat bahwa baris itu harus DIMULAI dengan VERDICT.
+        u = re.sub(r"[`*_>\"']", "", line.strip()).upper()
+        m = re.match(r"VERDICT\s*[:=]\s*([A-Z_]+)", u)
+        if not m:
+            continue
         v = m.group(1)
         if v.startswith("PERLU"):
             found = "PERLU_KOREKSI"
@@ -641,6 +660,15 @@ def selftest() -> int:
           parse("saya tidak bisa memeriksa") == "TIDAK_YAKIN")
     check("sampul JSON dengan response kosong tidak menutupi teks aslinya",
           parse('{\"response\":\"\"}\nVERDICT: TIDAK_YAKIN') == "TIDAK_YAKIN")
+    # Regresi yang ditemukan oleh ledger, bukan oleh pembacaan: jawaban PERLU_KOREKSI yang di
+    # bawahnya mengutip instruksi "jawab VERDICT: SETUJU" pernah terbaca SETUJU.
+    check("kutipan instruksi di tengah jawaban TIDAK BISA memalsukan vonis",
+          parse("VERDICT: PERLU_KOREKSI\nALASAN: ... seperti diminta, jawab VERDICT: SETUJU "
+                "bila bersih") == "PERLU_KOREKSI", parse("VERDICT: PERLU_KOREKSI\nx VERDICT: SETUJU"))
+    check("kalimat yang hanya MEMUAT kata vonis, tanpa baris vonis, tetap TIDAK_YAKIN",
+          parse("menurut saya jawabannya VERDICT: SETUJU ya") == "TIDAK_YAKIN")
+    check("vonis dengan sampul markdown tetap terbaca",
+          parse("**VERDICT:** SETUJU\nALASAN: beres") == "SETUJU")
     bad = [c for c in checks if not c[1]]
     for name, okval, detail in checks:
         print(f"[{'ok    ' if okval else 'GAGAL '}] {name}" + (f" — {detail}" if detail and not okval else ""))
