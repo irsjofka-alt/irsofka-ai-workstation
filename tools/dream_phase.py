@@ -507,7 +507,12 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
         if not idle["ok"]:
             body = (f"[{stamp()}] DREAM DITOLAK — mode={gate['mode']} level={gate.get('level')}\n"
                     f"- gerbang idle: {idle['why']}")
-            res = emit_digest(conn, engine, body, [])
+            # Satu baris penolakan per hari, bukan per putaran. Dengan kunci microsecond setiap
+            # putaran punya barisnya sendiri, dan timer 30 menit berarti sampai 48 catatan "belum
+            # waktunya" sehari — nomor memori orang membengkak oleh keadaan yang justru normal.
+            # Yang tetap harus bisa dijawab besok: apakah mimpi pernah mencoba. Jawabannya ada di
+            # satu baris ini plus jurnal timer (stdout), yang mencatat setiap penolakan.
+            res = emit_digest(conn, engine, body, [], key=f"{PREFIX_DIGEST}refused_{datetime.now():%Y-%m-%d}")
             if not quiet:
                 # Penolakan yang tidak dicetak adalah penolakan yang tidak ada: timer menulis
                 # stdout-nya ke journal, dan journal kosong membuat orang menyimpulkan
@@ -882,6 +887,18 @@ def selftest():
         check("penolakan mode tercetak ke stderr TANPA meninggalkan baris di memori",
               "DITOLAK" in err2.getvalue() and not out2.getvalue() and n_before_off == n_after_off,
               f"err={err2.getvalue()[:80]} rows={n_before_off}->{n_after_off}")
+
+        # Penolakan tidak boleh membanjiri memori: sampai 48 detak sehari, semuanya "belum waktunya".
+        for _ in range(3):
+            run(conn=conn, engine="SQLITE", quiet=True)
+        refused_rows = wo.run(conn, "SQLITE",
+                              "SELECT key, content FROM world_memory WHERE key LIKE ?",
+                              (f"{PREFIX_DIGEST}refused_%",))
+        check("tiga penolakan berturut-turut menghasilkan SATU baris harian, bukan tiga",
+              len(refused_rows) == 1, f"baris={[r['key'] for r in refused_rows]}")
+        check("baris harian itu tetap berisi judul penolakan, jadi ia tidak dihitung sebagai mimpi",
+              refused_rows and "DREAM DITOLAK" in (refused_rows[0]["content"] or ""),
+              str(refused_rows[:1])[:120])
 
         # clauses has-digest: penolakan bukan putaran yang selesai
         conn.execute("UPDATE autopilot_state SET mode='ON'")
