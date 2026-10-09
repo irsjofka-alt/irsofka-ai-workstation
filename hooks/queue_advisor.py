@@ -212,41 +212,56 @@ def env_pane_delta(cv, engine):
 
 
 def build_env_note(engine_name):
-    """Rangkai tiga pengukur F9.1 jadi satu blok. None kalau tidak ada satu pun yang terbaca.
+    """Rangkai pengukur F9.1 + peringatan F9.2 jadi satu blok. None kalau tidak ada yang terbaca.
 
     Blok ini BUKAN perintah dan BUKAN narasi: tiap barisnya adalah angka dari sebuah alat ukur.
     Kegagalan satu pengukur tidak menghapus yang lain — itu penting karena keadaan "tidak ada
     angka" harus bisa dibedakan dari "ada angka dan angkanya nol".
+
+    Koneksi ledger ditutup SEKALI di akhir, lewat finally. Versi pertama menutupnya di tengah
+    badan fungsi, jadi blok anti-pola yang datang kemudian memanggil dengan koneksi mati dan
+    selalu melapor "tidak terukur" — kegagalan yang terlihat seperti keadaan sistem, padahal
+    bentuk fungsi.
     """
     import cross_verify as cv
     import call_workers as cw
     import work_order as wo
     try:
         conn, engine = wo.connect()
-    except Exception:  # noqa: BLE001 — tanpa ledger, bagian exit code tidak ada, yang lain tetap
+    except Exception:  # noqa: BLE001 — tanpa ledger, bagian berbasis data tidak ada, yang lain tetap
         conn, engine = None, None
     sections = []
     try:
-        if conn is not None:
-            ex = env_exit_codes(conn, engine, wo)
-            if ex:
-                sections.append("exit-code terakhir:\n" + "\n".join(f"  · {x}" for x in ex))
-        else:
-            sections.append("exit-code: ledger tidak terhubung — UNKNOWN, bukan tidak ada perintah")
         try:
-            conn.close()
-        except Exception:  # noqa: BLE001 — koneksi ditutup sekali per panggilan, temuan audit 12:4x
+            if conn is not None:
+                ex = env_exit_codes(conn, engine, wo)
+                if ex:
+                    sections.append("exit-code terakhir:\n"
+                                    + "\n".join(f"  · {x}" for x in ex))
+                bad = wo.failing_shapes(conn, engine)
+                if bad:
+                    sections.append("anti-pola (jangan ulangi bentuk ini tanpa mengubah sesuatu):\n"
+                                    + "\n".join(
+                                        f"  · {wo.shape_warning(b['shape'])} [{b['fails']}x]"
+                                        for b in bad))
+            else:
+                sections.append("exit-code: ledger tidak terhubung — UNKNOWN, bukan tidak ada")
+        except Exception as exc:  # noqa: BLE001 — satu pembacaan gagal tidak menghapus yang lain
+            sections.append(f"ledger: tidak terukur ({type(exc).__name__})")
+        try:
+            sections.append("proses: " + " · ".join(env_processes(cw)))
+        except Exception as exc:  # noqa: BLE001
+            sections.append(f"proses: tidak terukur ({type(exc).__name__})")
+        try:
+            sections.append("delta pane: " + " · ".join(env_pane_delta(cv, engine_name)))
+        except Exception as exc:  # noqa: BLE001
+            sections.append(f"delta pane: tidak terukur ({type(exc).__name__})")
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:  # noqa: BLE001
             pass
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        sections.append("proses: " + " · ".join(env_processes(cw)))
-    except Exception as exc:  # noqa: BLE001
-        sections.append(f"proses: tidak terukur ({type(exc).__name__})")
-    try:
-        sections.append("delta pane: " + " · ".join(env_pane_delta(cv, engine_name)))
-    except Exception as exc:  # noqa: BLE001
-        sections.append(f"delta pane: tidak terukur ({type(exc).__name__})")
     if not sections:
         return None
     return "KEADAAN LINGKUNGAN (terukur, bukan narasi):\n" + "\n".join(sections)

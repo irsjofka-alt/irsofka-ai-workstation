@@ -1008,6 +1008,142 @@ def night_quota_state(conn, engine):
             "measurable": used is not None, "notes": notes, "ok": not why, "why": why}
 
 
+# Program yang angka keluar bukan-nolnya adalah JAWABAN, bukan kegagalan. Lihat `failing_shapes`.
+NONZERO_IS_NORMAL = frozenset({
+    "grep", "egrep", "fgrep", "rg", "diff", "cmp", "comm", "pgrep", "pidof", "which",
+    "whereis", "type", "test", "[", "[[", "false", "awk", "read",
+})
+
+
+def command_shape(cmd):
+    """Bentuk sebuah perintah, tanpa argumennya. Dasar F9.2.
+
+    Yang ingin dikenali adalah "panggilan yang sama", bukan "teks yang sama": `pytest tests/x.py`
+    dan `pytest tests/y.py` adalah dua perintah dengan satu bentuk. Karena itu flag, angka, dan
+    path dibuang dan yang tersisa adalah program plus subperintah pertamanya.
+
+    Awalan `cd <dir> &&` juga dilepas. Terukur di action_log mesin ini: hampir setiap baris
+    dimulai dengan `cd ~/.ai-station && ...`, jadi kalau awalan itu ikut jadi bentuk, SEMUA
+    perintah terlihat sebagai satu bentuk yang sama dan laporan anti-pola hanya akan menunjuk
+    dirinya sendiri.
+    """
+    if not cmd:
+        return ""
+    text = str(cmd).strip()
+    # Lepas awalan `cd ... &&` berturut-turut, lalu pembungkus waktu. Tanpa ini hampir setiap baris
+    # di ledger terlihat sebagai satu bentuk yang sama, karena mesin ini menjalankan segalanya
+    # lewat `cd ~/.ai-station && ...`.
+    while True:
+        m = re.match(r"^cd\s+\S+\s*(?:&&|;)\s*(.*)$", text, re.S)
+        if not m:
+            break
+        text = m.group(1).strip()
+    text = re.sub(r"^(?:timeout\s+[\d.]+|time)\s+", "", text)
+    # Angka keluar sebuah perintah komposit adalah angka keluar SEGMEN TERAKHIR: `a; b` berakhir
+    # seperti b, `a && b` juga. Mengambil segmen pertama, seperti versi pertama, menuduh
+    # `echo "=== x ==="; python3 tools/y.py` sebagai bentuk `echo ===` — peringatan yang menunjuk
+    # perintah yang salah lebih buruk daripada tidak ada peringatan, karena orang akan berhenti
+    # membaca peringatan setelah ketemu satu yang salah.
+    parts = [p for p in re.split(r"&&|\|\||;", text) if p.strip()]
+    if parts:
+        text = parts[-1].strip()
+    # Pipeline DIKECUALIKAN, bukan dialamatkan ke salah satu tahapnya. Harness ini berjalan dengan
+    # `pipefail`, jadi angka keluar yang tercatat adalah angka SELURUH pipeline: pada
+    # `grep x | grep y | head -40` yang gagal adalah grep tengah, sementara segmen terakhir adalah
+    # head. Mengambil segmen terakhir menuduh `head` — dan itu terukur hari ini, tiga kali, semuanya
+    # positif palsu. Peringatan yang menunjuk program yang salah lebih buruk daripada tidak ada
+    # peringatan: setelah yang pertama salah, orang berhenti membaca yang berikutnya.
+    if "|" in text:
+        return ""
+    out = []
+    for t in text.split():
+        if t.startswith("<<"):
+            break                         # heredoc: sisanya adalah isi, bukan identitas perintah
+        if t.startswith("-"):
+            continue                      # flag bukan identitas
+        if "/" in t or "\\" in t:
+            # Path diambil NAMA AKHIRNYA saja. Membuang path seluruhnya, seperti versi pertama,
+            # membuat `bash bin/check_dash_order.sh` dan `bash bin/deploy_engine.sh` menyatu jadi
+            # "bash" — dan laporan anti-pola lalu menuduh dua perintah berbeda sebagai pengulangan
+            # yang sama. Basename tetap stabil walau direktorinya berubah.
+            t = t.rstrip("/").split("/")[-1]
+        if not t or re.fullmatch(r"[\d.]+", t):
+            continue                      # angka telanjang (duration, port, baris) bukan identitas
+        # Ledger menyimpan `summary` TERPOTONG, jadi token sering berakhir dengan kutipan menggantung:
+        # `grep "def` dari perintah yang lebih panjang. Tanpa dilepas, bentuknya terbaca sebagai
+        # `"def` dan dua perintah berbeda tidak akan pernah bertemu di laporan yang sama.
+        t = t.strip("\"'`")
+        if not t:
+            continue
+        out.append(t.lower())
+        if len(out) >= 2:
+            break
+    return " ".join(out[:2])
+
+
+def failing_shapes(conn, engine, limit=3, lookback_hours=24):
+    """Bentuk perintah yang berulang kali keluar dengan angka bukan-nol.
+
+    Diturunkan dari `command_exit` yang dipasangkan dengan baris `command`-nya — pembacaan yang
+    sama yang dipakai F9.1, jadi tidak ada definisi kedua untuk "perintah terakhir" (§12).
+    """
+    span = int(lookback_hours) * 3600
+    # Yang diambil HANYA exit yang bukan-nol, dan perintah pendahulunya diambil lewat jendela
+    # LAG pada himpunan terfilter itu. Bentuk pertama mengambil semua baris lalu memfilter di
+    # Python dengan LIMIT 800: pada sesi sepanjang ini 800 baris terakhir hanya mencakup beberapa
+    # menit, jadi 119 kegagalan nyata dalam 24 jam tidak pernah masuk jendela baca dan laporannya
+    # kosong — kekosongan yang terbaca sebagai "tidak ada pola buruk".
+    failed = ("(kind = 'command_exit' AND exit_code IS NOT NULL AND exit_code <> 0")
+    if engine == "POSTGRESQL":
+        sql = ("SELECT kind, summary, exit_code, "
+               "LAG(kind) OVER (ORDER BY ts) AS prev_kind, "
+               "LAG(summary) OVER (ORDER BY ts) AS prev_summary "
+               "FROM action_log WHERE kind = 'command' OR "
+               f"{failed} AND ts >= now() - make_interval(secs => %s)) "
+               "ORDER BY ts DESC LIMIT 2000")
+        params = (span,)
+    else:
+        # SQLite tidak membawa `ts` yang bisa dikurangi interval dengan bentuk yang sama, dan
+        # fallback ini hanya dipakai saat PostgreSQL mati; jendela waktu dilepas di sini dan itu
+        # dilaporkan lewat `windowed=False`, supaya pemanggil tidak mengira angka ini 24 jam.
+        sql = ("SELECT kind, summary, exit_code, "
+               "LAG(kind) OVER (ORDER BY ts) AS prev_kind, "
+               "LAG(summary) OVER (ORDER BY ts) AS prev_summary "
+               "FROM action_log WHERE kind = 'command' OR "
+               f"{failed}) ORDER BY ts DESC LIMIT 2000")
+        params = ()
+    try:
+        rows = run(conn, engine, sql, params)
+    except Exception:  # noqa: BLE001 — ledger tidak terbaca = tidak ada yang bisa dikatakan
+        return []
+    tally = {}
+    for r in rows:
+        if r["kind"] != "command_exit" or (r.get("prev_kind") or "") != "command":
+            continue
+        sh = command_shape(r.get("prev_summary"))
+        if not sh:
+            continue
+        # Angka keluar bukan-nol BUKAN selalu kegagalan. `grep` 1 = tidak ada yang cocok,
+        # `diff` 1 = berkas berbeda, `test` 1 = false — semuanya jawaban normal atas pertanyaan
+        # yang memang ditanyakan. Memperlakukannya sebagai anti-pola membuat peringatan menyala
+        # pada setiap sesi yang sehat, dan peringatan yang selalu menyala tidak dibaca siapa pun.
+        if sh.split(" ", 1)[0] in NONZERO_IS_NORMAL:
+            continue
+        e = tally.setdefault(sh, {"n": 0, "last": r["exit_code"]})
+        e["n"] += 1
+    ranked = sorted(((k, v["n"], v["last"]) for k, v in tally.items() if v["n"] >= 2),
+                    key=lambda x: (-x[1], x[0]))
+    return [{"shape": k, "fails": n, "last_exit": last} for k, n, last in ranked[:int(limit)]]
+
+
+def shape_warning(shape):
+    """Peringatan untuk satu bentuk yang akan dijalankan, atau None."""
+    if not shape:
+        return None
+    return (f"ANTI-PATTERN: bentuk `{shape}` pernah keluar bukan-nol di jendela ini — "
+            "menjalankannya lagi tanpa mengubah apa pun adalah cara loop mengunyah baris yang sama")
+
+
 def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None):
     """Item berikutnya yang siap: semua dependensinya COMPLETED, dan lease-nya tidak dipegang orang.
 
@@ -2847,6 +2983,43 @@ def selftest():
               row_workable_here("", REPO) is True and row_workable_here(123, REPO) is False,
               "junk input must not pass")
         run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (rb_id,))
+
+        # --- F9.2: bentuk perintah yang pernah gagal, diperingatkan sebelum diketik.
+        for cmd, want in (
+                ("cd /home/x && bash bin/check_dash_order.sh", "bash check_dash_order.sh"),
+                ("cd ~/.ai-station && timeout 400 python3 tools/work_order.py selftest",
+                 "python3 work_order.py"),
+                ("grep -rn \"def x\" tools/ | head -20", ""),
+                ("git status --short", "git status"),
+                ("", "")):
+            got = command_shape(cmd)
+            check(f"F9.2 bentuk {want!r:28} <- {cmd[:44]!r}", got == want, f"dapat {got!r}")
+        conn.execute("INSERT INTO action_log (engine, ts, kind, summary, exit_code) VALUES "
+                     "('qoder','2026-02-01 00:00:01','command','python3 tools/bad.py',NULL),"
+                     "('qoder','2026-02-01 00:00:02','command_exit','aborted=False',2),"
+                     "('qoder','2026-02-01 00:00:03','command','python3 tools/bad.py',NULL),"
+                     "('qoder','2026-02-01 00:00:04','command_exit','aborted=False',2),"
+                     "('qoder','2026-02-01 00:00:05','command','grep nothing_here tools/',NULL),"
+                     "('qoder','2026-02-01 00:00:06','command_exit','aborted=False',1),"
+                     "('qoder','2026-02-01 00:00:07','command','grep a tools/ | head -3',NULL),"
+                     "('qoder','2026-02-01 00:00:08','command_exit','aborted=False',1)")
+        conn.commit()
+        _fs = failing_shapes(conn, "SQLITE")
+        _shapes = {x["shape"] for x in _fs}
+        check("F9.2 bentuk yang berulang dan benar-benar gagal masuk laporan",
+              "python3 bad.py" in _shapes, str(_fs))
+        check("F9.2 grep exit=1 BUKAN anti-pola — itu jawaban 'tidak ada yang cocok'",
+              "grep nothing_here" not in _shapes and "grep tools/" not in _shapes, str(_shapes))
+        check("F9.2 pipeline tidak dituduhkan ke tahap terakhirnya",
+              "head" not in " ".join(_shapes), str(_shapes))
+        check("F9.2 laporan menyebut berapa kali dan angka keluar terakhir",
+              all({"fails", "last_exit"} <= set(x) for x in _fs), str(_fs[:1]))
+        check("F9.2 peringatan menyebut bentuknya secara eksplisit",
+              "python3 bad.py" in (shape_warning("python3 bad.py") or ""), str(shape_warning("x")))
+        check("F9.2 bentuk kosong tidak menghasilkan peringatan kosong",
+              shape_warning("") is None, str(shape_warning("")))
+        run(conn, "SQLITE", "DELETE FROM action_log WHERE ts LIKE '2026-02-01%'")
+        conn.commit()
 
         # --- F10.3: batas kuota per malam. Diuji pada pembacanya sendiri, bukan pada tiruan yang
         # disuntik drainer: kalau fungsi ini salah, semua tes drainer di atas tetap hijau karena
