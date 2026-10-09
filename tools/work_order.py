@@ -755,6 +755,53 @@ def retry_now(row, at=None):
     return any(k in reason for k in BUSY_RETRY_REASONS)
 
 
+def queue_origin_for(mode):
+    """Keranjang antrean yang boleh diambil SEBUAH MODE. Satu aturan, satu tempat.
+
+    Aturan ini dulunya hidup dua kali dengan jawaban berbeda, dan itu bukan teori: jalur timer
+    menulis `ORIGIN_OPERATOR if mode == "SEMI" else None`, sementara `hooks/semi_wake.py` menulis
+    `origin=wo.ORIGIN_OPERATOR` tanpa syarat. Karena `level=observe` mengunci timer, satu-satunya
+    jalur otomatis yang benar-benar hidup adalah Stop hook — dan hook itu buta terhadap roadmap.
+    Hasilnya terukur 2026-10-09: operator memindah sakelar ke ON, menunggu, dan tidak ada satu pun
+    item roadmap yang bergerak; ia harus menyuruh lanjut secara manual, yang persis melanggar kata
+    "auto" pada autopilot.
+
+    ON berarti keranjang penuh termasuk roadmap (§6). Yang TIDAK dilonggarkan fungsi ini:
+    `claim()` tetap menegakkan keranjang pada saat penulisan, jadi pemanggil yang menyaring
+    terlalu lebar tetap tidak bisa mengerjakan baris roadmap di bawah SEMI.
+    """
+    return ORIGIN_OPERATOR if (mode or "").upper() == "SEMI" else None
+
+
+def row_workable_here(row_ws, session_ws):
+    """Bolehkah sesi di `session_ws` mengerjakan baris yang proyeknya `row_ws`?
+
+    Sama = boleh; itu pagar direktori yang sudah ada alasannya (tugas proyek A di ketik ke pane
+    yang berdiri di proyek B membuat engine mengerjakan satu tree sambil melaporkan tree lain).
+
+    Pengecualian yang ditambahkan 2026-10-09, dan alasannya konkret bukan kemudahan: tab Qoder dan
+    Antigravity DILUNCURKAN di ~/Documents/ai-workstation karena di situ `.qoder/rules` dan kontrak
+    berada, tetapi kode yang mereka garap seluruhnya ada di ~/.ai-station. `tab_project()` membaca
+    kolom workspace profil — yaitu tempat peluncuran — jadi memakainya sebagai "proyek siapa yang
+    dikerjakan" membuat ~/.ai-station tidak pernah cocok dengan tab mana pun, dan seluruh antrean
+    roadmap diveto oleh pagar yang benar untuk proyek orang lain. Mesin-workstation memelihara
+    dirinya sendiri, jadi repo-nya sendiri selalu layak baginya.
+
+    Ini BUKAN pelonggaran umum: baris milik proyek KETIGA (mis. Creative-Studio) tetap tidak bisa
+    masuk ke pane yang berdiri di workstation, dan `ws_path` baris itu tetap menentukan di mana
+    gerbangnya dijalankan.
+    """
+    if not row_ws:
+        return True
+    try:
+        rw = Path(str(row_ws)).expanduser().resolve(strict=False)
+    except OSError:
+        return False
+    if rw == REPO:
+        return True
+    return session_ws is not None and rw == Path(str(session_ws)).expanduser().resolve(strict=False)
+
+
 def nudge_inject(conn, engine, item_id):
     """Naikkan `inject_count` satu kali, dan tolak kenaikan yang melewati MAX_INJECT.
 
@@ -1716,7 +1763,15 @@ ROADMAP_ITEMS = [
     ("f84", "F8.4+F10.2 work-order schema dan lease atomik: phase, check_command, depends_on, "
             "claimed_by, lease, evidence", "build", None, "python3 tools/work_order.py selftest"),
     ("f108", "F10.8 tombol Autopilot + tab Human Decide, tiga jalur mati tanpa izin AI "
-             "(WAJIB sebelum drainer menyala)", "build", ["f84"], "bash bin/deploy_engine.sh --check"),
+             "(WAJIB sebelum drainer menyala)", "build", ["f84"],
+             # Gerbangnya dulu `bash bin/deploy_engine.sh --check`, dan `--check` BUKAN argumen yang
+             # dikenal skrip itu: parser-nya menutup dengan `*) exit 2`. Jadi gerbang ini selalu
+             # GAGAL — kebalikan dari gerbang yang selalu benar, tapi sama-sama tidak mengukur
+             # apa pun, dan itemnya tetap ditandai COMPLETED dengan bukti berupa prosa commit.
+             # Bentuk sekarang menanyakan dua hal yang benar-benar merupakan F10.8: panel mode
+             # adalah cerminan kosakata mesin (dijalankan dengan MEMANGGIL renderer sungguhan),
+             # dan selftest yang memegang tiga jalur mati tanpa TTY.
+             "bash bin/check_autopilot_modes.sh && python3 tools/work_order.py selftest"),
     ("f101", "F10.1 decision broker: baris keputusan di-resolve dari role resolver, model yang "
              "menjawab tercatat, jawabannya dibaca dari tabel/pane bukan hanya pipa", "build",
      ["f84"], "python3 tools/work_order.py selftest"),
@@ -2751,6 +2806,42 @@ def selftest():
               retry_now({"due_epoch": _t + 300, "escalation_reason": None}, at=_t) is False,
               "no reason recorded must keep waiting")
 
+        # --- ON harus benar-benar berarti ON. Ini regresi yang terukur hari ini, bukan teori:
+        # jalur timer menyaring keranjang menurut mode, Stop hook menulis ORIGIN_OPERATOR tanpa
+        # syarat, dan karena level=observe mengunci timer, hook adalah satu-satunya yang hidup.
+        # Hasilnya: sakelar ON, roadmap penuh, tidak ada yang bergerak, operator disuruh "lanjut".
+        conn.execute("INSERT INTO quest_tasks (title, status, origin, cli_engine) "
+                     "VALUES ('selftest-roadmap-basket','PENDING','roadmap','qoder')")
+        conn.commit()
+        rb_id = int(run(conn, "SQLITE", "SELECT id FROM quest_tasks "
+                          "WHERE title='selftest-roadmap-basket'")[0]["id"])
+        check("keranjang SEMI = hanya perintah operator",
+              queue_origin_for("SEMI") == ORIGIN_OPERATOR
+              and rb_id not in [int(x["id"]) for x in ready_items(conn, "SQLITE",
+                                                                  origin=queue_origin_for("SEMI"),
+                                                                  for_engine="qoder")],
+              str(queue_origin_for("SEMI")))
+        _on_ids = [int(x["id"]) for x in ready_items(conn, "SQLITE",
+                                                     origin=queue_origin_for("ON"),
+                                                     for_engine="qoder")]
+        check("keranjang ON = antrean roadmap TERLIHAT, bukan hanya dideklarasikan",
+              queue_origin_for("ON") is None and rb_id in _on_ids, str(_on_ids[:6]))
+        check("huruf kecil tidak mengubah keranjang (on == ON)",
+              queue_origin_for("on") == queue_origin_for("ON"), str(queue_origin_for("on")))
+        # Pagar proyek: repo workstation boleh dipelihara oleh tab workstation, tapi proyek KETIGA
+        # tetap tidak boleh masuk. Kalau pengecualian ini ditulis longgar, ia jadi lubang.
+        check("~/.ai-station layak dikerjakan dari tab yang diluncurkan di ai-workstation",
+              row_workable_here(REPO, REPO.parent / "Documents" / "ai-workstation") is True,
+              "workstation must maintain itself")
+        check("proyek KETIGA tetap diveto — pengecualian bukan pelonggaran umum",
+              row_workable_here("/tmp/proyek-orang-lain", REPO) is False, "third project vetoed")
+        check("baris tanpa proyek tidak diveto oleh pagar yang tidak punya bahan",
+              row_workable_here(None, REPO) is True, "no ws = allowed")
+        check("path yang tidak bisa di-resolve diveto, bukan dianggap cocok",
+              row_workable_here("", REPO) is True and row_workable_here(123, REPO) is False,
+              "junk input must not pass")
+        run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (rb_id,))
+
         # --- F10.3: batas kuota per malam. Diuji pada pembacanya sendiri, bukan pada tiruan yang
         # disuntik drainer: kalau fungsi ini salah, semua tes drainer di atas tetap hijau karena
         # mereka tidak pernah memanggilnya.
@@ -3301,13 +3392,31 @@ def selftest():
               "pembacaan peristiwa bukan JSON")
 
         # Gerbang F10.3 pernah menuntut `is-enabled`, yaitu menuntut unit yang menyala sendiri
-        # setelah boot — persis yang operator larang enam jam kemudian. Dua aturan yang keduanya
-        # hijau bisa tidak bisa keduanya dipatuhi; yang diuji di sini adalah bahwa gerbangnya tidak
-        # lagi meminta keadaan itu, supaya perbaikan ini tidak kembali tumbuh lewat "cuma tes".
+        # setelah boot — persis yang operator larang. Sifat yang ingin dijaga: gerbang tidak boleh
+        # MEMINTA keadaan "menyala sendiri". Versi pertama cek ini mencari substring `is-enabled`
+        # dan menyimpulkan dari keberadaannya, dan itu salah tuduh: gerbang yang sekarang menulis
+        # `! systemctl --user is-enabled …` justru MENOLAK keadaan itu, yang merupakan bentuk
+        # terkuat dari aturan yang sama. Jadi yang ditanya adalah tanda `!` di depannya, bukan
+        # kemunculan katanya.
+        def _demands_timer_enabled(gate):
+            # Negasi shell menempel di AWAL KLAUSA, bukan di depan kata yang dinegasinya:
+            # `! systemctl --user is-enabled x` menegasi seluruh perintah. Versi pertama cek ini
+            # mencari `!` yang berakhir tepat sebelum `is-enabled` dan karena itu GAGAL pada
+            # gerbang yang benar — ketahuan oleh cek dua arah di bawah, yang memang untuk itu ada.
+            for clause in (gate or "").split("&&"):
+                c = clause.strip()
+                if "is-enabled" in c and not c.startswith("!"):
+                    return True
+            return False
         gate103 = [i[4] for i in ROADMAP_ITEMS if i[0] == "f103"][0]
         check("gerbang F10.3 tidak menuntut timer yang menyala sendiri setelah boot",
-              "is-enabled" not in gate103 and "irsofka-autopilot.timer" in gate103
+              not _demands_timer_enabled(gate103) and "! systemctl --user is-enabled" in gate103
+              and "irsofka-autopilot.timer" in gate103
               and ("is-active" in gate103 and "drainer-" in gate103), gate103[:140])
+        check("cek itu sendiri bisa salah: bentuk positif `is-enabled` tanpa `!` tetap tertangkap",
+              _demands_timer_enabled("systemctl --user is-enabled --quiet x.timer") is True
+              and _demands_timer_enabled("! systemctl --user is-enabled --quiet x.timer") is False,
+              "negation-aware check must go both ways")
         # Dan keadaan yang sama harus benar di LEDGER, bukan hanya di sumber Python: gerbang yang
         # dibaca mesin adalah kolom check_command di barisnya. Kalau sumber diperbaiki tapi barisnya
         # tidak disegarkan, yang berjalan tetap grep lama — dan itu sudah terjadi malam ini.
@@ -3320,7 +3429,8 @@ def selftest():
         check("satu baris F10.3 benar-benar ada di ledger untuk diperiksa", bool(_g103),
               "tidak ada baris F10.3 di fixture")
         check("baris ledger tidak menyimpan gerbang lama yang menuntut is-enabled",
-              bool(_g103) and "is-enabled" not in (_g103[0]["c"] or "")
+              bool(_g103) and not _demands_timer_enabled(_g103[0]["c"])
+              and "! systemctl --user is-enabled" in (_g103[0]["c"] or "")
               and "irsofka-autopilot.timer" in (_g103[0]["c"] or ""),
               str((_g103[0]["c"] if _g103 else "")[:120]))
 

@@ -294,14 +294,24 @@ def main() -> int:
     # ia bisa berputar sendiri. Untuk alasan lain (direktori salah, tanpa target, injeksi habis,
     # jendela ditutup) jeda tetap berlaku, karena mengulangi kegagalan yang tidak berubah di setiap
     # batas adalah loop tanpa rem.
+    # Keranjang TIDAK ditulis di sini. Dulu `origin=wo.ORIGIN_OPERATOR` tanpa syarat, sementara
+    # jalur timer menyaring menurut mode — dan karena `level=observe` mengunci timer, hook inilah
+    # satu-satunya yang hidup. Akibatnya terukur: sakelar ON, antrean roadmap penuh, tidak ada yang
+    # bergerak, dan operator harus menyuruh "lanjut" secara manual. Aturan keranjang milik
+    # `work_order.queue_origin_for`, satu tempat untuk satu kata.
     ready = [r for r in wo.ready_items(conn, engine, respect_due=False,
-                                       origin=wo.ORIGIN_OPERATOR, for_engine=SESSION_ENGINE)
+                                       origin=wo.queue_origin_for(ap.get("mode")),
+                                       for_engine=SESSION_ENGINE)
              if wo.retry_now(r)]
     item = None
     skipped = []
     for r in ready:
         r_ws = wo.resolve_workspace(r)
-        if cwd is not None and r_ws != cwd:
+        # Pagar proyek, dengan satu pengecualian yang punya alasan: tab ini DILUNCURKAN di
+        # ~/Documents/ai-workstation (di situ `.qoder/rules` dan kontrak berada) tetapi kode yang
+        # digarapnya ada di ~/.ai-station. Membandingkan kedua path secara butuh membuat seluruh
+        # antrean roadmap diveto — lihat `work_order.row_workable_here`.
+        if cwd is not None and not wo.row_workable_here(r_ws, cwd):
             skipped.append(int(r["id"]))
             continue
         item = r

@@ -470,7 +470,7 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
         return refuse(conn, engine, int(item["id"]), emit, "PANE_DIR_UNKNOWN", target=target,
                       why="proyek tab tidak terbaca dari cli_profiles — UNKNOWN, dan UNKNOWN tidak "
                           "pernah boleh mengetik")
-    if _as_path(where) != want:
+    if not wo.row_workable_here(want, where):
         return refuse(conn, engine, int(item["id"]), emit, "PANE_WRONG_DIR", target=target,
                       tab_project=str(where), pane_now=str(live) if live else None,
                       wants=str(want),
