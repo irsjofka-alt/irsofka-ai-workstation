@@ -1950,7 +1950,16 @@ ROADMAP_ITEMS = [
     ("f93", "F9.3 reflex proof: ydotool bergerak lalu diff 64x64 membuktikan layar berubah",
      "build", None, "cargo test -q reflex_proof"),
     ("f105", "F10.5 dream phase: konsolidasi memori saat idle, berkas tracked hanya lewat digest",
-     "build", ["f103"], "python3 tools/work_order.py digest"),
+     "build", ["f103"],
+     # GERBANG INI BELUM DITEPATI, dan itu disengaja. Judulnya menyebut dua sifat — konsolidasi
+     # memori saat idle, dan berkas tracked hanya berubah lewat digest — sementara `digest` yang
+     # ada di sini adalah laporan pagi: ia ada, keluar 0, dan tidak mengukur keduanya. Dicari di
+     # seluruh tools/, hooks/ dan bin/: "dream" dan "konsolidasi" NOL kemunculan, jadi fiturnya
+     # belum dibangun sama sekali. Menaruh `digest` sebagai gerbang berarti item ini akan
+     # ditandai COMPLETED oleh perintah yang tidak bersangkutan — kelas bug yang sama persis
+     # dengan yang baru ditutup di F10.3, dan untuk ketiga kalinya di repo yang sama.
+     # Sengaja dibuat mustahil sampai fiturnya ada, supaya ia tidak bisa lulus diam-diam.
+     "test -f ~/.ai-station/tools/dream_phase.py && python3 tools/work_order.py selftest"),
     # Jawabannya sudah diberikan operator lewat tab Human Decide (decision 6, 2026-10-08 07:00): ON boleh
     # commit dan push asal ada verifier yang meloloskan lebih dulu. Yang belum ada adalah barisnya —
     # aturan itu sekarang cuma hidup di §6, tempat ia mengikat sejauh engine mengingatnya, padahal §12
