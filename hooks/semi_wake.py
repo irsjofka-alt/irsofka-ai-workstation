@@ -179,8 +179,13 @@ def guides_for(conn, engine) -> tuple[str, list[str], int]:
     return "\n\n".join(blob), notes, len(taken)
 
 
-def prepare_prompt(item, cwd):
+def prepare_prompt(item, cwd, mode="SEMI"):
     """Susun prompt SEBELUM ada klaim — dan kembalikan None kalau gagal, bukan melempar.
+
+    `mode` menentukan naskahnya, dengan aturan yang SAMA dengan `drainer.hand_new_work`: SEMI
+    berarti "perintah operator, ada manusia di meja", ON berarti "tugas antrean, kerjakan".
+    Memilihnya sendiri di sini akan membuat satu kata punya dua definisi (§12), dan yang berbeda
+    adalah instruksi yang dibaca engine saat ia memulai pekerjaan.
 
     Ini alasan fungsinya dipisah: property yang ingin ditegakkan adalah "tidak ada baris yang
     tertinggal WORKING tanpa ada yang menyuntik". Selama pembentuk prompt hidup di dalam `main`
@@ -195,8 +200,18 @@ def prepare_prompt(item, cwd):
         conn, engine = wo.connect()
         full = wo.get_item(conn, engine, int(item["id"])) or item
         body, notes, nguides = guides_for(conn, engine)
-        prompt = drainer.SEMI_PROMPT.format(id=item["id"], title=item["title"], ws=cwd,
-                                            gate=(full.get("check_command") or "tanpa gerbang"))
+        # Naskah dipilih dari mode, dengan aturan yang sama persis seperti `hand_new_work`:
+        # SEMI_PROMPT berbicara kepada "manusia di meja" tentang perintah yang ia tulis sendiri;
+        # START_PROMPT adalah penugasan antrean. Memakai SEMI_PROMPT di bawah ON berarti menyuruh
+        # engine mengerjakan tugas roadmap sambil memberitahunya bahwa yang mengirim adalah
+        # operator yang sedang menonton — instruksi yang salah, bukan sekadar tidak rapi.
+        gate_text = full.get("check_command") or "tanpa gerbang"
+        if (mode or "").upper() == "SEMI":
+            prompt = drainer.SEMI_PROMPT.format(id=item["id"], title=item["title"], ws=cwd,
+                                                gate=gate_text)
+        else:
+            prompt = drainer.START_PROMPT.format(id=item["id"], title=item["title"],
+                                                 gate=gate_text)
     except Exception as exc:  # noqa: BLE001 — sebelum ada klaim, gagal berarti diam
         log("SEMI_PREPARE_FAILED", item=int(item["id"]), engine=SESSION_ENGINE,
             reason=f"{type(exc).__name__}: {exc}",
@@ -225,8 +240,34 @@ def main() -> int:
     import work_order as wo
     conn, engine = wo.connect()
     ap = wo.autopilot(conn, engine) or {}
-    if (ap.get("mode") or "").upper() != "SEMI":
-        return 0                      # ON: jalur ini tidak pernah ikut campur, tanpa jejak
+    mode_now = (ap.get("mode") or "").upper()
+    # ON DI SINI JUGA. Guard lama memulangkan hook untuk setiap mode KECUALI SEMI, dengan komentar
+    # "ON: jalur ini tidak pernah ikut campur, tanpa jejak" — dan itu membuat FULL AUTO mati secara
+    # struktural.
+    # Rantainya: satu-satunya jalur yang bergerak tanpa TTY adalah batas giliran mesin ini sendiri;
+    # timer butuh `level >= dispatch`, dan `arm` menolak tanpa `/dev/tty` yang bisa dibuka. Jadi di
+    # keadaan normal ON + observe, TIDAK ADA satu pun yang melanjutkan pekerjaan: engine berhenti
+    # untuk melapor, dan tidak ada yang membangunkannya. Operator harus bilang "lanjut" — yang
+    # persis meniadakan kata "auto" pada autopilot. Terukur 2026-10-09, dan ini keluhan keduanya
+    # setelah perbaikan keranjang: perbaikan itu tidak pernah berjalan, karena fungsi keluar 68
+    # baris sebelumnya.
+    #
+    # Yang menahan jalur ini tetap sama, dan tidak dilonggarkan di sini: keranjang diturunkan dari
+    # mode (`wo.queue_origin_for`), `claim()` menegakkannya saat penulisan, satu perintah aktif per
+    # mesin, `MAX_INJECT` membatasi suntikan per baris, dan pemutus malam (kegagalan beruntun,
+    # batas item, jendela kedaluwarsa) tetap menutup seluruh loop. Yang berubah hanyalah: ON berarti
+    # mesin ini memang diserahkan ke engine.
+    if mode_now == wo.OFF_MODE:
+        log("SEMI_REFUSED", engine=SESSION_ENGINE, mode=mode_now,
+            reason="OFF adalah keadaan berhenti: tidak ada yang disuntik pada batas giliran ini",
+            stop_hook_active=bool(data.get("stop_hook_active")))
+        return 0
+    if mode_now not in wo.MODES:
+        log("SEMI_REFUSED", engine=SESSION_ENGINE, mode=mode_now,
+            reason="kolom mode berisi nilai di luar kosakata — UNKNOWN, dan UNKNOWN tidak "
+                   "pernah menyuntik sesuatu ke sesi orang",
+            stop_hook_active=bool(data.get("stop_hook_active")))
+        return 0
 
     # Tangga `level` TIDAK menahan jalur ini, dan itu keputusan yang bisa dibaca, bukan kelalaian.
     # Yang dijaga `arm` adalah mesin yang bergerak sendiri: timer yang mengetik ke pane milik orang
@@ -330,7 +371,7 @@ def main() -> int:
     # melempar setelahnya — `__main__` menelannya sebagai SEMI_BROKE dengan exit 0, dan barisnya
     # tinggal WORKING tanpa ada yang menyuntik. Itulah persis kegagalan yang temuan (f) minta
     # dihapus, dan memperbaiki salah satu cabangnya saja tidak menghapus akarnya.
-    prompt, nguides = prepare_prompt(item, cwd)
+    prompt, nguides = prepare_prompt(item, cwd, mode_now)
     if prompt is None:
         # Tanpa jeda di sini, satu baris yang gagal karena CACAT KODE (misalnya template yang tidak
         # bisa di-format) dicoba lagi pada setiap batas giliran, selamanya — dan ia berdiri di kepala
@@ -342,7 +383,11 @@ def main() -> int:
                         "SEMI_PREPARE_FAILED · lihat logs/semi_wake.jsonl untuk tipe errornya")
         return 0
 
-    ok, msg = wo.claim(conn, engine, int(item["id"]), SESSION_ENGINE, mode="SEMI")
+    # Mode diteruskan, BUKAN ditulis "SEMI". `claim()` menurunkan keranjang dari mode yang
+    # dibawanya: mengirim "SEMI" di bawah ON membuat claim menolak baris roadmap dengan
+    # alasan "SEMI hanya mengerjakan perintah operator" — yaitu bug ON yang ketiga, dan ia
+    # akan muncul tepat setelah dua pertama diperbaiki.
+    ok, msg = wo.claim(conn, engine, int(item["id"]), SESSION_ENGINE, mode=mode_now)
     if not ok:
         # claim() sudah memuat pemutus malam dan aturan tree kotor, jadi penolakan di sini adalah
         # keputusan yang tercatat, bukan kegagalan jalur ini. Tapi ia tetap butuh jeda: tanpa

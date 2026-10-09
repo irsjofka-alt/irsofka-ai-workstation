@@ -1085,8 +1085,20 @@ def selftest():
             check("rem masuk-kembali bisa diuji", False, f"{type(_e4).__name__}: {_e4}")
         check("hook SEMI membaca mode dari database pada setiap tembakan, bukan dari harapan",
               "wo.autopilot(" in hsegs.get("main", ""))
-        check("hook SEMI menyaring asal baris, jadi ia tidak pernah mengambil item roadmap",
-              "origin=wo.ORIGIN_OPERATOR" in hsegs.get("main", ""))
+        # Cek ini dulu berbunyi `"origin=wo.ORIGIN_OPERATOR" in main()` dan LOLOS — bukan karena
+        # hook menyaring dengan benar, tapi karena KOMENTAR saya sendiri di dalam main() menyebut
+        # string itu. Guard yang mencari teks bisa dibohongi oleh prosa, dan ia dibohongi pada
+        # percobaan pertama. Bentuk sekarang menanyakan hal yang benar-benar ingin ditegakkan:
+        # keranjang DITURUNKAN dari mode, dan tidak ada lagi jalan keluar awal untuk ON.
+        _main_src = hsegs.get("main", "")
+        check("hook menurunkan keranjang dari mode, bukan menulisnya sebagai konstanta",
+              "wo.queue_origin_for(" in _main_src, _main_src[:120])
+        check("hook TIDAK lagi pulang saat mode ON — bug yang membuat FULL AUTO mati struktural",
+              '!= "SEMI"' not in _main_src, "masih ada guard mode != SEMI di main()")
+        check("hanya OFF dan nilai di luar kosakata yang menghentikan jalur batas giliran",
+              "wo.OFF_MODE" in _main_src and "wo.MODES" in _main_src, "pulang awal tidak terstruktur")
+        # Perilaku keranjang itu sendiri ditegakkan di pemilik katanya, dengan baris nyata:
+        # `work_order selftest: keranjang ON = antrean roadmap TERLIHAT, bukan hanya dideklarasikan`.
         # Regresi yang terjadi sungguhan, 2026-10-08 11:28, terdeteksi karena injeksi ini masuk ke
         # sesi penulisnya sendiri: `documents/AGENTS.md` (27 KB) menghabiskan seluruh anggaran
         # karakter, jadi tiga berkas kontrak lainnya TIDAK terkirim sama sekali. Pesan menyebut
