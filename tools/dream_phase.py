@@ -57,8 +57,11 @@ def stamp(ts=None):
     return time.strftime("%Y-%m-%d_%H%M", time.localtime(ts))
 
 
+_SEQ = [0]
+
+
 def run_stamp(ts=None):
-    """Kunci baris digest, presisi mikrodetik, dari SATU pembacaan jam.
+    """Kunci baris digest, presisi mikrodetik, dari SATU pembacaan jam, dengan pencatat proses.
 
     Menit tidak cukup, dan detik pun tidak: dua putaran dalam satu satuan waktu berbagi kunci dan
     yang kemudian menimpa yang pertama lewat ON CONFLICT. Terukur malam ini di dalam selftest
@@ -66,14 +69,21 @@ def run_stamp(ts=None):
     adalah penolakannya. Timer 30 menit bukan jaminan — satu panggilan manual di samping detak
     sudah cukup.
 
-    Dan presisi harus dari satu pembacaan: pecahan dari `time.time()` yang digabung dengan tanggal
-    dari `time.localtime(None)` adalah dua keadaan berbeda pada batas detik 59.999999, dan kunci
-    yang melompat satu detik ke depan tidak bisa diurutkan oleh siapa pun yang membacanya kemudian.
+    Presisi harus dari satu pembacaan: pecahan dari `time.time()` yang digabung dengan tanggal dari
+    `time.localtime(None)` adalah dua keadaan berbeda pada batas detik. Dan pecahan dibulatkan ke
+    BAWAH: pembulatan ke nearest membuat 0.9999995 menjadi 1_000_000, modulo menabraknya ke 0 tanpa
+    menaikkan detik, sehingga stempel melempar mundur dan dua instant berbeda dapat kunci yang sama
+    (terukur oleh tesnya sendiri).
+
+    Angka urut menutup sisa kemungkinannya: dua panggilan dalam mikrodetik yang sama, atau float64
+    yang tidak bisa membedakan 0.2 µs pada epoch ini. Uniqueness jadi sifat struktur, bukan
+    kebetulan jadwal.
     """
     base = float(ts if ts is not None else time.time())
     secs = int(base)
-    frac = int(round((base - secs) * 1_000_000)) % 1_000_000
-    return time.strftime("%Y-%m-%d_%H%M%S", time.localtime(secs)) + "_%06d" % frac
+    _SEQ[0] += 1
+    return (time.strftime("%Y-%m-%d_%H%M%S", time.localtime(secs)) + "_%06d" % int((base - secs) * 1_000_000)
+            + f".{_SEQ[0]}")
 
 
 def now_ts():
@@ -150,14 +160,23 @@ def mode_gate(conn, engine):
     ap = wo.autopilot(conn, engine)
     mode = (ap.get("mode") or "").upper()
     if mode == wo.OFF_MODE:
-        return {"ok": False, "mode": mode, "why": "OFF: keadaan berhenti, tidak ada kerja latar"}
+        return {"ok": False, "refused": "MODE", "mode": mode,
+                "why": "OFF: keadaan berhenti, tidak ada kerja latar"}
     if mode not in wo.MODES:
-        return {"ok": False, "mode": mode or "(kosong)",
+        return {"ok": False, "refused": "MODE_UNKNOWN", "mode": mode or "(kosong)",
                 "why": "kolom mode berisi nilai di luar kosakata — UNKNOWN, bukan izin"}
     lvl = wo.drain_level(conn, engine)
-    return {"ok": True, "mode": mode, "level": lvl.get("level"), "readable": bool(lvl.get("readable")),
-            "may_write_files": bool(lvl.get("allows_dispatch")),
-            "why": None if lvl.get("readable") else "tingkat tangan tidak terbaca — turun ke baca-saja"}
+    if not lvl.get("readable"):
+        # Tangga tidak terbaca = UNKNOWN, dan UNKNOWN tidak pernah berarti boleh. Versi pertama
+        # mengembalikan ok=True dengan may_write_files=False: aman hari ini, tapi meninggalkan
+        # jebakan bagi pemanggil berikutnya — `if mode_gate()["ok"]: tulis berkas` akan menulis.
+        # Menolak seluruh putaran lebih jujur: mimpi yang tidak tahu tangan siapa yang memegang
+        # adalah mimpi yang tidak seharusnya berjalan, bukan yang berjalan diam-diam.
+        return {"ok": False, "refused": "LADDER_UNKNOWN", "mode": mode, "level": lvl.get("level"),
+                "readable": False, "may_write_files": False,
+                "why": f"tingkat tangan tidak terbaca — UNKNOWN, bukan baca-saja: {str(lvl.get('why'))[:90]}"}
+    return {"ok": True, "mode": mode, "level": lvl.get("level"), "readable": True,
+            "may_write_files": bool(lvl.get("allows_dispatch")), "why": None}
 
 
 def tracked_state():
@@ -264,16 +283,24 @@ def persist_scores(conn, engine, scored):
 
 # --- pekerjaan 2: memadatkan baris sesi yang menua ---------------------------
 def read_cursor(conn, engine):
+    """KurSOR pemadatan. None berarti TIDAK DIKETAHUI — dan 0 bukan pengganti yang netral.
+
+    Versi pertama menelan exception menjadi 0. Kalau world_memory sedang tidak terbaca, itu
+    berarti seluruh baris session_turns dianggap belum pernah dipadatkan, dan putaran berikutnya
+    menulis ulang semua ringkasan dari nol di berkas yang sama — duplikasi yang tidak dilaporkan.
+    None membuat pemanggil menolak pekerjaannya dengan alasan, bukan mengarang titik mulai.
+    """
     try:
         rows = wo.run(conn, engine, f"SELECT content FROM world_memory WHERE key = {ph(engine)}", (CURSOR_KEY,))
-    except Exception:  # noqa: BLE001
-        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"dream: kurSOR tidak terbaca ({str(exc)[:70]}) — pemadatan dilewati", file=sys.stderr)
+        return None
     if not rows:
         return 0
     try:
         return int(str(rows[0]["content"] or "0").strip())
     except ValueError:
-        return 0
+        return None
 
 
 def compact_stale_turns(conn, engine, cursor, minutes=IDLE_MINUTES, batch=COMPACT_BATCH, write=True):
@@ -399,8 +426,12 @@ def pre_answer_incidents(conn, engine, threshold=PRE_ANSWER_REPEATS, write=True)
 
 
 # --- digest ------------------------------------------------------------------
-def build_digest(gate, jobs, files, tracked_before, tracked_after, idle_seconds):
-    out = [f"[{stamp()}] DREAM — mode={gate['mode']} level={gate.get('level')}",
+def build_digest(gate, jobs, files, tracked_before, tracked_after, idle_seconds, rs, key):
+    # `rs` dan `key` diterima sebagai parameter, bukan dibaca ulang di dalam: cap waktu di kepala
+    # laporan harus IDENTIK dengan cap di kunci barisnya. Dua pemanggilan run_stamp() terpisah
+    # menghasilkan dua angka berbeda — terukur 36 mikrodetik malam ini — dan laporan yang tidak
+    # bisa dicocokkan dengan barisnya sendiri adalah laporan yang tidak bisa diverifikasi.
+    out = [f"[{rs}] DREAM — mode={gate['mode']} level={gate.get('level')}  [{key}]",
            f"- gerbang: idle={idle_seconds} detik | berkas_diperbolehkan={gate.get('may_write_files')}"]
 
     rank = jobs.get("rank") or {}
@@ -508,8 +539,12 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
             # Yang tetap harus keluar adalah alasannya — ke stderr, supaya jurnal systemd membedakan
             # "sakelarnya mati" dari "timernya tidak pernah dijadwalkan".
             if not quiet:
-                print(f"DREAM DITOLAK — {gate['why']}", file=sys.stderr)
-            return {"ok": False, "refused": "MODE", "why": gate["why"], "files": []}
+                print(f"DREAM DITOLAK — {gate.get('refused') or 'MODE'}: {gate['why']}", file=sys.stderr)
+            # Nama penolakannya diteruskan apa adanya (MODE / MODE_UNKNOWN / LADDER_UNKNOWN):
+            # "sakelar mati" dan "keadaan tidak terbaca" adalah dua hal berbeda bagi orang yang
+            # membaca jurnal besok pagi, dan menyatukannya menjadi satu kata "MODE" menyembunyikan
+            # yang kedua — padahal yang kedua justru yang butuh tindakan.
+            return {"ok": False, "refused": gate.get("refused") or "MODE", "why": gate["why"], "files": []}
         may_files = bool(gate.get("may_write_files"))
         # `--force` melewatkan gerbang idle, TIDAK pernah menaikkan tangan. Perbedaannya seluruh
         # isinya: orang di terminal boleh melihat satu putaran sekarang, tapi menulis berkas butuh
@@ -520,7 +555,7 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
         idle = idle_gate(conn, engine, minutes, force)
 
         if not idle["ok"]:
-            body = (f"[{stamp()}] DREAM DITOLAK — mode={gate['mode']} level={gate.get('level')}\n"
+            body = (f"[{run_stamp()}] DREAM DITOLAK — mode={gate['mode']} level={gate.get('level')}\n"
                     f"- gerbang idle: {idle['why']}")
             # Satu baris penolakan per hari, bukan per putaran. Dengan kunci microsecond setiap
             # putaran punya barisnya sendiri, dan timer 30 menit berarti sampai 48 catatan "belum
@@ -540,7 +575,12 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
         if may_files and jobs["rank"].get("ok"):
             jobs["persist"] = persist_scores(conn, engine, jobs["rank"]["rows"])
         cursor = read_cursor(conn, engine)
-        jobs["compact"] = compact_stale_turns(conn, engine, cursor, minutes=minutes, write=may_files)
+        if cursor is None:
+            jobs["compact"] = {"ok": False, "files": [], "cursor": None,
+                               "why": "UNKNOWN: kurSOR pemadatan tidak terbaca — tidak ada yang "
+                                      "dipadatkan, bukan dipadatkan dari nol"}
+        else:
+            jobs["compact"] = compact_stale_turns(conn, engine, cursor, minutes=minutes, write=may_files)
         jobs["debt"] = documentation_debt()
         jobs["incidents"] = pre_answer_incidents(conn, engine, write=may_files)
 
@@ -552,8 +592,10 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
             write_rank(conn, engine, jobs["rank"])
 
         after = tracked_state()
-        body, delta = build_digest(gate, jobs, files, before, after, idle.get("idle_seconds"))
-        res = emit_digest(conn, engine, body, files)
+        rs = run_stamp()
+        dkey = f"{PREFIX_DIGEST}{rs}"
+        body, delta = build_digest(gate, jobs, files, before, after, idle.get("idle_seconds"), rs, dkey)
+        res = emit_digest(conn, engine, body, files, key=dkey)
         out = {"ok": True, "mode": gate["mode"], "level": gate.get("level"), "may_write_files": may_files,
                "idle_seconds": idle.get("idle_seconds"), "digest": res, "files": files, "tracked_delta": delta,
                "jobs": {k: {kk: v.get(kk) for kk in ("count", "compacted", "candidates", "retrievable",
@@ -694,6 +736,37 @@ def selftest():
         ok2, _ = wo.set_level(conn, "SQLITE", "dispatch", minutes=30, who="selftest", tty=lambda: True)
         conn.commit()
 
+        # --- satu detik, satu pembacaan, dan kunci yang tidak bisa berbagi -----------------------
+        _a, _b = run_stamp(1_700_000_000.9999996), run_stamp(1_700_000_001.0000001)
+        check("pembulatan ke bawah tidak memundurkan stempel: instant beda dapat kunci beda dan urut",
+              _a != _b and _a.split(".")[0] < _b.split(".")[0], f"a={_a} b={_b}")
+        check("frac tidak pernah melampaui 999999 dan tidak pernah membawa carry",
+              int(_a.split("_")[2].split(".")[0]) <= 999999, _a)
+        _same = [run_stamp(1_700_000_000.5) for _ in range(12)]
+        check("dua belas putaran dalam mikrodetik yang sama tetap menghasilkan kunci berbeda",
+              len(set(_same)) == 12, f"{len(set(_same))} unik dari 12")
+        check("kunci tetap diurutkan menurut jam meski urutannya yang membedakan",
+              all(x.split(".")[0] <= y.split(".")[0] for x, y in zip(_same, _same[1:])), str(_same[:3]))
+
+        # --- tangga tak terbaca -------------------------------------------------------------------
+        orig_drain = wo.drain_level
+        wo.drain_level = lambda c, e: {"level": None, "readable": False, "allows_dispatch": False,
+                                       "why": "baris autopilot tidak terbaca"}
+        try:
+            n_ladder = wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory")[0]["c"]
+            gl = mode_gate(conn, "SQLITE")
+            rl = run(conn=conn, engine="SQLITE", force=True, quiet=True)
+            n_ladder_after = wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory")[0]["c"]
+        finally:
+            wo.drain_level = orig_drain
+        check("tangga yang tidak terbaca = UNKNOWN, dan UNKNOWN menolak seluruh putaran",
+              gl["ok"] is False and gl.get("refused") == "LADDER_UNKNOWN"
+              and gl["may_write_files"] is False, str(gl)[:160])
+        check("penolakan UNKNOWN tidak meninggalkan satu baris pun di memori",
+              (not rl["ok"]) and rl.get("refused") == "LADDER_UNKNOWN" and n_ladder == n_ladder_after,
+              f"{n_ladder}->{n_ladder_after} {str(rl)[:90]}")
+        check("sambatan drain_level dilepas lagi sesudah tes ini", wo.drain_level is orig_drain, "")
+
         for i in range(14):
             conn.execute("INSERT INTO world_memory (key, category, content, updated_at) VALUES (?,?,?,?)",
                          (f"handoff_auto_{i}", "session_recovery",
@@ -806,6 +879,10 @@ def selftest():
               "re-rank 17 baris" in text and "insiden terjawab-dulu" in text, text[:200])
         check("setiap berkas yang ditulis putaran ini disebut di digest-nya sendiri",
               all(f in text for f in r["files"]), str(r["files"])[:160])
+        _head = text.split("\n", 1)[0]
+        check("cap waktu di kepala laporan sama persis dengan cap di kunci barisnya",
+              _head.startswith("[") and _head[1:_head.index("]")] == r["digest"]["key"][len(PREFIX_DIGEST):],
+              f"kepala={_head[:30]} kunci={r['digest']['key']}")
 
         # --- peringkat yang sungguh tersimpan, bukan hanya tercetak -----------------------------
         pers = r["jobs"].get("persist") or {}
@@ -967,6 +1044,36 @@ def selftest():
         robs = run(conn=conn, engine="SQLITE", quiet=True)
         check("level observe menulis digest TAPI tidak satu berkas pun",
               ok_obs and robs["ok"] and not robs["may_write_files"] and not robs["files"], str(robs)[:200])
+        # --- kode keluar, dipetakan lewat fungsi murni (tanpa menyentuh produksi) ---------------
+        conn.execute("UPDATE autopilot_state SET mode='ON', level='observe', level_until=NULL")
+        conn.execute("DELETE FROM action_log")
+        conn.execute("INSERT INTO action_log (ts, engine, kind) VALUES (?,?,?)", (_ago(1), "qoder", "x"))
+        conn.commit()
+        c_idle = exit_code(run(conn=conn, engine="SQLITE", quiet=True))
+        conn.execute("UPDATE autopilot_state SET mode='OFF'")
+        conn.commit()
+        c_mode = exit_code(run(conn=conn, engine="SQLITE", quiet=True))
+        conn.execute("UPDATE autopilot_state SET mode='SEMI'")
+        wo.set_level(conn, "SQLITE", "dispatch", minutes=30, who="selftest", tty=lambda: True)
+        conn.execute("DELETE FROM action_log")
+        conn.execute("INSERT INTO action_log (ts, engine, kind) VALUES (?,?,?)", (_ago(45), "qoder", "x"))
+        conn.commit()
+        c_ok = exit_code(run(conn=conn, engine="SQLITE", quiet=True))
+        check("penolakan gerbang dipetakan ke 3 dan putaran selesai ke 0, seperti yang unit nyatakan sukses",
+              c_idle == 3 and c_mode == 3 and c_ok == 0, f"idle={c_idle} mode={c_mode} ok={c_ok}")
+        check("perintah yang tidak dikenal bukan keberhasilan diam-diam",
+              main(["dream_phase.py", "ngawur"]) == 2, "")
+
+        # --- tidak ada koneksi bocor / tidak menyentuh produksi ---
+        conn.execute("UPDATE autopilot_state SET mode='ON'")
+        wo.set_level(conn, "SQLITE", "observe", who="selftest", tty=lambda: False)
+        conn.execute("DELETE FROM action_log")
+        conn.execute("INSERT INTO action_log (ts, engine, kind) VALUES (?,?,?)", (_ago(1), "qoder", "x"))
+        conn.commit()
+        n_guard = wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory")[0]["c"]
+        has_digest_today(conn=conn, engine="SQLITE")
+        check("membaca has-digest tidak boleh menulis apa pun",
+              wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory")[0]["c"] == n_guard, "")
         check("berkas handoff produksi tidak tersentuh selama selftest",
               sorted(x.name for x in Path(orig["PROJECTS"]).glob("handoff_dream_*")) == prod_projects,
               str(sorted(x.name for x in Path(orig["PROJECTS"]).glob("handoff_dream_*"))[:3]))
@@ -1054,6 +1161,20 @@ def has_digest_today(completed_only=True, conn=None, engine=None):
             conn.close()
 
 
+def exit_code(res):
+    """0 = bekerja, 3 = ada gerbang yang menolak, 1 = rusak.
+
+    Unit systemd mendeklarasikan 0 dan 3 sukses (`SuccessExitStatus`). Kalau pemetaan ini salah,
+    timer yang sehat ditandai failed dan berhenti dibangunkan pada boot berikutnya — rem yang
+    menghukum mesin karena ia memakai remnya. Fungsi ini sengaja terpisah dari `main`: mengujinya
+    lewat `main(["run"])` berarti memanggil `wo.connect()`, dan satu selftest yang menyambung ke
+    produksi adalah selftest yang menulis di rumah orang.
+    """
+    if res.get("ok"):
+        return 0
+    return 3 if res.get("refused") else 1
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "run"
     if cmd == "selftest":
@@ -1068,11 +1189,7 @@ def main(argv):
             if a.startswith("--minutes="):
                 minutes = int(a.split("=", 1)[1])
         res = run(force="--force" in argv, minutes=minutes)
-        if res.get("ok"):
-            return 0
-        # 3 = ada yang menolak, dan penolakan itu adalah keputusan yang benar. Unit systemd
-        # mendeklarasikan 0 dan 3 sebagai sukses; apa pun yang lain berarti putaran ini rusak.
-        return 3 if res.get("refused") else 1
+        return exit_code(res)
     print(f"perintah tidak dikenal: {cmd} (run|gates|selftest|has-digest)")
     return 2
 
