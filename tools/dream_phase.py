@@ -3,6 +3,10 @@
 
 Satu putaran mengukur dulu (idle dari ledger, mode, tingkat tangan, working tree) sebelum menulis
 apa pun, dan setiap berkas yang tersentuh wajib disebut oleh baris digest yang dikeluarkannya.
+
+Tangga tangan berlaku penuh di sini dan `--force` TIDAK menaikkannya: force hanya melewatkan gerbang
+idle, untuk orang yang berdiri di depan terminal dan ingin melihat satu putaran sekarang. Menulis
+berkas dan menulis peringkat butuh `dispatch`, dan `dispatch` hanya bisa dinaikkan dari /dev/tty.
 """
 
 import io
@@ -204,6 +208,32 @@ def rank_memories(conn, engine):
     }
 
 
+def persist_scores(conn, engine, scored):
+    """Tulis peringkat ke kolomnya, supaya jalur pengambilan MEMANG membacanya.
+
+    Ini bagian yang membuat "re-rank" bukan sekadar laporan: tanpa baris ini skor hanya hidup di
+    stdout satu proses, dan urutan yang diterima engine saat sesi dimulai tidak berubah sama sekali.
+    Penulisan hanya terjadi di bawah `dispatch` — melihat-lihat adalah observe, menilai adalah tangan.
+    Yang dilaporkan adalah angka yang DIBACA KEMBALI dari database, bukan hitungan loop penulisan.
+    """
+    p, written = ph(engine), 0
+    for r in scored:
+        try:
+            wo.run(conn, engine, f"UPDATE world_memory SET rank_score = {p} WHERE key = {p}",
+                   (int(r["score"]), r["key"]))
+            written += 1
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "written": written, "verified": None,
+                    "why": f"UPDATE rank_score gagal di {r['key']}: {str(exc)[:70]}"}
+    try:
+        n = wo.run(conn, engine,
+                   "SELECT COUNT(*) AS c FROM world_memory WHERE rank_score IS NOT NULL")[0]["c"]
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "written": written, "verified": None,
+                "why": f"penulisan tidak bisa dibaca kembali: {str(exc)[:70]}"}
+    return {"ok": True, "written": written, "verified": int(n), "why": None}
+
+
 # --- pekerjaan 2: memadatkan baris sesi yang menua ---------------------------
 def read_cursor(conn, engine):
     try:
@@ -248,11 +278,14 @@ def compact_stale_turns(conn, engine, cursor, minutes=IDLE_MINUTES, batch=COMPAC
     files = []
     for (eng, day), items in sorted(groups.items()):
         path = Path(PROJECTS) / f"handoff_dream_{day}_{eng}.md"
-        lines = [f"# Dream handoff — {eng} — {day}",
-                 "",
-                 "Dipadatkan dari baris session_turns oleh F10.5 dream phase. Baris aslinya tidak "
-                 "dihapus; ini ringkasan, bukan pemindahan.",
-                 ""]
+        lines = [] if path.exists() else [f"# Dream handoff — {eng} — {day}", "",
+                                          "Dipadatkan dari baris session_turns oleh F10.5 dream phase. Baris "
+                                          "aslinya tidak dihapus; ini ringkasan, bukan pemindahan.", ""]
+        if path.exists():
+            # Ditambah, bukan ditimpa. Satu mesin bisa mimpi lebih dari sekali dalam sehari, dan
+            # write_text() pada berkas yang namanya hanya mengandung tanggal akan menghapus ringkasan
+            # putaran sebelumnya — destruktif diam-diam, ditemukan verifier 2026-10-09.
+            lines.append(f"\n## Putaran {stamp()} — {len(items)} baris\n")
         for r in items:
             lines.append(f"- `#{r['id']} {str(r['timestamp'])[:19]}` **{(r['model'] or '-')[:28]}** "
                          f"({r['duration_ms'] or 0} ms)")
@@ -261,7 +294,8 @@ def compact_stale_turns(conn, engine, cursor, minutes=IDLE_MINUTES, batch=COMPAC
         if write:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("\n".join(lines) + "\n")
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write("\n".join(lines) + "\n")
             except OSError as exc:
                 return {"ok": False, "why": f"gagal menulis {path.name}: {exc}", "files": [], "cursor": cursor}
             files.append(str(path))
@@ -358,6 +392,14 @@ def build_digest(gate, jobs, files, tracked_before, tracked_after, idle_seconds)
     else:
         out.append(f"- re-rank: {rank.get('why', 'UNKNOWN')}")
 
+    per = jobs.get("persist") or {}
+    if per:
+        out.append(f"- peringkat ditulis: {per.get('verified')} baris dibaca kembali dari database "
+                   f"(dicoba {per.get('written')})" if per.get("ok")
+                   else f"- peringkat TIDAK tersimpan: {per.get('why')}")
+    else:
+        out.append("- peringkat tidak ditulis (tingkat baca-saja)")
+
     comp = jobs.get("compact") or {}
     if comp.get("ok"):
         out.append(f"- padatan: {comp['compacted']} baris menjadi {len(comp['files'])} berkas "
@@ -440,7 +482,12 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
             if not quiet:
                 print(f"DREAM DITOLAK — {gate['why']}", file=sys.stderr)
             return {"ok": False, "refused": "MODE", "why": gate["why"], "files": []}
-        may_files = bool(gate.get("may_write_files")) or bool(force)
+        may_files = bool(gate.get("may_write_files"))
+        # `--force` melewatkan gerbang idle, TIDAK pernah menaikkan tangan. Perbedaannya seluruh
+        # isinya: orang di terminal boleh melihat satu putaran sekarang, tapi menulis berkas butuh
+        # `dispatch`, dan `arm` menolak tanpa /dev/tty terbuka — kalau force ikut menaikkan tangga,
+        # satu proses tanpa pengawas (timer, atau shellku sendiri) bisa memberi dirinya tangan.
+        # Ditemukan oleh verifikasi lintas mesin 2026-10-09, dan memang benar.
         before = tracked_state()
         idle = idle_gate(conn, engine, minutes, force)
 
@@ -456,6 +503,8 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
             return {"ok": False, "refused": "IDLE", "why": idle["why"], "digest": res, "files": []}
 
         jobs["rank"] = rank_memories(conn, engine)
+        if may_files and jobs["rank"].get("ok"):
+            jobs["persist"] = persist_scores(conn, engine, jobs["rank"]["rows"])
         cursor = read_cursor(conn, engine)
         jobs["compact"] = compact_stale_turns(conn, engine, cursor, minutes=minutes, write=may_files)
         jobs["debt"] = documentation_debt()
@@ -473,7 +522,8 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
         res = emit_digest(conn, engine, body, files)
         out = {"ok": True, "mode": gate["mode"], "level": gate.get("level"), "may_write_files": may_files,
                "idle_seconds": idle.get("idle_seconds"), "digest": res, "files": files, "tracked_delta": delta,
-               "jobs": {k: {kk: v.get(kk) for kk in ("count", "compacted", "candidates", "retrievable", "ok", "why")
+               "jobs": {k: {kk: v.get(kk) for kk in ("count", "compacted", "candidates", "retrievable",
+                                                    "written", "verified", "ok", "why")
                             if kk in v} for k, v in jobs.items()}}
         if not quiet:
             print(body)
@@ -491,7 +541,7 @@ def _sandbox(path):
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE world_memory (key TEXT PRIMARY KEY, category TEXT NOT NULL, content TEXT, "
-                 "tags TEXT, updated_at TEXT)")
+                 "tags TEXT, updated_at TEXT, rank_score INTEGER)")
     conn.execute("CREATE TABLE session_turns (id INTEGER PRIMARY KEY, timestamp TEXT, cli_engine TEXT, "
                  "model TEXT, prompt TEXT, response TEXT, duration_ms INTEGER)")
     conn.execute("CREATE TABLE incident_log (error_signature TEXT PRIMARY KEY, first_seen TEXT, last_seen TEXT, "
@@ -532,15 +582,17 @@ def selftest():
     projects, learned = tmp / "projects", tmp / "learned"
     projects.mkdir(parents=True, exist_ok=True)
 
-    orig = {k: globals()[k] for k in ("PROJECTS", "LEARNED", "tracked_state", "documentation_debt")}
+    # `LEARNED` sengaja TIDAK disambat: jalur produksi tidak membacanya (pre_answer_incidents memakai
+    # ir.LEARNED_DIR), dan menyambat nama yang tidak dipakai adalah sambatan placebo — ditemukan
+    # verifier 2026-10-09. Nilainya hanya dipakai di bawah untuk membuktikan berkas produksi utuh.
+    orig = {k: globals()[k] for k in ("PROJECTS", "tracked_state", "documentation_debt")}
     globals()["PROJECTS"] = projects
-    globals()["LEARNED"] = learned
     globals()["tracked_state"] = lambda: []
     globals()["documentation_debt"] = lambda: {"ok": True, "count": 0, "exit": 0, "lines": []}
 
     import incident_recorder as ir  # noqa: PLC0415
     # generate_skill membuka koneksinya SENDIRI lewat get_db_connection dan menulis SKILLS.md
-    # katalog. Tanpa keempat sambatan ini, satu tes "apakah skill pra-jawab bekerja" akan
+    # katalog. Tanpa ketiga sambatan ini, satu tes "apakah skill pra-jawab bekerja" akan
     # meninggalkan berkas di brain produksi dan membariskan incident_log sungguhan — persis
     # kelas bug yang seluruh sesi ini habiskan untuk menutup.
     ir_seams = (ir.LEARNED_DIR, ir.SKILLS_CATALOG, ir.get_db_connection)
@@ -557,8 +609,8 @@ def selftest():
     ir.get_db_connection = _sandbox_conn
     prod_projects = sorted(p.name for p in Path(orig["PROJECTS"]).glob("handoff_dream_*")) \
         if Path(orig["PROJECTS"]).exists() else []
-    prod_skills = sorted(p.name for p in Path(orig["LEARNED"]).glob("*.md")) \
-        if Path(orig["LEARNED"]).exists() else []
+    prod_skills = sorted(p.name for p in LEARNED.glob("*.md")) \
+        if LEARNED.exists() else []
     try:
         conn.execute("INSERT INTO action_log (ts, engine, kind) VALUES (?,?,?)", (_ago(1), "qoder", "command"))
         conn.commit()
@@ -718,6 +770,58 @@ def selftest():
         check("setiap berkas yang ditulis putaran ini disebut di digest-nya sendiri",
               all(f in text for f in r["files"]), str(r["files"])[:160])
 
+        # --- peringkat yang sungguh tersimpan, bukan hanya tercetak -----------------------------
+        pers = r["jobs"].get("persist") or {}
+        check("re-rank menulis ke kolom rank_score dan membacanya kembali dari database",
+              pers.get("ok") and pers.get("verified") == 17, str(pers)[:160])
+        back = wo.run(conn, "SQLITE", "SELECT rank_score FROM world_memory WHERE key=?", ("rule_aktual",))
+        want = {x["key"]: x["score"] for x in rk["rows"]}["rule_aktual"]
+        check("nilai di kolom adalah nilai yang dihitung, bukan placeholder",
+              back and back[0]["rank_score"] == want, f"db={back and back[0]['rank_score']} hitung={want}")
+        rated = wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory WHERE rank_score IS NOT NULL")[0]["c"]
+        check("setiap baris yang dinilai mendapat angka; catatan mimpi sendiri sengaja tidak dinilai",
+              rated == 17, f"rated={rated}")
+        conn.execute("UPDATE world_memory SET updated_at = ? WHERE key LIKE ?", (_ago(5), "dream%"))
+        conn.execute("INSERT INTO world_memory (key, category, content, updated_at) VALUES (?,?,?,?)",
+                     ("handoff_baru_sekali_pukul", "session_recovery", "catatan yang ditulis setelah mimpi",
+                      _ago(0)))
+        conn.commit()
+        import session_ingestor as si  # noqa: PLC0415
+        ordered = wo.run(conn, "SQLITE",
+                         f"SELECT key FROM world_memory ORDER BY COALESCE(rank_score, {si.UNRANKED_TOP}) DESC, "
+                         f"updated_at DESC LIMIT 1")
+        check("jalur pengambilan memperlakukan baris belum bernilai sebagai yang paling baru",
+              ordered and ordered[0]["key"] == "handoff_baru_sekali_pukul", str(ordered)[:120])
+        check("konstanta cakupan berada di satu tempat, bukan disalin dua kali",
+              si.UNRANKED_TOP == 1_000_000, str(si.UNRANKED_TOP))
+
+        # --- tambah, bukan timpa ------------------------------------------------------------------
+        first_body = Path(c1["files"][0]).read_text()
+        marker = first_body.count("#2 ")
+        c5 = compact_stale_turns(conn, "SQLITE", 0, write=True)
+        again = Path(c5["files"][0]).read_text()
+        check("putaran kedua pada hari yang sama MENAMBAH ringkasannya, tidak menghapus punya putaran pertama",
+              marker >= 1 and again.count("#2 ") == marker + 1
+              and again.count("# Dream handoff") == 1 and "Putaran" in again,
+              f"sebelum={marker} sesudah={again.count('#2 ')} baru={c5['compacted']}")
+
+        # --- force tidak menaikkan tangan --------------------------------------------------------
+        wo.set_level(conn, "SQLITE", "observe", who="selftest", tty=lambda: False)
+        conn.commit()
+        files_before_force = sorted(p.name for p in projects.glob("*.md"))
+        conn.execute("DELETE FROM action_log")
+        conn.execute("INSERT INTO action_log (ts, engine, kind) VALUES (?,?,?)", (_ago(1), "qoder", "x"))
+        conn.execute("DELETE FROM world_memory WHERE key = 'handoff_baru_sekali_pukul'")
+        conn.commit()
+        rf = run(conn=conn, engine="SQLITE", force=True, quiet=True)
+        check("--force melewati gerbang idle TAPI tidak menaikkan tangan",
+              rf["ok"] and not rf["may_write_files"] and not rf["files"], str(rf)[:200])
+        check("di tingkat observe, force tidak menulis berkas apa pun di disk",
+              sorted(p.name for p in projects.glob("*.md")) == files_before_force,
+              str(sorted(p.name for p in projects.glob("*.md")))[:120])
+        check("di tingkat observe, force tidak menulis peringkat ke database",
+              "persist" not in rf["jobs"], str(list(rf["jobs"]))[:120])
+
         states = iter([["M tools/keep.py"], ["M tools/keep.py", "M tools/fake.py"]])
         globals()["tracked_state"] = lambda: next(states)
         r2 = run(conn=conn, engine="SQLITE", force=True, quiet=True)
@@ -783,8 +887,8 @@ def selftest():
               sorted(x.name for x in Path(orig["PROJECTS"]).glob("handoff_dream_*")) == prod_projects,
               str(sorted(x.name for x in Path(orig["PROJECTS"]).glob("handoff_dream_*"))[:3]))
         check("berkas skill produksi tidak bertambah selama selftest",
-              sorted(x.name for x in Path(orig["LEARNED"]).glob("*.md")) == prod_skills,
-              str(sorted(x.name for x in Path(orig["LEARNED"]).glob("*.md"))))
+              sorted(x.name for x in LEARNED.glob("*.md")) == prod_skills,
+              str(sorted(x.name for x in LEARNED.glob("*.md"))))
     finally:
         for k, v in orig.items():
             globals()[k] = v

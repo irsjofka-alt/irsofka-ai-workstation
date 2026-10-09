@@ -593,11 +593,17 @@ def stats(store: Store):
     print(f"  session_turns={turns}  world_memory={mem}  quest IN_PROGRESS={quest}")
 
 
+# F10.5: urutan pengambilan memori ditentukan dream phase lewat kolom `rank_score`. Baris yang
+# BELUM dinilai (NULL) dapat angka di atas semua yang dinilai, karena satu-satunya alasan sebuah
+# baris belum dinilai adalah bahwa ia baru ditulis — dan catatan yang baru lahir memang yang paling
+# mungkin dibutuhkan sesi yang baru mulai. Angka ini bukan bagian dari skala skor; ia penanda
+# "belum tersentuh", jadi jangan pernah dipakai sebagai nilai skor sungguhan.
+UNRANKED_TOP = 1_000_000
 def handoff(store: Store):
     rows = store.query(
         f"SELECT key, category, substr(content,1,2600), updated_at FROM world_memory "
         f"WHERE key LIKE {ph(1, store.engine)} OR category = {ph(1, store.engine)} "
-        f"ORDER BY updated_at DESC LIMIT 6", ("%handoff%", "rule"))
+        f"ORDER BY COALESCE(rank_score, {UNRANKED_TOP}) DESC, updated_at DESC LIMIT 6", ("%handoff%", "rule"))
     for key, cat, content, upd in rows:
         print(f"\n### {key}  [{cat}]  ({str(upd)[:19]})\n{content}")
     rows = store.query(
@@ -608,6 +614,8 @@ def handoff(store: Store):
 
 
 BRAIN_PROJECTS = HOME / ".ai-station/brain/memory/projects"
+
+
 
 
 def _probe(cmd: list, timeout: int = 4) -> str:
@@ -1612,7 +1620,7 @@ def api(store: Store, limit: int, engine: str = "", kind: str = ""):
     memories = store.query(
         f"SELECT key, category, content, updated_at FROM world_memory "
         f"WHERE key LIKE {ph(1, store.engine)} OR category = {ph(1, store.engine)} "
-        f"ORDER BY updated_at DESC LIMIT 8", ("%handoff%", "rule"))
+        f"ORDER BY COALESCE(rank_score, {UNRANKED_TOP}) DESC, updated_at DESC LIMIT 8", ("%handoff%", "rule"))
     quests = store.query(
         f"SELECT id, title, status, model_assigned, cli_engine, summary, created_at FROM quest_tasks "
         f"WHERE status = {ph(1, store.engine)} ORDER BY id DESC LIMIT 8", ("IN_PROGRESS",))

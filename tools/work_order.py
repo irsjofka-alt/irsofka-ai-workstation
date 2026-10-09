@@ -379,6 +379,9 @@ NEW_COLUMNS = [
     # Satu kata untuk dua hal membuat anggaran yang dibaca orang tidak sama dengan anggaran yang
     # mesin pakai, jadi keduanya punya kolom sendiri-sendiri, seperti yang dituntut §12.
     ("quest_tasks", "inject_count", "INT DEFAULT 0", "INTEGER DEFAULT 0"),
+    # F10.5: peringkat memori. Nullable berarti "belum dinilai", BUKAN nol — bedanya dibaca
+    # session_ingestor sebagai "catatan baru, angkat ke depan", dan angka 0 akan menenggelamkannya.
+    ("world_memory", "rank_score", "INTEGER", "INTEGER"),
     ("quest_tasks", "escalation_reason", "TEXT", "TEXT"),
     ("quest_tasks", "due_epoch", "BIGINT", "INTEGER"),
     # Tangga tangan drainer (F10.3) tinggal di baris autopilot yang sama dengan sakelarnya:
