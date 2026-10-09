@@ -49,6 +49,10 @@ EVIDENCE_LIMIT = 900
 REPO = Path.home() / ".ai-station"
 NIGHT_MAX_FAILURES = 3
 NIGHT_MAX_ITEMS = 25
+# Dispatch verifikasi per jendela ON. Lebih kecil daripada batas item dengan sengaja: satu item
+# yang sulit bisa memanggil verifikasi berkali-kali, dan yang mau dihentikan adalah pengeluaran
+# kuota, bukan banyaknya pekerjaan yang kelar.
+NIGHT_MAX_VERIFICATIONS = 8
 FAILURE_LOOKBACK = 12 * 3600   # detik; rentetan di luar ini bukan tanggungan malam ini
 # Tiga keadaan mesin, dan ketiganya tertulis sebagai SATU kata di satu kolom. `SEMI` = otomatis
 # dengan orang di meja (hanya perintah yang dia tulis sendiri yang diambil); `ON` = mesin ini
@@ -833,6 +837,130 @@ def note_refusal(conn, engine, item_id, why):
     return True
 
 
+def verification_keys() -> list:
+    """Kunci registri yang boleh dipakai sebuah run untuk memeriksa pekerjaannya sendiri.
+
+    Dibaca dari `config/slots.yaml` + `config/engines.json` pada saat dipakai, bukan dari ingatan
+    (§12). Operator menyunting kedua berkas itu dari Station; engine yang menghapal nama model akan
+    terus memakai yang lama setelah ia menggantinya, dan itu bukan sekadar basi — itu keputusan
+    kuota yang diambil oleh orang yang tidak sedang duduk di meja.
+    """
+    try:
+        import master_data as md
+        doc = md.document_from_files()
+        slots = doc.get("slots") or {}
+        active = slots.get("active_team")
+        keys = []
+        for team in slots.get("teams") or []:
+            if team.get("id") != active:
+                continue
+            for role in team.get("roles") or []:
+                rid = str(role.get("role_id") or "")
+                if rid.startswith(("verifier", "decider", "resolver")) and role.get("registry_key"):
+                    keys.append(str(role["registry_key"]))
+        return sorted(set(keys))
+    except Exception:  # noqa: BLE001 — registri yang tidak terbaca dilaporkan, tidak ditebak
+        return []
+
+
+def verifications_in_window(conn, engine, since_epoch):
+    """Berapa dispatch verifikasi yang sudah dibayar sejak jendela ini dibuka, atau None.
+
+    Diturunkan dari `action_log`, bukan dari penghitung di dalam memori: proses tick adalah
+    one-shot systemd yang mati setelah satu putaran, jadi penghitung mana pun yang hidup di dalam
+    proses akan selalu mulai dari nol dan tidak akan pernah menyentuh batasnya. Bentuk SQL-nya
+    mengikut `items_done_in_window`: CAST di SQLite karena `strftime()` mengembalikan TEKS dan
+    teks melawan integer dengan aturan "integer selalu lebih kecil", dan `EXTRACT(EPOCH …)` di
+    PostgreSQL karena `ts` di sini sudah bertipe `timestamptz` — dua backend, satu arti.
+
+    None berarti TIDAK TERBACA, dan itu bukan nol. `action_log` adalah tabel milik daemon, bukan
+    milik `work_order`, jadi pada fallback SQLite tabelnya bisa tidak ada; menyebut keadaan itu
+    "nol verifikasi" akan membuat batas kuota per malam terlihat ditegakkan padahal tidak pernah
+    mengukur apa pun — kebalikan dari yang dibutuhkan orang yang sedang tidur.
+    """
+    if not since_epoch:
+        return 0
+    try:
+        rows = run(conn, engine,
+                   "SELECT COUNT(*) AS n FROM action_log WHERE kind='cross_verify' "
+                   "AND EXTRACT(EPOCH FROM ts) >= %s"
+                   if engine == "POSTGRESQL" else
+                   "SELECT COUNT(*) AS n FROM action_log WHERE kind='cross_verify' "
+                   "AND CAST(strftime('%s', ts) AS INTEGER) >= ?",
+                   (int(since_epoch),))
+    except Exception:  # noqa: BLE001 — tabel tidak ada = tidak terukur, BUKAN nol
+        if engine == "POSTGRESQL":
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        return None
+    return int(rows[0]["n"]) if rows else 0
+
+
+def night_quota_state(conn, engine):
+    """Batas kuota per malam untuk run tanpa pengawas (F10.3).
+
+    Judul item ini menjanjikan "batas kuota per malam", dan janji itu tidak pernah ditepati:
+    `drainer.py` tidak menyebut kata kuota sama sekali, sementara gerbang itemnya lolos `exit=0`
+    karena cabang keduanya selalu benar pada hari timer pernah jalan. Jadi yang ditambal di sini
+    bukan kosmetika — ini satu-satunya dari tiga klaim judul yang belum ada.
+
+    Dua angka yang diukur, dan keduanya bisa menolak:
+
+    1. **Langit-langit dispatch.** Satu jendela ON boleh melakukan paling banyak
+       `NIGHT_MAX_VERIFICATIONS` pemeriksaan lintas mesin. Ini batas nyata, bukan proxy jumlah
+       item: satu item yang sulit bisa memaksa sepuluh verifikasi, dan loop yang menghabiskan
+       jendela mingguan untuk membuktikan dirinya adalah kegagalan yang §6 sudah namai.
+    2. **Sedikitnya satu jalur verifikasi masih punya meter.** Kalau SEMUA jalur ditolak
+       (Claude habis dan Gemini habis atau tidak terbaca), menjalankan item baru hanya menghasilkan
+       commit yang tidak bisa berangkat — §6 sudah menetapkan jalurnya: commit lokal, push masuk
+       digest pagi. Menolak memulai lebih jujur daripada bekerja semalam untuk sesuatu yang
+       tidak bisa dinyatakan benar.
+
+    Satu batasan yang dilaporkan apa adanya, bukan ditutupi: **meter `qoder` tidak terbaca** di
+    mesin ini (`plan-credits` dan `org-resource-package` UNAVAILABLE, `add-on-credits` REPORTED
+    tanpa angka sisa). Jadi batas ini sengaja dipasang pada verifikasi, yang meternya nyata
+    (Gemini 94,8 % / Claude weekly 4,5 % terukur 2026-10-09), bukan pada mesin kerja — sebuah
+    "batas kuota" yang membaca meter kosong akan selalu terlihat aman.
+    """
+    ap = autopilot(conn, engine) or {}
+    used = verifications_in_window(conn, engine, int(ap.get("on_epoch") or 0))
+    why = []
+    notes = []
+    if used is None:
+        notes.append("dispatch verifikasi TIDAK TERHITUNG (action_log bukan milik modul ini, "
+                     "tidak ada di fallback SQLite) — batas kuota per malam tidak ditegakkan pada "
+                     "jalan ini; yang tetap bekerja adalah batas item dan pemutus kegagalan")
+    elif used >= NIGHT_MAX_VERIFICATIONS:
+        why.append(f"{used} dispatch verifikasi sudah dibuat jendela ini "
+                   f"(batas {NIGHT_MAX_VERIFICATIONS})")
+    keys = verification_keys()
+    if not keys:
+        why.append("slots.yaml/engines.json tidak terbaca — tidak ada jalur verifikasi yang bisa "
+                   "dibuktikan, dan ketiadaan bukti bukan izin")
+    else:
+        try:
+            import master_data as md
+            import cross_verify as cv
+            engines = (md.document_from_files().get("engines") or {}).get("engines") or {}
+            refusals = []
+            for k in keys:
+                spec = engines.get(k)
+                if not isinstance(spec, dict):
+                    refusals.append(f"{k}: tidak ada di registri")
+                    continue
+                r = cv.quota_gate_reason(spec)
+                if r:
+                    refusals.append(f"{k}: {r}")
+            if len(refusals) == len(keys):
+                why.append("setiap jalur verifikasi ditolak meter — " + "; ".join(refusals[:3]))
+        except Exception as exc:  # noqa: BLE001 — meter yang gagal dibaca adalah UNKNOWN
+            why.append(f"meter kuota tidak terbaca ({type(exc).__name__}) — UNKNOWN, bukan tersedia")
+    return {"used": used, "cap": NIGHT_MAX_VERIFICATIONS, "paths": keys,
+            "measurable": used is not None, "notes": notes, "ok": not why, "why": why}
+
+
 def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None):
     """Item berikutnya yang siap: semua dependensinya COMPLETED, dan lease-nya tidak dipegang orang.
 
@@ -1597,21 +1725,26 @@ ROADMAP_ITEMS = [
              "python3 tools/work_order.py selftest && python3 tools/work_order.py heartbeat"),
     ("f103", "F10.3 drainer systemd timer dengan circuit breaker + batas kuota per malam", "build",
      ["f84", "f108", "f101"],
-     # Gerbang ini pernah `systemctl --user list-timers irsofka-autopilot.timer`, dan diukur
-     # 2026-10-08 02:58: perintah itu keluar 0 dengan tabel KOSONG untuk unit yang tidak ada sama
-     # sekali. Gerbang yang selalu benar adalah undangan bagi drainer untuk menandai itemnya sendiri
-     # COMPLETED tanpa bukti — bentuk kegagalan yang justru dilarang §12. Bentuk sekarang hanya
-     # benar kalau berkasnya terpasang DAN timer-nya di-enable; hari ini keduanya belum, dan itu
-     # memang sisanya: seorang yang bangun yang menyalakannya.
+     # Judul item ini menyebut TIGA hal, dan gerbangnya dulu hanya membuktikan satu — itu bukan
+     # keluhan kecil: `drainer.py` tidak pernah menyebut kata kuota sama sekali sementara gerbangnya
+     # lolos `exit=0`, karena klausa keduanya (`grep '"action"'` di log hari) benar pada hari timer
+     # pernah jalan apa pun isinya. Gerbang yang selalu benar adalah undangan bagi drainer untuk
+     # menandai itemnya sendiri COMPLETED tanpa bukti — bentuk yang dilarang §12.
+     #
+     # Bentuk sekarang menuntut ketiganya, dan tiap bagiannya sudah diukur hari ini:
+     #   - kedua unit terpasang;
+     #   - timer TIDAK di-enable. BUKAN `is-enabled` yang dicari: operator menutup itu pagi ini
+     #     ("SEMI tidak boleh auto start saat boot"), jadi unit yang menyala sendiri setelah restart
+     #     adalah keadaan yang harus DITOLAK gerbang ini, bukan dirayakan. `!` di depan sengaja.
+     #   - detaknya sungguh berjalan (aktif sekarang, atau satu tick tercatat hari ini);
+     #   - `drainer selftest` hijau, yang adalah satu-satunya tempat pemutus kegagalan DAN
+     #     langit-langit dispatch verifikasi per malam dibuktikan perilakunya, bukan keberadaannya.
      "test -f ~/.config/systemd/user/irsofka-autopilot.timer && "
-     # BUKAN `is-enabled`. Operator menutup itu pagi ini: "SEMI tidak boleh auto start saat boot".
-     # Unit yang di-enable adalah unit yang menyala sendiri setelah restart, jadi gerbang yang
-     # menuntut enable akan membayar pembayaran F10.3 dengan melanggar §6 — dan ia akan hijau
-     # justru di keadaan yang paling berbahaya. Yang ditanya sekarang: unitnya terpasang, dan
-     # detaknya sungguh berjalan (aktif sekarang, atau satu tick tercatat hari ini).
-     "test -f ~/.config/systemd/user/irsofka-autopilot.timer && "
+     "test -f ~/.config/systemd/user/irsofka-autopilot.service && "
+     "! systemctl --user is-enabled --quiet irsofka-autopilot.timer && "
      "(systemctl --user is-active --quiet irsofka-autopilot.timer || "
-     "grep -q '\"action\"' ~/.ai-station/logs/drainer-$(date +%F).jsonl)"),
+     "grep -q '\"action\"' ~/.ai-station/logs/drainer-$(date +%F).jsonl) && "
+     "python3 tools/drainer.py selftest"),
     ("f91", "F9.1 deterministic environment state: exit code + process tree + delta pane "
             "disuapkan ke prompt (jalan paralel, tidak bergantung antrean)", "build", None,
      "bash bin/deploy_engine.sh --check"),
@@ -2617,6 +2750,79 @@ def selftest():
         check("baris tanpa alasan tersimpan tidak pernah diloloskan lebih awal",
               retry_now({"due_epoch": _t + 300, "escalation_reason": None}, at=_t) is False,
               "no reason recorded must keep waiting")
+
+        # --- F10.3: batas kuota per malam. Diuji pada pembacanya sendiri, bukan pada tiruan yang
+        # disuntik drainer: kalau fungsi ini salah, semua tes drainer di atas tetap hijau karena
+        # mereka tidak pernah memanggilnya.
+        check("kosakata verifikasi dibaca dari registri, bukan dari ingatan",
+              len(verification_keys()) >= 3 and "gemini-pro" in verification_keys()
+              and "gemini-verify" in verification_keys(), str(verification_keys()))
+        # `action_log` sudah dibuat lebih awal di suite ini (kolom: engine, ts, kind, tab, model,
+        # exit_code, summary, raw_ref) dan dipakai tes heartbeat. Jadi blok ini TIDAK membuat atau
+        # menjatuhkan tabel — hanya menyisipkan barisnya sendiri, dengan penanda yang bisa dihapus
+        # lagi. Versi pertama melakukan `CREATE` lalu `DROP` dan menghancurkan fixture tes lain.
+        conn.execute("INSERT INTO action_log (engine, ts, kind) VALUES "
+                     "('selftest-quota', '2026-01-01 00:00:00', 'cross_verify')")
+        conn.execute("INSERT INTO action_log (engine, ts, kind) VALUES "
+                     "('selftest-quota', '2026-01-01 00:00:05', 'cross_verify')")
+        conn.execute("INSERT INTO action_log (engine, ts, kind) VALUES "
+                     "('selftest-quota', '2026-01-01 00:00:06', 'command')")
+        conn.execute("INSERT INTO action_log (engine, ts, kind) VALUES "
+                     "('selftest-quota', '2026-01-01 00:00:07', 'cross_verify')")
+        conn.commit()
+        _mine = "SELECT COUNT(*) AS n FROM action_log WHERE kind='cross_verify' " \
+                "AND engine='selftest-quota'"
+        _total_mine = int(run(conn, "SQLITE", _mine)[0]["n"])
+        _n = verifications_in_window(conn, "SQLITE", 1767225605)
+        # Jendela harus MEMOTONG. Bug yang diikat di sini adalah `strftime()` yang mengembalikan
+        # TEKS: tanpa CAST, teks melawan integer selalu benar dan penghitung ini melaporkan SEMUA
+        # baris lintas waktu, sehingga batas per malam tidak pernah bisa tersentuh.
+        check("penghitung verifikasi memotong pada jendela, bukan menghitung semuanya",
+              _n is not None and _n < _total_mine, f"dalam jendela={_n} totalpunya saya={_total_mine}")
+        check("hanya baris verifikasi yang dihitung, bukan setiap aksi",
+              _total_mine == 3, str(_total_mine))
+        # Jalur "tidak terukur" diuji pada koneksi terpisah: menjatuhkan tabelnya di sini akan
+        # merampas fixture dari tes heartbeat yang sudah berjalan lebih dulu.
+        _bare = sqlite3.connect(":memory:")
+        _bare.row_factory = sqlite3.Row
+        check("tanpa action_log penghitung mengembalikan None, BUKAN nol",
+              verifications_in_window(_bare, "SQLITE", 1) is None, "none expected")
+        _bare.close()
+        # `night_quota_state` dibaca lewat seam: meter SUNGGUHAN tidak boleh menentukan hasil tes,
+        # sama seperti `tree_dirty` dan `deliver_now` di atas.
+        import cross_verify as _cvq
+        _real_gate = _cvq.quota_gate_reason
+        _real_ap = globals()["autopilot"]
+        try:
+            globals()["autopilot"] = lambda conn, engine, *a, **k: {"mode": "ON", "on_epoch": 1}
+            _cvq.quota_gate_reason = lambda spec: None
+            s_ok = night_quota_state(conn, "SQLITE")
+            check("meter masih ada + belum melewati batas = run boleh memulai item baru",
+                  s_ok["ok"] and s_ok["measurable"] and not s_ok["notes"], str(s_ok)[:200])
+            _cvq.quota_gate_reason = lambda spec: "semua jendela habis"
+            s_none = night_quota_state(conn, "SQLITE")
+            check("SEMUA jalur verifikasi ditolak meter = item baru tidak dimulai",
+                  not s_none["ok"] and any("jalur verifikasi" in w for w in s_none["why"]),
+                  str(s_none["why"])[:200])
+            # Langit-langit diuji dengan baris bertanda sendiri, di atas action_log yang SUDAH ada.
+            # `used >= cap`, bukan `== cap`: tabel ini juga dipakai tes heartbeat, dan menuntut
+            # angka persis berarti membuat tes bergantung pada apa yang ditulis tes lain.
+            run(conn, "SQLITE", "DELETE FROM action_log WHERE engine='selftest-quota'")
+            for i in range(NIGHT_MAX_VERIFICATIONS):
+                conn.execute("INSERT INTO action_log (engine, ts, kind) VALUES "
+                             "('selftest-quota', ?, 'cross_verify')",
+                             ("2026-01-01 00:00:%02d" % i,))
+            conn.commit()
+            _cvq.quota_gate_reason = lambda spec: None
+            s_full = night_quota_state(conn, "SQLITE")
+            check("langit-langit dispatch terlampaui = run berhenti memulai item baru, dengan angka",
+                  not s_full["ok"] and (s_full["used"] or 0) >= NIGHT_MAX_VERIFICATIONS
+                  and any(str(NIGHT_MAX_VERIFICATIONS) in w for w in s_full["why"]),
+                  str(s_full)[:220])
+            run(conn, "SQLITE", "DELETE FROM action_log WHERE engine='selftest-quota'")
+        finally:
+            _cvq.quota_gate_reason = _real_gate
+            globals()["autopilot"] = _real_ap
 
         d = decide(conn, "SQLITE", "A atau B?", ["A", "B"], weight="heavy")
         check("keputusan tercatat OPEN", d and d[0]["state"] == "OPEN")

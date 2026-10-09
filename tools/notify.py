@@ -50,6 +50,10 @@ URGENT = {
     # karena bentuk kegagalannya diam: orang menulis perintah, layarnya bilang "antre", dan tidak ada
     # yang pernah mengetuk pane-nya.
     "ESCALATED", "QUEUED_NOT_DELIVERED",
+    # Batas kuota per malam yang menghentikan sebuah run adalah persis keadaan "auto berhenti dan
+    # komputer diam sampai pagi" yang operator takutkan — bedanya dengan OFF adalah OFF itu pilihan
+    # dia, sedangkan ini mesin yang kehabisan bahan bakar. Yang kedua harus terdengar.
+    "QUOTA_CLOSED",
 }
 # Peristiwa yang berarti "mesin bekerja": boleh pendek, tidak boleh berteriak.
 PROGRESS = {"WORK_DISPATCHED", "GATE_PASSED", "CONTINUE_SENT", "ANSWER_SENT", "CLAIMED",

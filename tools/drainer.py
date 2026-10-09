@@ -731,7 +731,7 @@ def deliver_answer(conn, engine, decision_id, sender=None, beats=None, capture=N
 # --- satu tick ----------------------------------------------------------------
 def tick(conn, engine, gate=None, beats=None, runner=None, sender=None, log=None,
          capture=None, busy=None, tab_project=None, pane_cwd=None, gap=MIN_PANE_GAP,
-         sleeper=None, dirty=wo._MEASURE):
+         sleeper=None, dirty=wo._MEASURE, quota=None):
     """Satu putaran timer. Mengembalikan kejadian yang juga dituliskan ke log malam.
 
     Semua yang bisa mengetik atau mengeksekusi (`beats`, `runner`, `sender`) bisa disuntik, jadi
@@ -789,11 +789,25 @@ def tick(conn, engine, gate=None, beats=None, runner=None, sender=None, log=None
         return events
 
     if lvl["allows_dispatch"]:
+        # Meredam yang sudah berjalan terjadi DULU dan tidak pernah ditahan pagar kuota:
+        # reconcile menjalankan gerbang shell, bukan memanggil model, jadi ia gratis — dan
+        # menghentikannya justru meninggalkan baris WORKING menggantung karena satu-satunya yang
+        # bisa menutupnya sedang dikunci oleh angka yang tidak bersangkutan dengannya.
         reconcile(conn, engine, mode, runner=runner, emit=ev)
-        hand_new_work(conn, engine, mode, runner=runner, sender=sender, emit=ev,
-                      capture=capture, busy=busy,
-                      tab_project=tab_project, pane_cwd=pane_cwd, gap=gap, sleeper=sleeper,
-                      dirty=dirty)
+        # Batas kuota per malam (F10.3) berdiri tepat di sini. Yang ditahan adalah MULAINYA kerja
+        # baru, yaitu satu-satunya gerakan yang membeli kuota mesin lain. Jalur resume di bawah
+        # sengaja TIDAK diduplikasi ke dalam cabang ini: satu aturan, satu tempat, kalau tidak ia
+        # akan punya dua kesempatan untuk berbeda (§12).
+        q = quota if quota is not None else wo.night_quota_state(conn, engine)
+        if q.get("ok", True):
+            hand_new_work(conn, engine, mode, runner=runner, sender=sender, emit=ev,
+                          capture=capture, busy=busy,
+                          tab_project=tab_project, pane_cwd=pane_cwd, gap=gap, sleeper=sleeper,
+                          dirty=dirty)
+        else:
+            ev("QUOTA_CLOSED", used=q.get("used"), cap=q.get("cap"), why=q.get("why"),
+               note="yang sudah berjalan sudah diredam di atas; hanya item BARU yang tidak "
+                    "dimulai, karena itulah yang memakai kuota mesin lain")
     rest = [b for b in (beats if beats is not None else wo.heartbeat(conn, engine))
             if b["state"] == "AT_REST"]
     if lvl["allows_resume"]:
@@ -833,6 +847,13 @@ def selftest():
     import cross_verify as _cvx
     _orig_pane_state = _cvx.pane_state
     _cvx.pane_state = lambda _t: None
+    # Pembaca kuota per malam juga disambat, untuk seluruh suite. Tick memanggilnya lewat
+    # `wo.night_quota_state`, dan tanpa sambatan ini sebelas tes dispatch akan membaca meter
+    # SUNGGUHAN: hasilnya berubah mengikuti berapa banyak verifikasi yang kebetulan sudah saya
+    # kirim hari ini, dan suite yang hijau-hitam mengikuti jam orang bukan bukti apa pun.
+    _orig_quota_state = wo.night_quota_state
+    wo.night_quota_state = lambda conn, engine: {"used": 0, "cap": wo.NIGHT_MAX_VERIFICATIONS,
+                                                 "paths": ["selftest-path"], "ok": True, "why": []}
     results = []
 
     def check(name, cond, detail=""):
@@ -1012,6 +1033,15 @@ def selftest():
             _real_log = _sw3.NIGHT_LOG
             _prod_before = _real_log.stat().st_size if _real_log.exists() else 0
             _sw3.NIGHT_LOG = _sandbox
+            # Mode dibaca dari baris autopilot SUNGGUHAN oleh main(), dan rem masuk-kembali berdiri
+            # SESUDAH pemeriksaan mode. Jadi tanpa sambatan ini tesnya bergantung pada posisi
+            # sakelar operator: begitu ia memindah ke ON, hook keluar di baris pertama, log-nya
+            # kosong, dan "rem tercatat dengan namanya sendiri" gagal tanpa ada rem yang rusak.
+            # Yang diuji di sini adalah rem, jadi hanya mode yang boleh dipinjam.
+            _real_ap = wo.autopilot
+            wo.autopilot = lambda conn, engine, *a, **k: {"mode": "SEMI", "level": "observe",
+                                                          "until_epoch": wo.now() + 600,
+                                                          "off_reason": None}
             _out_buf = _io.StringIO()
             _real_stdin = _sw3.sys.stdin
             _sw3.sys.stdin = _io.StringIO(json.dumps(
@@ -1022,6 +1052,7 @@ def selftest():
             finally:
                 _sw3.sys.stdin = _real_stdin
                 _sw3.NIGHT_LOG = _real_log
+                wo.autopilot = _real_ap
             _reentry_lines = _sandbox.read_text(encoding="utf-8").splitlines() if _sandbox.exists() else []
             check("rem masuk-kembali: stop_hook_active=True membuat hook diam, tidak memblokir",
                   _rc_reentry == 0 and "decision" not in _out_buf.getvalue(),
@@ -1222,6 +1253,69 @@ def selftest():
                       dirty=False)
         check("circuit breaker menutup tick sebelum satu klaim pun",
               [e["action"] for e in out] == ["CLOSED_NIGHT"], str(out))
+
+        # --- F10.3: batas kuota per malam. Tiga sifat, dan ketiganya bisa salah bentuk tanpa
+        # terdengar: pagar yang menahan segalanya (termasuk meredam yang sudah jalan), pagar yang
+        # hanya menulis catatan tanpa benar-benar berhenti, dan pagar yang dibaca dari meter yang
+        # tidak ada sehingga selalu terlihat aman.
+        q_ok = {"used": 0, "cap": 8, "paths": ["gemini-pro"], "ok": True, "why": []}
+        q_no = {"used": 8, "cap": 8, "paths": ["gemini-pro"], "ok": False,
+                "why": ["8 dispatch verifikasi sudah dibuat jendela ini (batas 8)"]}
+        qz1 = make("selftest-quota-dispatch", gate="false", engine_key="qoder", origin="operator",
+                   ws=str(REPO))
+        sent.clear(); ran.clear()
+        out = tick(conn, "SQLITE", gate=gate_for("dispatch"), beats=[], sender=sender, runner=runner,
+                   capture=quiet_pane, busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
+                   dirty=False, quota=q_ok)
+        check("kuota tersedia + dispatch = kerja baru benar-benar dimulai",
+              bool(sent) and "QUOTA_CLOSED" not in [e["action"] for e in out],
+              f"sent={len(sent)} acts={[e['action'] for e in out]}")
+        wo.run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (qz1,))
+
+        qz2 = make("selftest-quota-blocked", gate="false", engine_key="qoder", origin="operator",
+                   ws=str(REPO))
+        sent.clear(); ran.clear()
+        out = tick(conn, "SQLITE", gate=gate_for("dispatch"), beats=[], sender=sender, runner=runner,
+                   capture=quiet_pane, busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
+                   dirty=False, quota=q_no)
+        acts = [e["action"] for e in out]
+        check("kuota habis menutup MULAINYA item baru dan menamainya sendiri",
+              "QUOTA_CLOSED" in acts and not sent, f"{acts} sent={len(sent)}")
+        check("penolakan kuota dilaporkan dengan angka, bukan hanya kata",
+              any(e.get("action") == "QUOTA_CLOSED" and e.get("used") == 8 and e.get("cap") == 8
+                  for e in out), str([e for e in out if e.get("action") == "QUOTA_CLOSED"]))
+        check("item yang ditolak kuota TIDAK ditinggalkan WORKING tanpa pemegang",
+              wo.get_item(conn, "SQLITE", qz2)["status"] == "PENDING"
+              and not wo.get_item(conn, "SQLITE", qz2)["claimed_by"],
+              str(wo.get_item(conn, "SQLITE", qz2)["status"]))
+        wo.run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (qz2,))
+
+        # Sifat ketiga, dan inilah yang dulu salah di kode saya sendiri: reconcile harus tetap jalan
+        # di bawah kuota habis. Menahannya berarti membiarkan baris WORKING menggantung. Lease
+        # dibuat SUDAH HABIS karena `reconcile` memang menahan vonis selama lease masih hidup
+        # (baris 282: memperpanjang dan melaporkan HELD) — memvonis lebih awal artinya menyebut
+        # pekerjaan orang gagal hanya karena belum selesai, dan tes dengan lease hidup hanya akan
+        # membuktikan aturan itu, bukan aturan yang sedang diuji di sini.
+        qz3 = make("selftest-quota-reconcile", status="WORKING", gate="true", holder=HOLDER,
+                   lease=wo.now() - 10)
+        ran.clear()
+        out = tick(conn, "SQLITE", gate=gate_for("dispatch"), beats=[], sender=sender, runner=runner,
+                   capture=quiet_pane, busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
+                   dirty=False, quota=q_no)
+        _acts3 = [e["action"] for e in out]
+        _row3 = wo.get_item(conn, "SQLITE", qz3)
+        # Yang ditagih di sini adalah "reconcile DIPANGGIL", bukan "barisnya COMPLETED": `runner`
+        # fixture sengaja mengembalikan exit 1 (keluarannya bahkan berbunyi "sengaja gagal dalam
+        # selftest"), jadi vonis yang benar untuk baris ini memang FAILED. Assertion pada COMPLETED
+        # akan menguji kemurahan stub, bukan perilaku drainer.
+        check("kuota habis TIDAK menghentikan peredaman baris yang sudah berjalan",
+              "QUOTA_CLOSED" in _acts3 and _row3["status"] != "WORKING"
+              and any(e.get("item") == qz3 for e in out),
+              f"status={_row3['status']} acts={_acts3}")
+        check("baris yang diredam di bawah kuota habis divonis oleh angka keluar gerbangnya, "
+              "bukan digantung",
+              _row3["status"] in ("COMPLETED", "FAILED"), str(_row3["status"]))
+        wo.run(conn, "SQLITE", "DELETE FROM quest_tasks WHERE id=?", (qz3,))
 
         ran.clear()
         out = tick(conn, "SQLITE", gate=gate_for("observe"), beats=[], sender=sender, runner=runner, capture=quiet_pane, busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of, gap=0,
@@ -1937,6 +2031,7 @@ def selftest():
               path.exists() and json.loads(path.read_text().splitlines()[-1])["action"] == "SELFTEST")
     finally:
         _cvx.pane_state = _orig_pane_state
+        wo.night_quota_state = _orig_quota_state
         Path("/tmp/drainer_selftest.jsonl").unlink(missing_ok=True)
         Path("/tmp/drainer_canary_selftest").unlink(missing_ok=True)
         conn.close()
