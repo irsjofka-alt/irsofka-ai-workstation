@@ -56,7 +56,9 @@
         "windows": [
           "5h",
           "weekly"
-        ]
+        ],
+        "min_fraction": 0.2,
+        "threshold_meaning": "sisa di bawah 20% pada SALAH SATU jendela = tolak berangkat; decider pindah ke grup Gemini (gemini-pro / gemini-pro-light)"
       },
       "breath": "paling mahal: satu turn prompts pendek menghabiskan 5.7% jendela 5h dan 2.9% weekly (terukur 2026-10-07, num_turns 1, input 28550 token)",
       "note": "Verifikasi/putus akhir yang harus benar-benar independen. Kontrak melarang memilih model dari ingatan: nama model di atas adalah hasil `agy models`, dan kuotanya dibaca dari grup 'Claude and GPT models' milik meter gemini (kolom 'usage' sengaja tidak ada di sini supaya satu meter tidak dibaca dua kali). Headless: `agy -p` tidak bisa menyetujui permintaan izin tool, jadi bukti HARUS ikut terkirim (pakai --file), bukan dicari sendiri oleh verifier."
@@ -81,7 +83,9 @@
         "windows": [
           "5h",
           "weekly"
-        ]
+        ],
+        "min_fraction": 0.2,
+        "threshold_meaning": "sisa di bawah 20% pada SALAH SATU jendela = tolak berangkat; decider pindah ke grup Gemini (gemini-pro / gemini-pro-light)"
       },
       "breath": "satu kolam kuota dengan Opus dan GPT-OSS, dipakai untuk audit rutin kalau Opus sedang tidak proporsional",
       "note": "Audit lapis kedua di pool yang sama. Bila jendela 5h atau weekly grup ini habis, cross_verify menolak berangkat dan melaporkan UNAVAILABLE — bukan menyamar sebagai Gemini."
@@ -197,6 +201,56 @@
         ]
       },
       "note": "Headless seperti tier Claude: `agy -p` tidak bisa menyetujui izin tool, jadi BUKTI harus ikut terkirim dalam prompt (--file), tidak dicari sendiri. Ditambahkan 2026-10-08 12:3x atas perintah operator setelah pool 'Claude and GPT models' habis (5h 0%, weekly 4%) sementara 'Gemini Models' 97% — diukur dari meter, bukan dari ingatan. Yang diperiksa tetap independen: yang menulis kode adalah Qoder, yang memverifikasi adalah Antigravity."
+    },
+    "gemini-verify-light": {
+      "kind": "cli",
+      "binary": "agy",
+      "role": "reviewer",
+      "model": "gemini-3.8-flash-medium",
+      "template": [
+        "agy",
+        "--model",
+        "{model}",
+        "--print",
+        "{prompt}",
+        "--output-format",
+        "json"
+      ],
+      "breath": "sama dengan grup 'Gemini Models'; dipilih untuk pemeriksaan yang hanya butuh penalaran ringan",
+      "quota_gate": {
+        "engine": "antigravity",
+        "scope": "Gemini Models",
+        "windows": [
+          "5h",
+          "weekly"
+        ]
+      },
+      "note": "Ditambahkan 2026-10-09 atas perintah operator, bersama kontrak bobot-pertanyaan. Pemikir RINGAN: diff yang kontras dengan berkasnya sendiri, klaim yang cocok dengan baris yang dikutip. Headless: bukti harus ikut terkirim (--file), tidak dicari sendiri. Yang menulis kode (qoder) tetap tidak boleh menjadi pemeriksa tunggal."
+    },
+    "gemini-pro-light": {
+      "kind": "cli",
+      "binary": "agy",
+      "role": "decider",
+      "model": "gemini-3.1-pro-low",
+      "template": [
+        "agy",
+        "--model",
+        "{model}",
+        "--print",
+        "{prompt}",
+        "--output-format",
+        "json"
+      ],
+      "breath": "grup 'Gemini Models'; lebih panjang daripada tier Claude, lebih berat penalarannya daripada Flash",
+      "quota_gate": {
+        "engine": "antigravity",
+        "scope": "Gemini Models",
+        "windows": [
+          "5h",
+          "weekly"
+        ]
+      },
+      "note": "Ditambahkan 2026-10-09 atas perintah operator, bersama kontrak bobot-pertanyaan. Pemikir RINGAN untuk keputusan level preferensi. Untuk penalaran medium ke tinggi gunakan `gemini-pro` (3.1 Pro High), bukan kunci ini."
     }
   },
   "local_tiers": {
@@ -231,6 +285,28 @@
     ],
     "gpu_release": "always",
     "never_load_if": "free_vram < min_free_mib",
-    "self_verification": "Engine yang menulis kode TIDAK SAH menjadi pemeriksa tunggal pekerjaannya sendiri. qoder ber-role builder: memakai `verify qoder` untuk hasil kerja qoder adalah menilai diri sendiri — itu bukan bukti, dan catatan SQL-nya akan terlihat seperti verifikasi independen padahal bukan. Pemeriksa sah: gemini (reviewer) atau tier lokal (validator)."
+    "self_verification": "Engine yang menulis kode TIDAK SAH menjadi pemeriksa tunggal pekerjaannya sendiri. qoder ber-role builder: memakai `verify qoder` untuk hasil kerja qoder adalah menilai diri sendiri — itu bukan bukti, dan catatan SQL-nya akan terlihat seperti verifikasi independen padahal bukan. Pemeriksa sah: gemini (reviewer) atau tier lokal (validator).",
+    "verifier_weight": {
+      "light": "gemini-verify-light",
+      "medium_high": "gemini-verify",
+      "rule": "Bobot pertanyaan memilih kunci registri, bukan selera engine. Pertanyaan yang tidak butuh menimbang bukti berat berangkat ke Flash Medium; yang bisa mengubah keputusan berangkat ke Flash High."
+    },
+    "decider_weight": {
+      "light": "gemini-pro-light",
+      "medium_high": "gemini-pro",
+      "rule": "Keputusan yang tidak diukur oleh angka keluar perintah adalah keputusan preferensi: ia milik decider, bukan operator."
+    },
+    "when_claude_quota_low": {
+      "threshold_percent": 20,
+      "windows": [
+        "5h",
+        "weekly"
+      ],
+      "any_window_below_threshold": [
+        "gemini-pro",
+        "gemini-pro-light"
+      ],
+      "rule": "Kedua jendela grup 'Claude and GPT models' dibaca dari meter pada saat dipakai. Kalau SALAH SATUNYA di bawah 20%, decider pindah ke grup Gemini; kalau meter tidak terbaca, dispatch DITOLAK sebagai UNAVAILABLE — ketiadaan bukti tidak pernah berarti kuota masih ada."
+    }
   }
 }

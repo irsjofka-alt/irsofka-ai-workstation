@@ -759,11 +759,12 @@ def tick(conn, engine, gate=None, beats=None, runner=None, sender=None, log=None
         ev("CLOSED_UNKNOWN", why=lvl.get("why"))
         return events
     if ap.get("mode") not in wo.MODES:
-        # OFF sudah bukan sebuah mode, jadi cabang ini tidak pernah berarti "sakelar mati" lagi.
-        # Yang tersisa di sini adalah keadaan yang harus berteriak: baris mode berisi nilai di
-        # luar kosakata — kolom yang rusak, database yang belum dimigrasi, atau seseorang yang
-        # menulis SQL mentah. Tick diam-diam berhenti di sini adalah persis "auto mati, komputer
+        # OFF KEMBALI menjadi bagian kosakata pada 2026-10-09, jadi cabang ini murni berarti satu hal:
+        # baris mode berisi nilai di luar SEMI/OFF/ON — kolom rusak, basis data belum dimigrasi, atau
+        # seseorang menulis SQL mentah. Tick yang diam di sini adalah persis "auto mati, komputer
         # IDLE" yang operator takutkan, jadi namanya MODE_UNKNOWN dan ia masuk keranjang darurat.
+        # Keadaan "seseorang menyuruh berhenti" bukan cabang sini: itu OFF, dan ia ditolak dengan
+        # namanya sendiri di `hand_new_work`.
         ev("MODE_UNKNOWN", why=f"mode {ap.get('mode')!r} bukan {'/'.join(wo.MODES)} — tidak ada "
                                "satu pun tangan yang bergerak")
         return events

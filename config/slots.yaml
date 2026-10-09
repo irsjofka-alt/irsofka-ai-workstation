@@ -23,11 +23,17 @@ teams:
     engine: qoder_cli
     instruction_ref: skills/coding_standards.md
   - role_id: decider
-    title: Independent Verifier (final decide, Gemini 3.1 Pro High)
+    title: "Independent Verifier (final decide, penalaran medium-ke-high: Gemini 3.1 Pro High)"
     registry_key: gemini-pro
+  - role_id: decider-light
+    title: "Independent Verifier (keputusan level preferensi, penalaran ringan: Gemini 3.1 Pro Low)"
+    registry_key: gemini-pro-light
   - role_id: verifier
-    title: Second-tier Verifier (Gemini 3.8 Flash High)
+    title: "Second-tier Verifier (penalaran medium-ke-high: Gemini 3.8 Flash High)"
     registry_key: gemini-verify
+  - role_id: verifier-light
+    title: "Second-tier Verifier (penalaran ringan: Gemini 3.8 Flash Medium)"
+    registry_key: gemini-verify-light
   - role_id: resolver
     title: Decision Resolver (unattended choice)
     registry_key: gemini
