@@ -1951,15 +1951,24 @@ ROADMAP_ITEMS = [
      "build", None, "cargo test -q reflex_proof"),
     ("f105", "F10.5 dream phase: konsolidasi memori saat idle, berkas tracked hanya lewat digest",
      "build", ["f103"],
-     # GERBANG INI BELUM DITEPATI, dan itu disengaja. Judulnya menyebut dua sifat — konsolidasi
-     # memori saat idle, dan berkas tracked hanya berubah lewat digest — sementara `digest` yang
-     # ada di sini adalah laporan pagi: ia ada, keluar 0, dan tidak mengukur keduanya. Dicari di
-     # seluruh tools/, hooks/ dan bin/: "dream" dan "konsolidasi" NOL kemunculan, jadi fiturnya
-     # belum dibangun sama sekali. Menaruh `digest` sebagai gerbang berarti item ini akan
-     # ditandai COMPLETED oleh perintah yang tidak bersangkutan — kelas bug yang sama persis
-     # dengan yang baru ditutup di F10.3, dan untuk ketiga kalinya di repo yang sama.
-     # Sengaja dibuat mustahil sampai fiturnya ada, supaya ia tidak bisa lulus diam-diam.
-     "test -f ~/.ai-station/tools/dream_phase.py && python3 tools/work_order.py selftest"),
+     # GERBANG INI PERNAH DIBUAT MUSTAHIL DENGAN SENGAJA, dan begitulah ketahuan bahwa fiturnya
+     # belum ada: "dream"/"konsolidasi" NOL kemunculan di seluruh tools/, hooks/ dan bin/, sementara
+     # `digest` yang ada adalah laporan pagi yang tidak mengukur apa pun tentang memori.
+     # Sekarang fiturnya ada (tools/dream_phase.py) dan gerbangnya menuntut dua sifat di judulnya,
+     # bukan keberadaan berkas: (a) konsolidasi sungguh disetir oleh idle yang terukur — dibuktikan
+     # selftest modul itu, yang menolak ledger kosong sebagai UNKNOWN dan menolak mode OFF;
+     # (b) Berkas terlacak hanya boleh berubah lewat digest — dibuktikan oleh tes bahwa selisih
+     # `git status` muncul disebut-by-name di baris digest, dan bahwa git yang tidak terbaca
+     # dilaporkan UNKNOWN, bukan "bersih". Ditambah: unit-nya terpasang, TIDAK di-enable (mimpi yang
+     # menyala sendiri setelah restart adalah keadaan yang harus ditolak, seperti F10.3), dan satu
+     # putaran sungguh pernah mengeluarkan baris digest.
+     "test -f ~/.ai-station/tools/dream_phase.py && "
+     "python3 tools/dream_phase.py selftest && "
+     "test -f ~/.config/systemd/user/irsofka-dream.timer && "
+     "test -f ~/.config/systemd/user/irsofka-dream.service && "
+     "! systemctl --user is-enabled --quiet irsofka-dream.timer && "
+     "(systemctl --user is-active --quiet irsofka-dream.timer || "
+     "python3 tools/dream_phase.py has-digest)"),
     # Jawabannya sudah diberikan operator lewat tab Human Decide (decision 6, 2026-10-08 07:00): ON boleh
     # commit dan push asal ada verifier yang meloloskan lebih dulu. Yang belum ada adalah barisnya —
     # aturan itu sekarang cuma hidup di §6, tempat ia mengikat sejauh engine mengingatnya, padahal §12
@@ -3622,6 +3631,23 @@ def selftest():
               and "irsofka-autopilot.timer" in (_g103[0]["c"] or ""),
               str((_g103[0]["c"] if _g103 else "")[:120]))
 
+        # --- gerbang F10.5: harus mengukur mimpi, bukan keberadaan berkas ------------------------
+        gate105 = [i[4] for i in ROADMAP_ITEMS if i[0] == "f105"][0]
+        check("gerbang F10.5 menjalankan selftest modul mimpi, bukan hanya test -f",
+              "dream_phase.py selftest" in gate105 and "dream_phase.py" in gate105, gate105[:160])
+        check("gerbang F10.5 menuntut kedua unit mimpi terpasang",
+              "irsofka-dream.timer" in gate105 and "irsofka-dream.service" in gate105, gate105[:160])
+        check("gerbang F10.5 tidak menuntut timer mimpi yang menyala sendiri setelah boot",
+              not _demands_timer_enabled(gate105) and "! systemctl --user is-enabled" in gate105,
+              gate105[:160])
+        check("gerbang F10.5 menuntut bukti satu putaran sungguh mengeluarkan baris, bukan janji",
+              "has-digest" in gate105 and "is-active" in gate105, gate105[:200])
+        _g105 = run(conn, "SQLITE",
+                    "SELECT check_command AS c FROM quest_tasks WHERE title LIKE 'F10.5%'")
+        check("baris ledger F10.5 menyimpan gerbang baru, bukan gerbang mustahil lama",
+              bool(_g105) and "dream_phase.py selftest" in (_g105[0]["c"] or "")
+              and "mustahil" not in (_g105[0]["c"] or ""), str(_g105)[:160])
+
         # --- pagar per-sha: dua grep global lulus selamanya, ini tidak ---------------------------
         _d3 = Path(_tf.mkdtemp(prefix="pushgate_"))
         _e3 = _d3 / "events.jsonl"
@@ -4430,6 +4456,13 @@ def main(argv=None):
         for line in ensure_schema(conn, engine):
             print(line)
     elif a.cmd == "seed":
+        # `--refresh-gates f105` tanpa `--roadmap` adalah perintah yang keluar 0 tanpa mengubah apa
+        # pun: daftar butirnya kosong, jadi tidak ada yang bisa disentuh. Terukur malam ini. Satu
+        # flag yang tampak bekerja tapi tidak melakukan apa-apa lebih berbahaya daripada
+        # flag yang tidak ada, jadi sekarang ia ditolak dengan namanya sendiri.
+        if a.refresh_gates and not a.roadmap:
+            print("seed: --refresh-gates butuh --roadmap (daftar butirnya kosong tanpa itu, "
+                  "jadi tidak ada yang bisa diperbarui)"); return 2
         for i, state, title in seed(conn, engine, ROADMAP_ITEMS if a.roadmap else [],
                                     refresh_gates=set(a.refresh_gates or [])):
             print(f"{i}\t{state}\t{title}")
