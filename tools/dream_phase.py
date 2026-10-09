@@ -57,6 +57,19 @@ def stamp(ts=None):
     return time.strftime("%Y-%m-%d_%H%M", time.localtime(ts))
 
 
+def run_stamp(ts=None):
+    """Kunci baris digest, sampai mikrodetik.
+
+    Menit tidak cukup, dan detik pun tidak: dua putaran dalam satu kesatuan waktu berbagi kunci dan
+    yang kemudian menimpa yang pertama lewat ON CONFLICT — satu catatan penolakan bisa menghapus
+    digest putaran selesai, atau sebaliknya. Terukur malam ini di dalam selftest sendiri: empat
+    putaran selesai plus satu penolakan menyisakan TEPAT SATU baris, dan yang tinggal adalah
+    penolakannya. Timer 30 menit bukan jaminan; satu panggilan manual di samping detak sudah cukup.
+    """
+    frac = ("%06d" % int((float(ts or time.time()) % 1) * 1_000_000))[:6]
+    return time.strftime("%Y-%m-%d_%H%M%S", time.localtime(ts)) + "_" + frac
+
+
 def now_ts():
     return int(time.time())
 
@@ -449,7 +462,7 @@ def _upsert(conn, engine, key, body, tags):
 
 
 def emit_digest(conn, engine, body, files, key=None):
-    return _upsert(conn, engine, key or f"{PREFIX_DIGEST}{stamp()}", body, f"files={len(files)}")
+    return _upsert(conn, engine, key or f"{PREFIX_DIGEST}{run_stamp()}", body, f"files={len(files)}")
 
 
 def write_rank(conn, engine, rank):
@@ -578,6 +591,7 @@ def selftest():
     def check(name, cond, detail=""):
         checks.append((name, bool(cond), detail if not cond else ""))
 
+    restore_leftover = []
     tmp = Path(tempfile.mkdtemp(prefix="dream_selftest_"))
     projects, learned = tmp / "projects", tmp / "learned"
     projects.mkdir(parents=True, exist_ok=True)
@@ -592,9 +606,11 @@ def selftest():
 
     import incident_recorder as ir  # noqa: PLC0415
     # generate_skill membuka koneksinya SENDIRI lewat get_db_connection dan menulis SKILLS.md
-    # katalog. Tanpa ketiga sambatan ini, satu tes "apakah skill pra-jawab bekerja" akan
-    # meninggalkan berkas di brain produksi dan membariskan incident_log sungguhan — persis
-    # kelas bug yang seluruh sesi ini habiskan untuk menutup.
+    # katalog. Tanpa sambatan berikut — ir.LEARNED_DIR, ir.SKILLS_CATALOG, ir.get_db_connection —
+    # satu tes "apakah skill pra-jawab bekerja" akan meninggalkan berkas di brain produksi dan
+    # membariskan incident_log sungguhan, persis kelas bug yang seluruh sesi ini habiskan untuk
+    # menutup. Jumlahnya disebut by name, bukan by count: versi "keempat sambatan" tertulis di atas
+    # tiga dan bertahan tiga ronde tanpa ada yang bisa membantahnya.
     ir_seams = (ir.LEARNED_DIR, ir.SKILLS_CATALOG, ir.get_db_connection)
     ir.LEARNED_DIR = learned
     ir.SKILLS_CATALOG = tmp / "SKILLS.md"
@@ -867,6 +883,19 @@ def selftest():
               "DITOLAK" in err2.getvalue() and not out2.getvalue() and n_before_off == n_after_off,
               f"err={err2.getvalue()[:80]} rows={n_before_off}->{n_after_off}")
 
+        # clauses has-digest: penolakan bukan putaran yang selesai
+        conn.execute("UPDATE autopilot_state SET mode='ON'")
+        conn.commit()
+        cls = wo.run(conn, "SQLITE",
+                     "SELECT content FROM world_memory WHERE category=? AND key LIKE ? "
+                     "AND content NOT LIKE ?", (DIGEST_CATEGORY, f"{PREFIX_DIGEST}2%", "%DREAM DITOLAK%"))
+        refused_rows = wo.run(conn, "SQLITE",
+                              "SELECT COUNT(*) c FROM world_memory WHERE content LIKE ?", ("%DREAM DITOLAK%",))
+        check("baris penolakan dikenali dari isinya dan tidak dihitung sebagai putaran selesai",
+              len(cls) >= 1 and refused_rows[0]["c"] >= 1
+              and all("DREAM DITOLAK" not in (c["content"] or "")[:40] for c in cls),
+              f"lulus={len(cls)} penolakan={refused_rows[0]['c']}")
+
         conn.execute("UPDATE autopilot_state SET mode='OFF'")
         conn.commit()
         n_now = wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory")[0]["c"]
@@ -893,12 +922,21 @@ def selftest():
         for k, v in orig.items():
             globals()[k] = v
         ir.LEARNED_DIR, ir.SKILLS_CATALOG, ir.get_db_connection = ir_seams
+        # Jangan percaya bahwa pelepasan terjadi — ukur. Selftest yang menyambat modul lalu bocor
+        # meninggalkan keadaan di mana tes BERIKUTNYA berjalan di atas sambatan tes sebelumnya,
+        # dan itu lulus tanpa membuktikan apa pun.
+        leftover = [k for k, v in orig.items() if globals()[k] is not v]
+        if ir.LEARNED_DIR != ir_seams[0] or ir.SKILLS_CATALOG != ir_seams[1]                 or ir.get_db_connection is not ir_seams[2]:
+            leftover.append("incident_recorder")
+        restore_leftover = leftover
         try:
             conn.close()
         except Exception:  # noqa: BLE001
             pass
         shutil.rmtree(tmp, ignore_errors=True)
 
+    checks.append(("setiap sambatan yang dipasang dilepas lagi, termasuk milik incident_recorder",
+                   not restore_leftover, str(restore_leftover)))
     failed = [c for c in checks if not c[1]]
     for name, ok, detail in checks:
         print(f"[{'ok' if ok else 'NO'}] {name}" + ("" if ok else f"   ← {detail}"))
@@ -917,17 +955,27 @@ def gates_report():
         conn.close()
 
 
-def has_digest_today():
-    """Keluar 0 bila ada baris digest bermeterai hari ini. Ini bukti bahwa mimpi pernah terjadi,
-    bukan bukti bahwa ia dijadwalkan — keduanya ditanya gerbang F10.5 secara terpisah."""
+def has_digest_today(completed_only=True):
+    """Keluar 0 bila ada baris digest bermeterai hari ini.
+
+    Dengan `completed_only` penolakan gerbang TIDAK dihitung: baris "DREAM DITOLAK" membuktikan
+    jalur emit hidup, tapi bukan bahwa satu putaran sungguh menata memori. Gerbang F10.5 menuntut
+    yang kedua, karena cláusula ini adalah satu-satunya tempat ia mengukur dunia, bukan kode.
+    """
     conn, engine = wo.connect()
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         p = ph(engine)
-        rows = wo.run(conn, engine,
-                      f"SELECT key FROM world_memory WHERE category = {p} AND key LIKE {p} "
-                      f"AND substr(CAST(updated_at AS TEXT), 1, 10) = {p} LIMIT 1",
-                      (DIGEST_CATEGORY, f"{PREFIX_DIGEST}2%", today))
+        sql = (f"SELECT key FROM world_memory WHERE category = {p} AND key LIKE {p} "
+               f"AND substr(CAST(updated_at AS TEXT), 1, 10) = {p}")
+        if completed_only:
+            # Penolakan dikenali dari judulnya, dan judul itu selalu didahului cap waktu, jadi
+            # polanya `%...%` — versi `\[DREAM DITOLAK%` tidak pernah cocok dan diam-diam
+            # menghitung penolakan sebagai putaran selesai.
+            sql += " AND content NOT LIKE " + p
+        rows = wo.run(conn, engine, sql + " LIMIT 1",
+                      tuple([DIGEST_CATEGORY, f"{PREFIX_DIGEST}2%", today]
+                            + (["%DREAM DITOLAK%"] if completed_only else [])))
         return 0 if rows else 1
     except Exception as exc:  # noqa: BLE001
         print(f"UNKNOWN: world_memory tidak terbaca ({str(exc)[:80]})")
