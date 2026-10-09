@@ -1802,7 +1802,13 @@ ROADMAP_ITEMS = [
      "python3 tools/drainer.py selftest"),
     ("f91", "F9.1 deterministic environment state: exit code + process tree + delta pane "
             "disuapkan ke prompt (jalan paralel, tidak bergantung antrean)", "build", None,
-     "bash bin/deploy_engine.sh --check"),
+     # Gerbang lamanya `bash bin/deploy_engine.sh --check`, dan `--check` bukan argumen yang
+     # dikenal skrip itu: parser-nya menutup dengan `*) exit 2`. Jadi ia MUSTAHIL lolos, dan
+     # item ini menunggu enam belas jam dalam keadaan itu. Bentuk sekarang menanyakan sifat yang
+     # benar-benar dibuat F9.1: pairing exit code pada urutan DESC, ketidakmampuan membaca yang
+     # dilaporkan sebagai UNKNOWN (bukan daftar kosong), ringkasan proses tanpa dump dict, dan
+     # delta pane alih-alian salinan isi pane.
+     "python3 tools/drainer.py selftest"),
     ("f92", "F9.2 action-outcome anti-pattern: bentuk perintah yang pernah gagal -> peringatan "
             "sebelum diketik", "build", ["f91"], "python3 tools/work_order.py selftest"),
     ("f93", "F9.3 reflex proof: ydotool bergerak lalu diff 64x64 membuktikan layar berubah",

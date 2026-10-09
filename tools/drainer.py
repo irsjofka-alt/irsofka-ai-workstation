@@ -2022,6 +2022,77 @@ def selftest():
             check("catatan antrean melarang dirinya sendiri dipakai sebagai perintah kerja",
                   bool(_note) and "bukan perintah" in _note and "jangan mulai" in _note,
                   str(_note)[:180])
+
+            # --- F9.1: keadaan lingkungan yang disuapkan ke prompt. Tiga pengukur, dan ketiganya
+            # menerima pembacanya sebagai argumen, jadi tes ini tidak menyentuh tmux, /proc, atau
+            # basis data produksi sama sekali.
+            class _FakeWo:
+                def __init__(self, rows=None, boom=False):
+                    self.rows, self.boom = rows or [], boom
+
+                def run(self, conn, engine, sql, params=()):
+                    if self.boom:
+                        raise RuntimeError("no such table: action_log")
+                    return self.rows
+            # Urutan baris SUNGGUHAN dari PostgreSQL, DESC waktu: exit lebih dulu, command-nya
+            # menyusul. Ini bentuk yang membalikkan pairing versi pertama.
+            _rows = [
+                {"kind": "command_exit", "summary": "aborted=False out_chars=803", "tool": "Bash",
+                 "exit_code": 0, "duration_ms": 5},
+                {"kind": "command", "summary": "bash bin/check_dash_order.sh", "tool": "Bash",
+                 "exit_code": None, "duration_ms": None},
+                {"kind": "command_exit", "summary": "aborted=False out_chars=12", "tool": "Bash",
+                 "exit_code": 3, "duration_ms": 9},
+                {"kind": "command", "summary": "python3 tools/drainer.py selftest", "tool": "Bash",
+                 "exit_code": None, "duration_ms": None},
+            ]
+            _ex = _adv2.env_exit_codes(None, "POSTGRESQL", _FakeWo(_rows))
+            check("F9.1 memasangkan exit code dengan perintah yang BENAR pada urutan DESC waktu",
+                  _ex == ["bash bin/check_dash_order.sh -> exit=0",
+                          "python3 tools/drainer.py selftest -> exit=3"], str(_ex))
+            _bad = _adv2.env_exit_codes(None, "POSTGRESQL", _FakeWo(boom=True))
+            check("F9.1 melaporkan ketidakmampuan membaca ledger, tidak menggantinya dengan daftar kosong",
+                  isinstance(_bad, list) and _bad and "UNKNOWN" in _bad[0], str(_bad))
+
+            class _FakeCw:
+                @staticmethod
+                def audit(cut_now=False):
+                    assert cut_now is False, "hook yang berjalan tiap prompt TIDAK BOLEH memotong proses"
+                    return {"ok": True, "persistent": [{"pane": "station-qoder", "pid": 7}],
+                            "strays": [], "stray_mb": 0, "in_flight": [],
+                            "protected": [{"binary": "qoder", "rss_mb": 900.0, "cmdline": "x" * 400,
+                                           "exe": "/p/qoder", "age_s": 1.0, "why": "pane tree"},
+                                          {"binary": "qoder", "rss_mb": 100.0, "cmdline": "y",
+                                           "exe": "/p/qoder", "age_s": 2.0, "why": "pane tree"}]}
+            _pr = _adv2.env_processes(_FakeCw)
+            _prtxt = " · ".join(_pr)
+            check("F9.1 meringkas pohon proses, bukan men-dump dict mentah ke setiap prompt",
+                  "{" not in _prtxt and "cmdline" not in _prtxt
+                  and "qoderx2~1000MB" in _prtxt, _prtxt[:180])
+
+            class _FakeCv:
+                n = 0
+                @staticmethod
+                def capture_pane(_t):
+                    _FakeCv.n += 1
+                    return "baris A\nbaris B\n" if _FakeCv.n == 1 else "baris A\nbaris C\n"
+            _base = Path(tempfile.mkdtemp(prefix="f91_baseline_"))
+            _real_base = _adv2.BASELINE_DIR
+            _adv2.BASELINE_DIR = _base
+            try:
+                _d1 = " ".join(_adv2.env_pane_delta(_FakeCv, "qoder"))
+                _d2 = " ".join(_adv2.env_pane_delta(_FakeCv, "qoder"))
+            finally:
+                _adv2.BASELINE_DIR = _real_base
+            check("F9.1 melaporkan DELTA pane, bukan menyalin isinya ke konteks",
+                  "belum ada pembacaan" in _d1 and "+1/-1" in _d2, f"{_d1} || {_d2}")
+            _blind = " ".join(_adv2.env_pane_delta(type("X", (), {
+                "capture_pane": staticmethod(lambda _t: None)})(), "qoder"))
+            check("pane yang tidak terbaca disebut UNKNOWN, bukan 'tidak berubah'",
+                  "UNKNOWN" in _blind, _blind)
+            _env = _adv2.build_env_note("qoder")
+            check("blok lingkungan memuat KETIGA pengukurnya sekaligus",
+                  all(k in _env for k in ("exit-code", "proses:", "delta pane:")), _env[:200])
         except Exception as _e4:  # noqa: BLE001
             check("catatan antrean bisa diuji", False, f"{type(_e4).__name__}: {_e4}")
 
