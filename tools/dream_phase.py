@@ -58,16 +58,22 @@ def stamp(ts=None):
 
 
 def run_stamp(ts=None):
-    """Kunci baris digest, sampai mikrodetik.
+    """Kunci baris digest, presisi mikrodetik, dari SATU pembacaan jam.
 
-    Menit tidak cukup, dan detik pun tidak: dua putaran dalam satu kesatuan waktu berbagi kunci dan
-    yang kemudian menimpa yang pertama lewat ON CONFLICT — satu catatan penolakan bisa menghapus
-    digest putaran selesai, atau sebaliknya. Terukur malam ini di dalam selftest sendiri: empat
-    putaran selesai plus satu penolakan menyisakan TEPAT SATU baris, dan yang tinggal adalah
-    penolakannya. Timer 30 menit bukan jaminan; satu panggilan manual di samping detak sudah cukup.
+    Menit tidak cukup, dan detik pun tidak: dua putaran dalam satu satuan waktu berbagi kunci dan
+    yang kemudian menimpa yang pertama lewat ON CONFLICT. Terukur malam ini di dalam selftest
+    sendiri: empat putaran selesai plus satu penolakan menyisakan TEPAT SATU baris, dan yang tinggal
+    adalah penolakannya. Timer 30 menit bukan jaminan — satu panggilan manual di samping detak
+    sudah cukup.
+
+    Dan presisi harus dari satu pembacaan: pecahan dari `time.time()` yang digabung dengan tanggal
+    dari `time.localtime(None)` adalah dua keadaan berbeda pada batas detik 59.999999, dan kunci
+    yang melompat satu detik ke depan tidak bisa diurutkan oleh siapa pun yang membacanya kemudian.
     """
-    frac = ("%06d" % int((float(ts or time.time()) % 1) * 1_000_000))[:6]
-    return time.strftime("%Y-%m-%d_%H%M%S", time.localtime(ts)) + "_" + frac
+    base = float(ts if ts is not None else time.time())
+    secs = int(base)
+    frac = int(round((base - secs) * 1_000_000)) % 1_000_000
+    return time.strftime("%Y-%m-%d_%H%M%S", time.localtime(secs)) + "_%06d" % frac
 
 
 def now_ts():
@@ -176,9 +182,18 @@ def rank_memories(conn, engine):
     Tidak ada alat yang mengukur "penting". Yang ada di dalam baris: umur, apakah filter
     pengambilan bisa melihatnya, berapa banyak saudaranya di kategori yang sama, dan apakah
     isinya sebenarnya salinan. Keempatnya dihitung, tidak dirasa.
+
+    Baris mimpi itu sendiri (kategori `dream`) dikecualikan. Tanpa batas ini, dream meniliasi
+    catatan-nya-sendiri — sampai 48 baris penolakan dan satu digest per hari — ikut mengambil slot
+    di depan mesin, ikut memicu penalti desakan kategori, lalu ikut di-UPDATE satu per satu oleh
+    persist_scores. Ditemukan ronde verifikasi ketiga, dan klaim lama di selftest yang bilang
+    "catatan mimpi sengaja tidak dinilai" ternyata palsu: tidak ada filternya sama sekali.
     """
     try:
-        rows = wo.run(conn, engine, "SELECT key, category, content, tags, updated_at FROM world_memory")
+        p = ph(engine)
+        rows = wo.run(conn, engine,
+                      f"SELECT key, category, content, tags, updated_at FROM world_memory "
+                      f"WHERE category <> {p}", (DIGEST_CATEGORY,))
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "why": f"world_memory tidak terbaca: {str(exc)[:80]}"}
 
@@ -461,8 +476,8 @@ def _upsert(conn, engine, key, body, tags):
     return {"ok": True, "key": key, "why": None}
 
 
-def emit_digest(conn, engine, body, files, key=None):
-    return _upsert(conn, engine, key or f"{PREFIX_DIGEST}{run_stamp()}", body, f"files={len(files)}")
+def emit_digest(conn, engine, body, files, key=None, kind="pass"):
+    return _upsert(conn, engine, key or f"{PREFIX_DIGEST}{run_stamp()}", body, f"kind={kind};files={len(files)}")
 
 
 def write_rank(conn, engine, rank):
@@ -512,7 +527,8 @@ def run(force=False, minutes=IDLE_MINUTES, conn=None, engine=None, quiet=False):
             # waktunya" sehari — nomor memori orang membengkak oleh keadaan yang justru normal.
             # Yang tetap harus bisa dijawab besok: apakah mimpi pernah mencoba. Jawabannya ada di
             # satu baris ini plus jurnal timer (stdout), yang mencatat setiap penolakan.
-            res = emit_digest(conn, engine, body, [], key=f"{PREFIX_DIGEST}refused_{datetime.now():%Y-%m-%d}")
+            res = emit_digest(conn, engine, body, [], key=f"{PREFIX_DIGEST}refused_{datetime.now():%Y-%m-%d}",
+                              kind="refusal")
             if not quiet:
                 # Penolakan yang tidak dicetak adalah penolakan yang tidak ada: timer menulis
                 # stdout-nya ke journal, dan journal kosong membuat orang menyimpulkan
@@ -802,6 +818,13 @@ def selftest():
         rated = wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory WHERE rank_score IS NOT NULL")[0]["c"]
         check("setiap baris yang dinilai mendapat angka; catatan mimpi sendiri sengaja tidak dinilai",
               rated == 17, f"rated={rated}")
+        check("baris digest dan kurSOR mimpi tidak ikut dinilai ke dalam persaingan slot",
+              wo.run(conn, "SQLITE",
+                     "SELECT COUNT(*) c FROM world_memory WHERE category = ? AND rank_score IS NOT NULL",
+                     (DIGEST_CATEGORY,))[0]["c"] == 0,
+              str(wo.run(conn, "SQLITE",
+                         "SELECT key, rank_score FROM world_memory WHERE category = ? AND rank_score IS NOT NULL",
+                         (DIGEST_CATEGORY,))[:2]))
         conn.execute("UPDATE world_memory SET updated_at = ? WHERE key LIKE ?", (_ago(5), "dream%"))
         conn.execute("INSERT INTO world_memory (key, category, content, updated_at) VALUES (?,?,?,?)",
                      ("handoff_baru_sekali_pukul", "session_recovery", "catatan yang ditulis setelah mimpi",
@@ -900,18 +923,33 @@ def selftest():
               refused_rows and "DREAM DITOLAK" in (refused_rows[0]["content"] or ""),
               str(refused_rows[:1])[:120])
 
-        # clauses has-digest: penolakan bukan putaran yang selesai
+        # clauses has-digest: diuji lewat fungsi ASLINYA, bukan SQL yang dirangkai ulang di tes.
+        # Versi sebelumnya merakit query sendiri di sandbox, sehingga fungsi yang benar-benar
+        # menjadi gerbang F10.5 tidak pernah dieksekusi oleh satu pun tes.
+        n_pass = wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory WHERE tags LIKE ?",
+                        ("kind=pass%",))[0]["c"]
+        n_ref = wo.run(conn, "SQLITE", "SELECT COUNT(*) c FROM world_memory WHERE tags LIKE ?",
+                       ("kind=refusal%",))[0]["c"]
+        check("putaran selesai dan penolakan tercatat sebagai dua jenis yang bisa dibedakan",
+              n_pass >= 1 and n_ref >= 1, f"pass={n_pass} refusal={n_ref}")
+        check("has-digest fungsi asli lulus karena ada putaran selesai hari ini",
+              has_digest_today(conn=conn, engine="SQLITE") == 0, "")
+        wo.run(conn, "SQLITE", "UPDATE world_memory SET tags = ? WHERE tags LIKE ?",
+               ("kind=refusal;moved=1", "kind=pass%"))
+        check("has-digest menolak bila yang tersisa hanya penolakan",
+              has_digest_today(conn=conn, engine="SQLITE") == 1, "")
+        # False negative yang dulu mungkin: satu putaran yang BADANNYa memuat frasa penolakan,
+        # karena ia mengutip prompt mesin lain. Jenis dibaca dari tags, bukan dari prosa.
+        _upsert(conn, "SQLITE", f"{PREFIX_DIGEST}2026-prosa-uji", "[x] DREAM — mode=ON\n- kutipan: DREAM DITOLAK",
+                "kind=pass;files=0")
+        check("putaran selesai yang kebetulan mengutip frasa penolakan tetap dihitung selesai",
+              has_digest_today(conn=conn, engine="SQLITE") == 0, "")
+        wo.run(conn, "SQLITE", "DELETE FROM world_memory WHERE key = ?",
+               (f"{PREFIX_DIGEST}2026-prosa-uji",))
+        # Blok di bawah menghitung penolakan harian, dan itu hanya bermakna bila sakelarnya ON:
+        # di bawah OFF yang terjadi adalah penolakan MODE, bukan penolakan idle.
         conn.execute("UPDATE autopilot_state SET mode='ON'")
         conn.commit()
-        cls = wo.run(conn, "SQLITE",
-                     "SELECT content FROM world_memory WHERE category=? AND key LIKE ? "
-                     "AND content NOT LIKE ?", (DIGEST_CATEGORY, f"{PREFIX_DIGEST}2%", "%DREAM DITOLAK%"))
-        refused_rows = wo.run(conn, "SQLITE",
-                              "SELECT COUNT(*) c FROM world_memory WHERE content LIKE ?", ("%DREAM DITOLAK%",))
-        check("baris penolakan dikenali dari isinya dan tidak dihitung sebagai putaran selesai",
-              len(cls) >= 1 and refused_rows[0]["c"] >= 1
-              and all("DREAM DITOLAK" not in (c["content"] or "")[:40] for c in cls),
-              f"lulus={len(cls)} penolakan={refused_rows[0]['c']}")
 
         conn.execute("UPDATE autopilot_state SET mode='OFF'")
         conn.commit()
@@ -954,6 +992,16 @@ def selftest():
 
     checks.append(("setiap sambatan yang dipasang dilepas lagi, termasuk milik incident_recorder",
                    not restore_leftover, str(restore_leftover)))
+    # Pelepasan yang hanya dibandingkan dengan dirinya sendiri hampir tidak bisa gagal. Yang
+    # diukur di sini adalah KONDISINYA: sesudah tes, jalur berkas menunjuk brain asli dan
+    # pemanggil git yang sebenarnya mengembalikan daftar, bukan sambatan tes.
+    # Dibuktikan bisa gagal: membocorkan satu sambatan membuat kedua cek ini menamai yang bocor.
+    after = (tracked_state, str(Path(PROJECTS)))
+    checks.append(("sesudah tes, pemanggil git adalah fungsi aslinya lagi, bukan sambatan",
+                   getattr(after[0], "__name__", "") == "tracked_state",
+                   repr(getattr(after[0], "__name__", ""))))
+    checks.append(("sesudah tes, jalur handoff menunjuk brain produksi lagi",
+                   after[1] == str(BRAIN / "memory" / "projects"), after[1]))
     failed = [c for c in checks if not c[1]]
     for name, ok, detail in checks:
         print(f"[{'ok' if ok else 'NO'}] {name}" + ("" if ok else f"   ← {detail}"))
@@ -972,33 +1020,38 @@ def gates_report():
         conn.close()
 
 
-def has_digest_today(completed_only=True):
+def has_digest_today(completed_only=True, conn=None, engine=None):
     """Keluar 0 bila ada baris digest bermeterai hari ini.
 
     Dengan `completed_only` penolakan gerbang TIDAK dihitung: baris "DREAM DITOLAK" membuktikan
     jalur emit hidup, tapi bukan bahwa satu putaran sungguh menata memori. Gerbang F10.5 menuntut
-    yang kedua, karena cláusula ini adalah satu-satunya tempat ia mengukur dunia, bukan kode.
+    yang kedua, karena klausula ini adalah satu-satunya tempat ia mengukur dunia, bukan kode.
+
+    Jenis dibaca dari kolom `tags`, BUKAN dari isi `content`. Versi pertama mencari frasa
+    "DREAM DITOLAK" di badan baris dengan LIKE — dan badan digest itu memuat kutipan prompt mesin
+    lain, jadi satu putaran selesai yang kebetulan mengutip kata-kata penolakan akan hilang dari
+    perhitungan. `tags` adalah tempat terstruktur yang ditulis kode ini sendiri, bukan prosa.
     """
-    conn, engine = wo.connect()
+    owned = conn is None
+    if owned:
+        conn, engine = wo.connect()
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         p = ph(engine)
         sql = (f"SELECT key FROM world_memory WHERE category = {p} AND key LIKE {p} "
                f"AND substr(CAST(updated_at AS TEXT), 1, 10) = {p}")
+        params = [DIGEST_CATEGORY, f"{PREFIX_DIGEST}2%", today]
         if completed_only:
-            # Penolakan dikenali dari judulnya, dan judul itu selalu didahului cap waktu, jadi
-            # polanya `%...%` — versi `\[DREAM DITOLAK%` tidak pernah cocok dan diam-diam
-            # menghitung penolakan sebagai putaran selesai.
-            sql += " AND content NOT LIKE " + p
-        rows = wo.run(conn, engine, sql + " LIMIT 1",
-                      tuple([DIGEST_CATEGORY, f"{PREFIX_DIGEST}2%", today]
-                            + (["%DREAM DITOLAK%"] if completed_only else [])))
+            sql += f" AND tags LIKE {p}"
+            params.append("kind=pass%")
+        rows = wo.run(conn, engine, sql + " LIMIT 1", tuple(params))
         return 0 if rows else 1
     except Exception as exc:  # noqa: BLE001
         print(f"UNKNOWN: world_memory tidak terbaca ({str(exc)[:80]})")
         return 2
     finally:
-        conn.close()
+        if owned:
+            conn.close()
 
 
 def main(argv):
