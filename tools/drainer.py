@@ -423,6 +423,14 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
         item = for_item
     else:
         item = next_ready(conn, engine, origin=origin)
+        if not item and wanted == "ON":
+            # ON tanpa antrean tidak berarti mesinnya boleh diam sampai pagi. Satu baris 'idle'
+            # dibuat HANYA kalau ledger menunjukkan utang yang terukur, dan baris itu lalu masuk
+            # ke jalur yang sama persis di bawah sini — gerbang, pane tenang, direktori tab, klaim
+            # bersyarat, pelepasan saat kirim gagal. Tidak ada jalur kedua dengan pagar sendiri.
+            # SEMI tidak pernah sampai ke sini: `wanted == "ON"` adalah satu-satunya gerbangnya,
+            # dan `claim()` tetap menolak keranjangnya sebagai lapis kedua.
+            item = wo.ensure_idle_item(conn, engine, who=wo.IDLE_HOLDER, emit=emit)
         if not item:
             emit("QUEUE_EMPTY", origin=origin or "apa pun")
             return None

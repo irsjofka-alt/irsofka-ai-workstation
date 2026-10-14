@@ -54,12 +54,19 @@ URGENT = {
     # komputer diam sampai pagi" yang operator takutkan — bedanya dengan OFF adalah OFF itu pilihan
     # dia, sedangkan ini mesin yang kehabisan bahan bakar. Yang kedua harus terdengar.
     "QUOTA_CLOSED",
+    # Keluarga `*_UNKNOWN` untuk kerja idle: mesin tidak diam karena tidak ada kerja, tapi karena
+    # ia tidak bisa MEMBACA apakah ada kerja. Itu bukan "nol", dan diam karena tidak terbaca
+    # persis sama kelihatannya dengan diam karena selesai.
+    "IDLE_DEBT_UNKNOWN",
 }
 # Peristiwa yang berarti "mesin bekerja": boleh pendek, tidak boleh berteriak.
 PROGRESS = {"WORK_DISPATCHED", "GATE_PASSED", "CONTINUE_SENT", "ANSWER_SENT", "CLAIMED",
             # Hook yang menyuntik item ke CLI yang sedang diam ADALAH "mengirim perintah ke CLI"
             # — jalur yang persis diminta operator untuk selalu kelihatan.
-            "SEMI_INJECTED"}
+            "SEMI_INJECTED",
+            # Baris kerja idle baru dibuka. Bukan alarm: ini jawaban atas "lalu untuk apa ON",
+            # dan kejadiannya tetap dilaporkan lewat WORK_DISPATCHED saat benar-benar terkirim.
+            "IDLE_QUEUED"}
 # Peristiwa yang layak masuk banner tanpa alarming dan tanpa ditahan: tercatat sebagai pilihan,
 # bukan sebagai sisa yang tidak kebagian keranjang.
 NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD", "ENGINE_BUSY",
@@ -74,7 +81,13 @@ NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD"
         # bukan mesin yang macet. Yang membuat perintah orang tidak sampai sudah berbanner lewat
         # QUEUED_NOT_DELIVERED; membunyikan banner kedua untuk satu kejadian itulah yang membuat
         # orang berhenti membaca banner.
-        "MODE_OFF"}
+        "MODE_OFF",
+        # Empat alasan kerja idle TIDAK dibuka. Semuanya adalah loop yang menahan dirinya sendiri
+        # karena sebuah syarat tidak terpenuhi — mesin sibuk, sudah ada satu baris idle, tidak ada
+        # utang terukur, atau anggaran idle habis — bukan kegagalan pembacaan. Yang terakhir itu
+        # sengaja dibedakan: `IDLE_BUDGET_SPENT` berarti pengayaan-diri berhenti karena sudah
+        # cukup banyak dikerjakan malam ini, dan itu hasil, bukan kerusakan.
+        "IDLE_ENGINE_BUSY", "IDLE_ALREADY_OPEN", "IDLE_NO_DEBT", "IDLE_BUDGET_SPENT"}
 # `CLOSED_OFF` pernah ada di daftar ini dan dibuang dengan alasan "OFF bukan lagi sebuah mode".
 # Alasan itu tidak berlaku sejak 2026-10-09: OFF kembali menjadi state yang disimpan, dan nama
 # kejadiannya `MODE_OFF` (lihat keranjang NOTE di atas). Yang tetap benar dari komentar lama:

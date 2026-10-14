@@ -394,11 +394,13 @@ NEW_COLUMNS = [
     # membangunkan apa pun, dan jawaban tanpa `answered_by` tidak bisa dibedakan dari jawaban mesin.
     ("decisions", "item_id", "BIGINT", "INTEGER"),
     ("decisions", "answered_by", "VARCHAR(60)", "TEXT"),
-    # `origin` menjawab "siapa yang menulis baris antrean ini" dan hanya punya tiga isi yang
+    # `origin` menjawab "siapa yang menulis baris antrean ini" dan hanya punya empat isi yang
     # bisa dibuktikan: 'roadmap' (ditulis `seed` dari ROADMAP_ITEMS), 'operator' (ditulis `queue`
-    # dariDashboard), dan 'legacy' (baris yang sudah ada sebelum kolom ini ada — asalnya tidak
-    # diketahui, dan menebak 'roadmap' akan membuat SEMI mengaku mengerjakan perintah orang
-    # yang bukan perintahnya). Nilainya didefinisikan di sini, di kolom, satu kali (§12).
+    # dari Dashboard), 'idle' (ditulis drainer sendiri ketika ON tidak menemukan apa pun dan
+    # ledger menunjukkan utang terukur — lihat ORIGIN_IDLE), dan 'legacy' (baris yang sudah ada
+    # sebelum kolom ini ada — asalnya tidak diketahui, dan menebak 'roadmap' akan membuat SEMI
+    # mengaku mengerjakan perintah orang yang bukan perintahnya).
+    # Nilainya didefinisikan di sini, di kolom, satu kali (§12).
     ("quest_tasks", "origin", "VARCHAR(16)", "TEXT"),
     # `ws_path` adalah proyek baris ini — direktori tempat gerbangnya dijalankan. KOSONG berarti
     # hari kemarin persis: `REPO`. Itulah sebabnya kolom ini boleh ditambahkan tanpa menyentuh
@@ -412,6 +414,198 @@ NEW_COLUMNS = [
 ORIGIN_LEGACY = "legacy"
 ORIGIN_ROADMAP = "roadmap"
 ORIGIN_OPERATOR = "operator"
+# 'idle' adalah isi keempat, dan seperti tiga lainnya ia bisa dibuktikan dari barisnya sendiri:
+# baris ini tidak ditulis orang dan tidak berasal dari ROADMAP_ITEMS — ia ditulis drainer ketika
+# ON tidak menemukan apa pun untuk dikerjakan, dan isinya adalah utang yang DIUKUR dari ledger ini
+# (kegagalan berulang tanpa jawaban, entri skill tanpa berkas). Yang tidak boleh terjadi adalah
+# baris idle dibuat supaya mesin terlihat sibuk: tanpa utang terukur, jalurnya diam.
+# Konsekuensi yang sengaja dipertahankan: `claim()` menolak SEMI untuk segala yang bukan
+# 'operator', jadi pengayaan-diri hanya mungkin di ON — mode yang memang dititipkan ke mesin.
+ORIGIN_IDLE = "idle"
+
+# Batas sendiri untuk baris idle. `NIGHT_MAX_ITEMS` menjaga seluruh run; tanpa angka kedua ini,
+# pekerjaan pengayaan-diri akan memakan anggaran item malam dan menyisakan sedikit ruang untuk
+# pekerjaan yang sebenarnya — padahal yang membuat ON berguna adalah kemampuannya tetap bekerja
+# ketika tidak ada yang diperintahkan. Keduanya menjaga hal berbeda, jadi keduanya dibaca.
+IDLE_MAX_ITEMS = 5
+IDLE_HOLDER = "drainer"
+
+
+def idle_debt_menu(conn, engine, brain_root=None):
+    """Utang yang bisa dibuktikan, tanpa subprocess dan tanpa mengarang pekerjaan.
+
+    Tiga sumber, semuanya ledger milik mesin ini sendiri:
+      1. signature kegagalan yang berulang tapi `incident_log.auto_skill_id` masih kosong;
+      2. `skills_inventory` yang tidak menunjuk berkas apa pun;
+      3. `skills_inventory` yang menunjuk berkas yang sudah tidak ada di disk.
+
+    Ambang sumber (1) TIDAK didefinisikan ulang di sini — angka itu milik `dream_phase`, dan dua
+    angka untuk satu arti adalah dua aturan yang boleh berbeda. Impornya ditunda ke dalam fungsi
+    karena `dream_phase` mengimpor modul ini; lingkaran itu dipecah di sini, bukan dengan menyalin
+    konstantanya.
+
+    `ok=False` berarti TIDAK SATU PUN sumber bisa dibaca, dan itu bukan "tidak ada utang".
+    Sebagian sumber gagal dengan satu sumber yang berhasil tetap `ok=True` dengan `partial`
+    terisi: keputusannya adalah "beri mesin ini sesuatu yang NYATA menunggak", dan menolak
+    bekerja karena satu pembacaan gagal akan mengembalikan persis diam yang jalur ini dibuat
+    untuk hilangkan. Yang tidak boleh terjadi adalah mengarang pekerjaan ketika tidak ada
+    sumber yang bisa membuktikannya — dan itu yang `ok=False` tahan. Pemanggil wajib diam pada
+    `ok=False`, sama seperti pemutus yang menolak saat git tidak terbaca.
+    """
+    root = Path(brain_root) if brain_root else (REPO / "brain")
+    ph = "%s" if engine == "POSTGRESQL" else "?"
+    items, unreadable, sources_ok = [], [], 0
+
+    try:
+        from dream_phase import PRE_ANSWER_REPEATS as rep
+    except Exception as exc:  # noqa: BLE001 — ambang tidak terbaca = sumber ini tidak boleh dipakai
+        rep = None
+        unreadable.append(f"ambang dream_phase ({str(exc)[:40]})")
+
+    if rep:
+        try:
+            rows = run(conn, engine,
+                       f"SELECT error_signature, repeat_count FROM incident_log "
+                       f"WHERE repeat_count >= {ph} AND auto_skill_id IS NULL "
+                       f"ORDER BY repeat_count DESC LIMIT 3", (int(rep),)) or []
+            sources_ok += 1
+            for r in rows:
+                items.append(("incident",
+                              f"Tuntaskan skill learned untuk {r['error_signature']} — gagal "
+                              f"{r['repeat_count']}x dan belum ada jawabannya"))
+        except Exception as exc:  # noqa: BLE001
+            unreadable.append(f"incident_log ({str(exc)[:40]})")
+
+    try:
+        rows = run(conn, engine,
+                   "SELECT id, name, file_path FROM skills_inventory "
+                   "WHERE file_path IS NULL OR file_path = '' ORDER BY use_count DESC LIMIT 3") or []
+        for r in rows:
+            items.append(("skill_no_file",
+                          f"Beri skill '{r['name']}' satu berkas di brain/skills dan sambungkan "
+                          f"file_path-nya, atau hapus entri ini karena tidak ada isinya"))
+        missing = [(r["id"], r["name"], r["file_path"]) for r in rows if r.get("file_path")]
+        rows2 = run(conn, engine,
+                    "SELECT id, name, file_path FROM skills_inventory "
+                    "WHERE file_path IS NOT NULL AND file_path <> '' ORDER BY use_count DESC LIMIT 20") or []
+        for r in rows2:
+            fp = (r.get("file_path") or "").strip()
+            if not fp:
+                continue
+            p = Path(fp).expanduser()
+            if not p.is_absolute():
+                p = (root / fp).resolve(strict=False)
+            if not p.exists():
+                items.append(("skill_dangling",
+                              f"Skill '{r['name']}' menunjuk {fp} yang tidak ada di disk — "
+                              f"pindahkan ke brain/skills atau koreksi jalurnya"))
+        sources_ok += 1
+        del missing
+    except Exception as exc:  # noqa: BLE001
+        unreadable.append(f"skills_inventory ({str(exc)[:40]})")
+
+    return {"ok": sources_ok > 0, "why": "; ".join(unreadable) or None,
+            "partial": bool(unreadable), "items": items}
+
+
+def ensure_idle_item(conn, engine, who=IDLE_HOLDER, emit=None, brain_root=None):
+    """Satu baris 'idle' ketika ON tidak punya apa pun DAN ada utang yang terukur.
+
+    Empat penolakan, semuanya sebelum INSERT:
+      * mesin ini masih memegang item ber-lease hidup — pekerjaan tidak ditumpuki;
+      * sudah ada baris idle terbuka — satu cukup, yang itu sedang dikerjakan atau menunggu;
+      * anggaran idle jendela ini habis — pengayaan-diri tidak boleh memakan malam;
+      * menu utang kosong atau tidak terbaca — diam, jangan membuat kesibukan.
+
+    Barisnya dikembalikan supaya pemanggil bisa menyerahkannya ke `hand_new_work` yang biasa:
+    gerbang, ketenangan pane, direktori kerja, klaim bersyarat, dan pelepasan saat kirim gagal
+    semuanya berjalan utuh. Jalur idle tidak punya pagar sendiri karena itu berarti ada dua aturan.
+    """
+    emit = emit or (lambda *a, **kw: None)
+    ph = "%s" if engine == "POSTGRESQL" else "?"
+
+    try:
+        held = run(conn, engine,
+                   f"SELECT id FROM quest_tasks WHERE cli_engine={ph} "
+                   f"AND status IN ('CLAIMED','WORKING') AND COALESCE(lease_epoch,0) > {ph} "
+                   f"LIMIT 1", (engine, now())) or []
+    except Exception as exc:  # noqa: BLE001
+        emit("IDLE_DEBT_UNKNOWN", why=f"ledger tidak terbaca ({str(exc)[:50]})")
+        return None
+    if held:
+        emit("IDLE_ENGINE_BUSY", item=int(held[0]["id"]))
+        return None
+
+    try:
+        open_idle = run(conn, engine,
+                        f"SELECT id FROM quest_tasks WHERE origin={ph} "
+                        f"AND status IN ('PENDING','CLAIMED','WORKING') LIMIT 1", (ORIGIN_IDLE,)) or []
+    except Exception as exc:  # noqa: BLE001
+        emit("IDLE_DEBT_UNKNOWN", why=f"antrean idle tidak terbaca ({str(exc)[:50]})")
+        return None
+    if open_idle:
+        emit("IDLE_ALREADY_OPEN", item=int(open_idle[0]["id"]))
+        return None
+
+    ap = autopilot(conn, engine) or {}
+    on_epoch = int(ap.get("on_epoch") or 0)
+    if not on_epoch:
+        # Tanpa jendela yang terbaca, "berapa idle yang sudah dipakai" tidak bisa dijawab — dan
+        # menjawabnya dengan nol adalah mengizinkan loop tanpa batas. UNKNOWN bukan nol.
+        emit("IDLE_DEBT_UNKNOWN", why="jendela ON tidak terbaca — anggaran idle tidak bisa dihitung")
+        return None
+    try:
+        spent = run(conn, engine,
+                    f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin={ph} "
+                    f"AND status='COMPLETED' AND "
+                    + (f"EXTRACT(EPOCH FROM completed_at::timestamptz) >= {ph}"
+                       if engine == "POSTGRESQL"
+                       else f"CAST(strftime('%s', completed_at) AS INTEGER) >= {ph}"),
+                    (ORIGIN_IDLE, on_epoch)) or []
+        used_idle = int((spent[0].get("n") if spent else 0) or 0)
+    except Exception as exc:  # noqa: BLE001
+        emit("IDLE_DEBT_UNKNOWN", why=f"anggaran idle tidak terbaca ({str(exc)[:50]})")
+        return None
+    if used_idle >= IDLE_MAX_ITEMS:
+        emit("IDLE_BUDGET_SPENT", used=used_idle, cap=IDLE_MAX_ITEMS)
+        return None
+
+    menu = idle_debt_menu(conn, engine, brain_root=brain_root)
+    if not menu["ok"]:
+        emit("IDLE_DEBT_UNKNOWN", why=menu["why"])
+        return None
+    if not menu["items"]:
+        emit("IDLE_NO_DEBT")
+        return None
+
+    kind, title = menu["items"][0]
+    summary = (f"kerja idle otomatis ({kind}) — ditulis drainer karena ON tidak menemukan item "
+               f"nyata dan ledger menunjukkan utang yang terukur; budget idle sisa "
+               f"{IDLE_MAX_ITEMS - used_idle - 1}")
+    try:
+        if engine == "POSTGRESQL":
+            rows = run(conn, engine,
+                       "INSERT INTO quest_tasks (title, status, phase, summary, cli_engine, "
+                       "origin, ws_path) VALUES (%s, 'PENDING', 'idle', %s, %s, %s, %s) "
+                       "RETURNING id",
+                       (title[:255], summary[:2000], engine, ORIGIN_IDLE, str(REPO)))
+            new_id = int(rows[0]["id"]) if rows else None
+        else:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO quest_tasks (title, status, phase, summary, cli_engine, "
+                        "origin, ws_path) VALUES (?, 'PENDING', 'idle', ?, ?, ?, ?)",
+                        (title[:255], summary[:2000], engine, ORIGIN_IDLE, str(REPO)))
+            conn.commit()
+            new_id = cur.lastrowid
+            cur.close()
+    except Exception as exc:  # noqa: BLE001
+        emit("IDLE_DEBT_UNKNOWN", why=f"INSERT gagal ({str(exc)[:60]})")
+        return None
+    if not new_id:
+        emit("IDLE_DEBT_UNKNOWN", why="id tidak kembali setelah INSERT")
+        return None
+    emit("IDLE_QUEUED", item=new_id, kind=kind, used=used_idle + 1, cap=IDLE_MAX_ITEMS)
+    return get_item(conn, engine, int(new_id))
 
 # Lebar kolom yang ditumbuhkan, bukan diganti isinya. `weight` lahir sebagai VARCHAR(10) pada
 # saat kosakatanya masih muat di situ; bobot ketiga dari invarian 3 — `irreversible`, 12 huruf —
@@ -3045,9 +3239,42 @@ def selftest():
         # --- F10.3: batas kuota per malam. Diuji pada pembacanya sendiri, bukan pada tiruan yang
         # disuntik drainer: kalau fungsi ini salah, semua tes drainer di atas tetap hijau karena
         # mereka tidak pernah memanggilnya.
+        # Tes ini dulu menuliskan `"gemini-pro" in verification_keys()` — sebuah nama model yang
+        # dihafal, tepat di bawah judul yang melarangnya. Suntingan slots.yaml yang sah (memindah
+        # decider ke Claude, karena `agy models` hari ini tidak memuat gemini-3.1-pro sama sekali)
+        # lalu membuatnya merah, dan itu bukan tes yang menangkap regresi: itu tes yang menangkap
+        # perubahan konfigurasi yang benar. Yang diuji sekarang adalah SIFATNYA: himpunan kunci
+        # harus sama dengan yang dinyatakan slots.yaml untuk peran verifier/decider, dan setiap
+        # kunci harus benar-benar ada di registri. Tidak ada nama model yang dihafal di mana pun.
+        _vk = verification_keys()
+        try:
+            import yaml as _yaml
+            _slots_doc = _yaml.safe_load((REPO / "config" / "slots.yaml").read_text())
+            _want = set()
+            for _team in _slots_doc.get("teams") or []:
+                if _team.get("id") != _slots_doc.get("active_team"):
+                    continue
+                for _r in _team.get("roles") or []:
+                    if str(_r.get("role_id") or "").startswith(("verifier", "decider", "resolver")) \
+                            and _r.get("registry_key"):
+                        _want.add(str(_r["registry_key"]))
+            _doc = {"slots": _slots_doc}
+            _unknown = sorted(set(_vk) - set(_want))
+        except Exception as _exc:  # noqa: BLE001 — tidak terbaca BUKAN berarti cocok
+            _want, _unknown = set(_vk), [f"slots.yaml tidak terbaca ({str(_exc)[:40]})"]
         check("kosakata verifikasi dibaca dari registri, bukan dari ingatan",
-              len(verification_keys()) >= 3 and "gemini-pro" in verification_keys()
-              and "gemini-verify" in verification_keys(), str(verification_keys()))
+              len(_vk) >= 3 and not _unknown and set(_vk) == _want,
+              f"registri={sorted(_vk)} slots={sorted(_want)} asing={_unknown}")
+        # Setiap kunci harus menunjuk mesin yang benar-benar terdaftar. Peran yang menunjuk kunci
+        # hantu akan membuat dispatch gagal jauh setelah pemutus antrean diloloskan.
+        try:
+            _reg = json.loads((REPO / "config" / "engines.json").read_text())
+            _eng = _reg.get("engines") or _reg
+            _ghost = sorted(k for k in _vk if k not in _eng)
+        except Exception as _exc:  # noqa: BLE001
+            _ghost = [f"engines.json tidak terbaca ({str(_exc)[:40]})"]
+        check("setiap kunci verifikasi menunjuk mesin yang terdaftar, bukan nama hantu",
+              not _ghost, str(_ghost)[:160])
         # `action_log` sudah dibuat lebih awal di suite ini (kolom: engine, ts, kind, tab, model,
         # exit_code, summary, raw_ref) dan dipakai tes heartbeat. Jadi blok ini TIDAK membuat atau
         # menjatuhkan tabel — hanya menyisipkan barisnya sendiri, dengan penanda yang bisa dihapus
@@ -3848,11 +4075,126 @@ def selftest():
     check("selftest tidak pernah menyentuh desktop: semua banner tercatat, none dikirim",
           all(isinstance(b, str) for _a, b, _u in banners) and banners, str(len(banners)))
 
+    idle_selftest(check)
+
     bad = [c for c in checks if not c[1]]
     for name, okval, detail in checks:
         print(f"[{'ok    ' if okval else 'GAGAL '}] {name}" + (f" — {detail}" if detail and not okval else ""))
     print(f"\nwork_order selftest: {len(checks) - len(bad)}/{len(checks)} sesuai")
     return 1 if bad else 0
+
+
+def idle_selftest(check):
+    """Tes dua sisi untuk kerja idle, di fixture SQLite sendiri.
+
+    Urutannya sengaja: sisi POSITIF dijalankan lebih dulu. Tanpa itu, setiap tes negatif di
+    bawah akan hijau untuk alasan yang salah — fungsi yang tidak pernah bisa membuat baris
+    juga tidak pernah bisa ditolak oleh keempat pagarnya.
+    """
+    import sqlite3 as _sq
+    tmp = Path(f"/tmp/idle_selftest_{now()}.db")
+    c = _sq.connect(str(tmp))
+    c.row_factory = sqlite3.Row
+    ev: list = []
+    emit = lambda a, **kw: ev.append((a, kw))
+    try:
+        ensure_schema(c, "SQLITE")
+        # `ensure_schema` sudah memasang baris id=1, jadi jendela ON-nya ditulis lewat UPDATE —
+        # INSERT ke sini akan menabrak UNIQUE(id) dan tesnya mati karena fixture, bukan karena kode.
+        c.execute("UPDATE autopilot_state SET mode='ON', on_epoch=?, until_epoch=?, level='dispatch' "
+                  "WHERE id=1", (now() - 60, now() + 7200))
+        # `skills_inventory` TIDAK dibuat `ensure_schema` — ia milik daemon, sama seperti
+        # `action_log`. Di produksi konsekuensinya sudah benar: tabel yang tidak ada membuat
+        # sumbernya tidak terbaca, dan kalau tidak ada satu pun sumber yang terbaca jalurnya
+        # melaporkan IDLE_DEBT_UNKNOWN (urgent), bukan mengarang pekerjaan. Di tes, tabelnya
+        # dibuat di sini supaya sisi positifnya menguji perilaku, bukan ketiadaan skema.
+        c.execute("CREATE TABLE IF NOT EXISTS skills_inventory (id INTEGER PRIMARY KEY, name TEXT, "
+                  "category TEXT, level INTEGER, description TEXT, file_path TEXT, "
+                  "auto_learned INTEGER DEFAULT 0, use_count INTEGER DEFAULT 0, "
+                  "created_at TIMESTAMP, updated_at TIMESTAMP)")
+        c.execute("INSERT INTO skills_inventory (name, category, level, description, file_path, "
+                  "auto_learned, use_count) VALUES ('idle_probe_skill', 'coding', 1, 'x', '', 0, 1)")
+        c.commit()
+
+        def _idle_count(where=""):
+            r = run(c, "SQLITE", f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin='idle' {where}")
+            return int((r[0]["n"] if r else 0) or 0)
+
+        pos = ensure_idle_item(c, "qoder", emit=emit)
+        check("kerja idle NYATA membuat satu baris ketika ada utang terukur "
+              "(kalau ini gagal, semua tes negatif di bawah tidak berarti apa pun)",
+              pos is not None and _idle_count() == 1
+              and pos.get("origin") == ORIGIN_IDLE and pos.get("phase") == "idle"
+              and pos.get("cli_engine") == "qoder", str(pos)[:120])
+        check("baris idle membawa bukti mengapa ia ada, bukan judul kosong",
+              any(a == "IDLE_QUEUED" and k.get("kind") == "skill_no_file" for a, k in ev),
+              str([a for a, _ in ev]))
+
+        ev.clear()
+        again = ensure_idle_item(c, "qoder", emit=emit)
+        check("satu baris idle terbuka sudah cukup — panggilan kedua tidak menumpuk yang kedua",
+              again is None and _idle_count("AND status='PENDING'") == 1
+              and any(a == "IDLE_ALREADY_OPEN" for a, _ in ev), str([a for a, _ in ev]))
+
+        # tutup barisnya, lalu biarkan mesin memegang pekerjaan hidup
+        # `completed_at` diisi dari Python: `now()` bukan fungsi SQLite, dan menulisnya di dalam
+        # SQL akan membuat tes gagal karena sintaks, bukan karena perilakunya.
+        _ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        run(c, "SQLITE", "UPDATE quest_tasks SET status='COMPLETED', completed_at=?, "
+            "evidence='tes' WHERE origin='idle'", (_ts,))
+        c.commit()
+        c.execute("INSERT INTO quest_tasks (title, status, cli_engine, origin, lease_epoch, claimed_by) "
+                  "VALUES ('pekerjaan nyata', 'WORKING', 'qoder', 'roadmap', ?, 'qoder')", (now() + 600,))
+        c.commit()
+        ev.clear()
+        busy = ensure_idle_item(c, "qoder", emit=emit)
+        check("mesin yang sedang memegang item hidup tidak ditumpuki kerja idle",
+              busy is None and _idle_count("AND status='PENDING'") == 0
+              and any(a == "IDLE_ENGINE_BUSY" for a, _ in ev), str([a for a, _ in ev]))
+        run(c, "SQLITE", "DELETE FROM quest_tasks WHERE title='pekerjaan nyata'")
+        c.commit()
+
+        for i in range(IDLE_MAX_ITEMS):
+            c.execute("INSERT INTO quest_tasks (title, status, cli_engine, origin, completed_at, "
+                      "evidence) VALUES (?, 'COMPLETED', 'qoder', 'idle', ?, 'tes')",
+                      (f"idle lama {i}", _ts))
+        c.commit()
+        ev.clear()
+        spent = ensure_idle_item(c, "qoder", emit=emit)
+        # `>=`, bukan `==`: baris idle dari tes positif di atas ikut COMPLETED sebelum dihapus,
+        # jadi penghitungnya bisa lewat dari angka pas. Yang diuji adalah "anggaran habis dan
+        # itu dilaporkan", bukan kebetulan angkanya persis sama dengan konstantanya.
+        check(f"anggaran idle ({IDLE_MAX_ITEMS}/jendela) menahan pengayaan-diri memakan malam",
+              spent is None and any(a == "IDLE_BUDGET_SPENT" and k.get("used", 0) >= IDLE_MAX_ITEMS
+                                    for a, k in ev), str([a for a, _ in ev]))
+        run(c, "SQLITE", "DELETE FROM quest_tasks WHERE origin='idle'")
+        c.execute("DELETE FROM skills_inventory")
+        c.commit()
+        ev.clear()
+        none = ensure_idle_item(c, "qoder", emit=emit)
+        check("tanpa utang yang terukur mesin DIAM — ia tidak membuat pekerjaan supaya terlihat sibuk",
+              none is None and _idle_count() == 0 and any(a == "IDLE_NO_DEBT" for a, _ in ev),
+              str([a for a, _ in ev]))
+
+        # dan baris idle yang dibuat harus melewati keranjang yang sama, bukan memotong jalan
+        c.execute("INSERT INTO skills_inventory (name, category, level, description, file_path, "
+                  "auto_learned, use_count) VALUES ('idle_probe_skill', 'coding', 1, 'x', '', 0, 1)")
+        c.commit()
+        row = ensure_idle_item(c, "qoder", emit=emit)
+        rid = int(row["id"])
+        c.execute("UPDATE autopilot_state SET mode='SEMI' WHERE id=1")
+        c.commit()
+        ok_semi, why_semi = claim(c, "SQLITE", rid, who="drainer", dirty=False, mode="SEMI")
+        check("SEMI menolak baris idle dengan alasan keranjang — pengayaan-diri hanya milik ON",
+              ok_semi is False and "perintah operator" in (why_semi or ""), str(why_semi)[:120])
+        c.execute("UPDATE autopilot_state SET mode='ON' WHERE id=1")
+        c.commit()
+        ok_on, why_on = claim(c, "SQLITE", rid, who="drainer", dirty=False, mode="ON")
+        check("ON mengklaim baris idle lewat `claim()` yang sama — tidak ada jalur kedua "
+              "dengan pagar sendiri", ok_on is True, str(why_on)[:120])
+    finally:
+        c.close()
+        tmp.unlink(missing_ok=True)
 
 
 def selftest_live():
