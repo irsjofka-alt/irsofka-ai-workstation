@@ -712,7 +712,7 @@ def record(subject_ref, engine, model, status, verdict, text, duration_ms):
             "turn_id": None, "tab": engine, "kind": "cross_verify", "model": model,
             "effort": "", "cwd": os.getcwd(), "tool": "cross_verify",
             "summary": f"verifikasi oleh {engine}: {status} verdict={verdict} :: "
-                       f"{(text or '')[:200]}",
+                       f"{(text or '')[:4000]}",
             "exit_code": 0 if status == "COMPLETED" else 1,
             "duration_ms": duration_ms,
             # `subject_ref` adalah berkas --file yang benar-benar dikirim ke model. Untuk subjek
