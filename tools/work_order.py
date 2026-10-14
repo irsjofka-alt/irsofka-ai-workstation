@@ -1579,7 +1579,8 @@ def shape_warning(shape):
             "menjalankannya lagi tanpa mengubah apa pun adalah cara loop mengunyah baris yang sama")
 
 
-def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None):
+def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None,
+              drop_stale_legacy=False):
     """Item berikutnya yang siap: semua dependensinya COMPLETED, dan lease-nya tidak dipegang orang.
 
     `UNAVAILABLE` tidak pernah ditawarkan, sama seperti `FAILED`: keduanya adalah kesimpulan yang
@@ -1600,11 +1601,22 @@ def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, f
     """
     return next(iter(ready_items(conn, engine, skip_blocked=skip_blocked,
                                  respect_due=respect_due, origin=origin,
-                                 for_engine=for_engine)), None)
+                                 for_engine=for_engine,
+                                 drop_stale_legacy=drop_stale_legacy)), None)
 
 
-def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None):
+def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None,
+                drop_stale_legacy=False):
     """SEMUA baris yang siap, dengan aturan yang sama persis dengan `next_item`.
+
+    `drop_stale_legacy` (keputusan 45, dijawab `qwen3.5:9b` pada rung `resolver-local`, 03:5x):
+    baris `origin='legacy'` yang masih berstatus kerja tapi lease-nya 0 adalah kepala antrean yang
+    mustahil selesai — `next_item` membacanya sebagai lease kedaluwarsa, jadi ia ditawarkan ulang
+    SETIAP tick, selalu kena cooldown, dan menahan baris operator yang nyata. Terukur: 14 baris
+    (id 222..244), dan `next_ready()` malam ini menyerahkan 223, sebuah rebrand UECP dari sebelum
+    skema ini ada. Yang dibuang di sini hanya yang sedemikian: legacy PENDING biasa TETAP
+    ditawarkan, dan pelaporan TIDAK memakai flag ini — baris yang ditahan harus tetap terlihat,
+    sama seperti baris ber-cooldown.
 
     Dipisah supaya pelaporan bisa memakai daftar ini. Sebelumnya `semi_status` menyusun
     `operator_queue`-nya sendiri dengan SQL mentah `status='PENDING'` — tanpa `norm()`, tanpa
@@ -1622,6 +1634,15 @@ def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None,
         if state in ("COMPLETED", "FAILED", "UNAVAILABLE"):
             continue
         if state in ("BLOCKED", "HUMAN", "PARKED") and skip_blocked:
+            continue
+        # KEDUA status kerja ikut, dan itu bukan kosmetik: `norm()` memetakan IN_PROGRESS warisan
+        # ke CLAIMED, bukan WORKING — jadi versi pertama filter ini hanya menulis WORKING,
+        # `next_ready()` tetap mengembalikan 222, dan keputusan 45 seolah sudah dikerjakan padahal
+        # tidak mengubah apa pun. Yang ditahan adalah klaim tanpa lease hidup: tidak ada yang
+        # memegangnya, dan tidak ada yang bisa menyelesaikannya lewat jalur ini.
+        if (drop_stale_legacy and state in ("WORKING", "CLAIMED")
+                and (r.get("origin") or ORIGIN_LEGACY) == ORIGIN_LEGACY
+                and int(r.get("lease_epoch") or 0) <= now()):
             continue
         if origin is not None and (r.get("origin") or ORIGIN_LEGACY) != origin:
             continue
@@ -2105,13 +2126,33 @@ def normalise_options(options):
 
 
 def parse_options_arg(raw):
-    """`--options` menerima label polos (A|B) dan JSON ([{"label":...,"evidence":...}])."""
+    """`--options` menerima label polos (A|B, dan A,B,C) atau JSON ([{"label":...,"evidence":...}]).
+
+    Pemisah koma/semicolon TIDAK ada di versi pertama, dan hilangnya itu berbiaya nyata: empat
+    keputusan (41, 42, 43, 44) dikirim dengan `--options 'A,B,C'` dan tersimpan sebagai SATU
+    pilihan berlabel "A,B,C". `decision_prompt` memberi nomor pilihan mulai dari 1, jadi resolver
+    melihat daftar berisi satu butir sementara pertanyaan berbicara dalam huruf — ia tidak bisa
+    menjawab
+    dengan nomor yang ada, dan `parse_choice` hanya menerima digit. Hasil terukur: dua tingkat
+    resolver mengembalikan jawaban dan keduanya dibuang parser, satu tingkat UNAVAILABLE karena
+    meter basi, dan pertanyaan berakhir ESCALATED. Operator menamai ini dengan tepat:
+    "kalau TIME OUT berarti tool kamu salah".
+    """
     s = (raw or "").strip()
     if not s:
         return []
     if s.startswith("["):
         return json.loads(s)
-    return [o for o in s.split("|") if o.strip()]
+    parts = [p for p in re.split(r"[|\n]", s) if p.strip()]
+    if len(parts) == 1:
+        # Satu token: boleh jadi satu label panjang yang memang mengandung koma (biarkan apa
+        # adanya), boleh jadi daftar huruf pendek yang dipisah koma. Yang terakhir adalah bentuk
+        # yang dipakai orang di CLI, dan memisahkannya lebih murah daripada mengirim pertanyaan
+        # yang secara struktural tidak bisa dijawab.
+        toks = [t.strip() for t in re.split(r"[;,]", parts[0]) if t.strip()]
+        if len(toks) >= 2 and all(len(t) <= 4 for t in toks):
+            return toks
+    return parts
 
 
 def resolver_rungs():
@@ -2185,11 +2226,20 @@ def parse_choice(text, count):
     if not text:
         return None, "jawaban kosong"
     m = re.search(r"PILIHAN\s*[:=]\s*(?:nomor\s*)?(\d+)", text, re.I)
+    letter = None
     if not m:
+        # Huruf diterima juga. Pertanyaan ditulis orang dalam huruf (A/B/C) sementara daftar yang
+        # dilihat resolver bernomor; menjawab "PILIHAN: B" adalah jawaban yang benar tentang
+        # pilihan nomor dua, dan membuangnya karena bentuknya huruf adalah kerusakan alat, bukan
+        # kerusakan jawaban — persis yang terjadi pada dua tingkat resolver malam ini.
+        lm = re.search(r"PILIHAN\s*[:=]\s*([A-Ea-e])\b", text)
+        if lm:
+            letter = ord(lm.group(1).upper()) - 64
+    if not m and letter is None:
         if re.search(r"PILIHAN\s*[:=]\s*TIDAK", text, re.I):
             return None, "resolver menolak memilih (PILIHAN: TIDAK)"
         return None, "tidak ada baris 'PILIHAN: <nomor>' — jawaban tidak bisa dibaca sebagai keputusan"
-    idx = int(m.group(1))
+    idx = int(m.group(1)) if m else letter
     if not 1 <= idx <= count:
         return None, f"nomor {idx} di luar 1..{count}"
     reason = re.search(r"ALASAN\s*[:=]\s*(.+)", text, re.I)
@@ -2226,6 +2276,14 @@ def broker(conn, engine, decision_id, timeout=240):
     opts = normalise_options(json.loads(d["options"] or "[]"))
     if not opts:
         return False, "pertanyaan tanpa pilihan — broker bukan tempat menebak apa opsinya"
+    if len(opts) < 2:
+        # Satu pilihan bukan sebuah pilihan. Ini pagar yang seharusnya menangkap empat keputusan
+        # malam ini lebih awal: `--options 'A,B,C'` disimpan sebagai SATU butir, dan yang dikirim
+        # ke resolver adalah daftar bernomor satu baris sementara pertanyaannya berbicara huruf.
+        # Dua tingkat menjawab, keduanya dibuang parser, dan pertanyaan mati sebagai ESCALATED —
+        # dibayar dengan waktu operator yang sedang menunggu, bukan dengan kuota.
+        return False, (f"hanya {len(opts)} pilihan — sebuah keputusan butuh paling sedikit dua; "
+                       "pisahkan dengan '|' atau koma (`--options 'A,B,C'`)")
     prompt = decision_prompt(d["question"], opts)
 
     rungs = resolver_rungs()
@@ -3685,6 +3743,55 @@ def selftest():
         empty = decide(conn, "SQLITE", "A atau B?", [], weight="light")
         ok, msg = broker(conn, "SQLITE", empty[0]["id"])
         check("pertanyaan tanpa pilihan ditolak, tidak ditebak", not ok and "pilihan" in msg, msg)
+
+        # --- empat keputusan yang mati karena bentuk opsi, bukan karena isinya ------------------
+        # Terukur 2026-10-15 03:1x: keputusan 41/42/43/44 semua tersimpan sebagai SATU opsi
+        # berlabel "A,B,C", karena `--options` dulu hanya memecah pada '|'. Resolver melihat daftar
+        # bernomor satu butir sementara pertanyaannya berbicara huruf, jadi dua tingkat menjawab
+        # dan keduanya dibuang parser. Yang diuji di bawah adalah tiga lapis tambalnya: pemisah,
+        # pembacaan huruf, dan penolakan lebih awal.
+        check("--options 'A,B,C' menjadi TIGA pilihan, dan label panjang yang mengandung koma "
+              "TIDAK dipecah (label orang utuh, bukan bahan split)",
+              [o if isinstance(o, str) else o.get("label") for o in parse_options_arg("A,B,C")]
+              == ["A", "B", "C"]
+              and len(parse_options_arg("park 14 baris, tanpa menghapus isi")) == 1,
+              str(parse_options_arg("A,B,C")))
+        idx_b, why_b = parse_choice("PILIHAN: B\nALASAN: paling kecil kerusakan", 3)
+        idx_2, _w2 = parse_choice("PILIHAN: 2\nALASAN: sama", 3)
+        check("jawaban huruf dibaca sebagai nomor pilihan yang dimaksud — 'PILIHAN: B' == 2, dan "
+              "bentuk digit tidak berubah", idx_b == 2 and idx_2 == 2 and "kecil" in why_b,
+              f"B->{idx_b} 2->{idx_2}")
+        idx_oob, why_oob = parse_choice("PILIHAN: E", 3)
+        check("huruf di luar daftar tetap ditolak dengan nama, tidak diam-diam jadi pilihan",
+              idx_oob is None and "di luar" in (why_oob or ""), str(why_oob))
+
+        # --- keputusan 45: kepala antrean legacy tidak boleh ditawarkan --------------------------
+        # Versi pertama filter ini hanya menyebut "WORKING" dan karena itu TIDAK melakukan apa
+        # pun: `norm()` memetakan IN_PROGRESS warisan ke CLAIMED, jadi `next_ready()` tetap
+        # mengembalikan baris yang sama dan perbaikannya hanya tampak di diff. Yang diuji di
+        # bawah adalah perbedaan itu, plus sisi yang tidak boleh ikut terbuang.
+        conn.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin,lease_epoch) "
+                     "VALUES ('legacy-stale','IN_PROGRESS','qoder','legacy',0)")
+        conn.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin,lease_epoch,claimed_by)"
+                     "VALUES ('legacy-dikerjakan','IN_PROGRESS','qoder','legacy',?, 'qoder')",
+                     (now() + 600,))
+        conn.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin) "
+                     "VALUES ('legacy-pending','PENDING','qoder','legacy')")
+        conn.commit()
+        keep = {r["title"] for r in ready_items(conn, "SQLITE", drop_stale_legacy=True)}
+        offer = {r["title"] for r in ready_items(conn, "SQLITE")}
+        check("legacy IN_PROGRESS tanpa lease hidup DIBUANG dari penawaran, tapi legacy PENDING "
+              "dan legacy yang sedang dikerjakan orang TETAP ada — dan laporan tanpa flag masih "
+              "melihat yang dibuang",
+              "legacy-stale" not in keep and "legacy-pending" in keep and "legacy-dikerjakan" in keep
+              and "legacy-stale" in offer, f"keep={sorted(keep)}")
+        one_opt = decide(conn, "SQLITE", "Satu pilihan?", ["cuma ini"], weight="heavy")
+        one_id = one_opt[2] if len(one_opt) > 2 else None
+        if one_id:
+            b_ok, b_msg = broker(conn, "SQLITE", one_id)
+            check("broker menolak pertanyaan satu pilihan SEBELUM menghabiskan dispatch — "
+                  "empat keputusan malam ini seharusnya mati di sini, bukan di resolver",
+                  b_ok is False and "paling sedikit dua" in (b_msg or ""), str(b_msg)[:120])
 
         # Anak tangga yang tidak bisa dibaca harus dilewati, dan kalau semuanya habis
         # pertanyaannya mendarat ESCALATED — BUKAN dijawab oleh mesin lain yang kebetulan ada.

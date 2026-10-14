@@ -133,13 +133,19 @@ def wo_p(engine):
     return "%s" if engine == "POSTGRESQL" else "?"
 
 
-def next_ready(conn, engine, origin=None):
+def next_ready(conn, engine, origin=None, drop_stale_legacy=True):
     """Item berikutnya yang siap, dengan batas asal yang diminta pemanggil.
 
     `origin` diteruskan, tidak disaring di sini: "apa berikutnya" punya satu pemilik (`next_item`)
     dan drainer hanya meminjamnya. Menyaring di sisi drainer membuat dua definisi antrean.
+
+    `drop_stale_legacy` default True karena fungsi ini adalah jalur PENAWARAN, dan kepala antrean
+    legacy tanpa lease tidak bisa diselesaikan oleh jalur mana pun (keputusan 45, dijawab
+    `qwen3.5:9b`). Laporan tidak memanggil fungsi ini untuk daftar — ia memakai `ready_items`
+    tanpa flag itu, jadi baris yang ditahan tetap terlihat orang.
     """
-    return wo.next_item(conn, engine, respect_due=True, origin=origin)
+    return wo.next_item(conn, engine, respect_due=True, origin=origin,
+                        drop_stale_legacy=drop_stale_legacy)
 
 
 # --- tulisan ------------------------------------------------------------------
