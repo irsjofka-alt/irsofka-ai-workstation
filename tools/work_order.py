@@ -512,6 +512,52 @@ def idle_debt_menu(conn, engine, brain_root=None):
     except Exception as exc:  # noqa: BLE001
         unreadable.append(f"skills_inventory ({str(exc)[:40]})")
 
+    # Sumber keempat: integritas indeks skill. Ini bukan dugaan — sesi ini sendiri menelan judul
+    # seksi yang sama empat kali karena menyunting dengan heading sebagai jangkar, dan tidak ada
+    # satu pun pemeriksaan yang menangkapnya sampai manusia membacanya. Yang diukur di sini murni
+    # dari disk: berkas .md yang tidak disebut indeksnya sendiri, berkas yang disebut tapi tidak
+    # ada, dan daftar bernomor yang menggantung tanpa judul di atasnya.
+    try:
+        skills_root = root / "skills"
+        if skills_root.is_dir():
+            for pack in sorted(p for p in skills_root.iterdir() if p.is_dir()):
+                # Direktori yang berisi subdirektori adalah WADAH, bukan paket — `legacy/`
+                # menampung paket-paket lama, bukan paket itu sendiri. Menghitungnya sebagai paket
+                # menghasilkan temuan palsu "legacy/ tidak punya SKILL.md", dan detektor yang
+                # menghasilkan sampah akan berhenti dipercaya orang yang membacanya.
+                if any(child.is_dir() for child in pack.iterdir()):
+                    continue
+                idx = pack / "SKILL.md"
+                if not idx.is_file():
+                    items.append(("skill_no_index",
+                                  f"Paket skill {pack.name}/ tidak punya SKILL.md sebagai pintu "
+                                  f"masuk, jadi tidak ada yang tahu kapan harus membukanya"))
+                    continue
+                text = idx.read_text(encoding="utf-8", errors="replace")
+                for md in sorted(pack.glob("*.md")):
+                    if md.name == "SKILL.md":
+                        continue
+                    if md.name not in text:
+                        items.append(("skill_unlisted",
+                                      f"{pack.name}/{md.name} ada di disk tapi tidak disebut "
+                                      f"SKILL.md — tidak akan pernah terbaca oleh mesin mana pun"))
+                for ref in re.findall(r"`([0-9A-Za-z_\-]+\.md)`", text):
+                    if not (pack / ref).is_file():
+                        items.append(("skill_missing",
+                                      f"SKILL.md {pack.name}/ merujuk {ref} yang tidak ada di disk"))
+                lines = text.split("\n")
+                for i, ln in enumerate(lines):
+                    if re.match(r"^\d+\. \*\*", ln):
+                        window = "\n".join(lines[max(0, i - 6):i])
+                        if not re.search(r"^#{1,3} |^\d+\. ", window, re.M):
+                            items.append(("skill_orphan_list",
+                                          f"{pack.name}/SKILL.md punya daftar bernomor tanpa judul "
+                                          f"di atasnya (baris ~{i + 1}) — suntingan yang menelan "
+                                          f"heading-nya"))
+            sources_ok += 1
+    except Exception as exc:  # noqa: BLE001
+        unreadable.append(f"brain/skills ({str(exc)[:40]})")
+
     return {"ok": sources_ok > 0, "why": "; ".join(unreadable) or None,
             "partial": bool(unreadable), "items": items}
 
@@ -4240,6 +4286,9 @@ def idle_selftest(check):
     c.row_factory = sqlite3.Row
     ev: list = []
     emit = lambda a, **kw: ev.append((a, kw))
+    import tempfile as _tf
+    _broot = Path(_tf.mkdtemp(prefix="idle_brain_")) / "brain"
+    _broot.mkdir(parents=True, exist_ok=True)
     try:
         ensure_schema(c, "SQLITE")
         # `ensure_schema` sudah memasang baris id=1, jadi jendela ON-nya ditulis lewat UPDATE —
@@ -4270,7 +4319,7 @@ def idle_selftest(check):
             r = run(c, "SQLITE", f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin='idle' {where}")
             return int((r[0]["n"] if r else 0) or 0)
 
-        pos = ensure_idle_item(c, "SQLITE", "qoder", emit=emit)
+        pos = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
         check("kerja idle NYATA membuat satu baris ketika ada utang terukur "
               "(kalau ini gagal, semua tes negatif di bawah tidak berarti apa pun)",
               pos is not None and _idle_count() == 1
@@ -4281,7 +4330,7 @@ def idle_selftest(check):
               str([a for a, _ in ev]))
 
         ev.clear()
-        again = ensure_idle_item(c, "SQLITE", "qoder", emit=emit)
+        again = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
         check("satu baris idle terbuka sudah cukup — panggilan kedua tidak menumpuk yang kedua",
               again is None and _idle_count("AND status='PENDING'") == 1
               and any(a == "IDLE_ALREADY_OPEN" for a, _ in ev), str([a for a, _ in ev]))
@@ -4297,7 +4346,7 @@ def idle_selftest(check):
                   "VALUES ('pekerjaan nyata', 'WORKING', 'qoder', 'roadmap', ?, 'qoder')", (now() + 600,))
         c.commit()
         ev.clear()
-        busy = ensure_idle_item(c, "SQLITE", "qoder", emit=emit)
+        busy = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
         check("mesin yang sedang memegang item hidup tidak ditumpuki kerja idle",
               busy is None and _idle_count("AND status='PENDING'") == 0
               and any(a == "IDLE_ENGINE_BUSY" for a, _ in ev), str([a for a, _ in ev]))
@@ -4315,7 +4364,7 @@ def idle_selftest(check):
                       (f"idle lama {i} {_st}", _st, _ts))
         c.commit()
         ev.clear()
-        spent = ensure_idle_item(c, "SQLITE", "qoder", emit=emit)
+        spent = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
         # `>=`, bukan `==`: baris idle dari tes positif di atas ikut selesai sebelum dihapus, jadi
         # penghitungnya bisa lewat dari angka pas. Yang diuji adalah "anggaran habis dan itu
         # dilaporkan", bukan kebetulan angkanya persis sama dengan konstantanya.
@@ -4327,7 +4376,7 @@ def idle_selftest(check):
         c.execute("DELETE FROM skills_inventory")
         c.commit()
         ev.clear()
-        none = ensure_idle_item(c, "SQLITE", "qoder", emit=emit)
+        none = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
         check("tanpa utang yang terukur mesin DIAM — ia tidak membuat pekerjaan supaya terlihat sibuk",
               none is None and _idle_count() == 0 and any(a == "IDLE_NO_DEBT" for a, _ in ev),
               str([a for a, _ in ev]))
@@ -4336,7 +4385,7 @@ def idle_selftest(check):
         c.execute("INSERT INTO skills_inventory (name, category, level, description, file_path, "
                   "auto_learned, use_count) VALUES ('idle_probe_skill', 'coding', 1, 'x', '', 0, 1)")
         c.commit()
-        row = ensure_idle_item(c, "SQLITE", "qoder", emit=emit)
+        row = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
         rid = int(row["id"])
         c.execute("UPDATE autopilot_state SET mode='SEMI' WHERE id=1")
         c.commit()
