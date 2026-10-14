@@ -186,6 +186,7 @@
         "agy",
         "--model",
         "{model}",
+        "--dangerously-skip-permissions",
         "--print",
         "{prompt}",
         "--output-format",
