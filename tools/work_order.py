@@ -1162,8 +1162,97 @@ def nudge_inject(conn, engine, item_id):
     return True, f"inject {after}/{MAX_INJECT}"
 
 
-def finish(conn, engine, item_id, status, evidence=None, reason=None):
-    """COMPLETED menuntut bukti. Laporan tidak boleh ditulis tangan (§12)."""
+# Kontrak lanjutan untuk FULL AUTO. Ketika sebuah item selesai dan tidak ada utang terukur yang
+# menunggu, mesin TIDAK berhenti: satu putaran dari daftar ini diantrikan. Alasannya bukan
+# kesibukan — dengan ON dinyalakan, satu komputer diserahkan ke mesin ini, dan jam yang tidak
+# dipakai untuk menajamkan diri sendiri adalah jam yang terbuang. Yang dijaga di sini adalah
+# bentuknya: tiap kontrak harus bisa DIBUKTIKAN selesai atau gagal, bukan "perbaiki terus".
+# Rotasi dihitung dari berapa banyak baris idle yang sudah selesai, jadi putaran berikutnya
+# mengerjakan hal yang berbeda, dan `IDLE_MAX_ITEMS` tetap langit-langit yang sama.
+FOLLOWUP_CONTRACTS = [
+    ("sharpen_skill",
+     "Tajamkan satu paket skill: ambil paket dengan dokumen terbanyak yang tidak pernah dirujuk "
+     "indeksnya, verifikasi SATU klaim teknis di dalamnya terhadap mesin ini, lalu koreksi atau "
+     "tandai klaim itu sebagai belum terukur. Bukti: nama berkas + klaim + hasil pengukuran."),
+    ("sharpen_brain",
+     "Pertajam brain: baca ulang satu catatan keputusan lama di brain/memory, cocokkan terhadap "
+     "isi database hari ini, dan tulis baris koreksi kalau kenyataan sudah bergerak. Bukti: key "
+     "catatan + nomor baris DB yang membantunya."),
+    ("peer_audit",
+     "Diskusi dengan agen lain: kirim satu klaim yang belum diuji ke pasangan lewat ask_peer, "
+     "tunggu jawabannya, lalu tandai ANSWERED atau DISPUTED dengan alasan. Bukti: id pesan + "
+     "vonis."),
+    ("gate_repair",
+     "Perbaiki satu gerbang roadmap yang MERAH: cari quest_tasks dengan check_command, jalankan, "
+     "dan tangani yang gagal — seperti item yang sedang dikerjakan, bukan seperti laporan. Bukti: "
+     "angka keluar gerbang sebelum dan sesudah."),
+    ("mcp_sharpen",
+     "Periksa satu permukaan MCP terhadap sumbernya: bandingkan jumlah tool/aksi yang ditulis "
+     "dokumen dengan yang dihitung dari kode, dan koreksi dokumennya. Bukti: kedua angka."),
+]
+
+
+def queue_followup(conn, backend, cli_engine, emit=None):
+    """Satu baris idle berisi kontrak penajaman, dengan pagar yang sama seperti utang terukur.
+
+    Dipanggil hanya ketika TIDAK ada utang terukur — jadi utang nyata selalu menang atas
+    pekerjaan yang dipilih sendiri, dan kontrak ini adalah lantai, bukan dalih.
+    """
+    emit = emit or (lambda *a, **kw: None)
+    ph = "%s" if backend == "POSTGRESQL" else "?"
+    if not cli_engine:
+        emit("IDLE_DEBT_UNKNOWN", why="item selesai tanpa cli_engine — lanjutan tidak tahu ke mana")
+        return None
+    try:
+        open_idle = run(conn, backend,
+                        f"SELECT id FROM quest_tasks WHERE origin={ph} "
+                        f"AND status IN ('PENDING','CLAIMED','WORKING') LIMIT 1", (ORIGIN_IDLE,)) or []
+        if open_idle:
+            emit("IDLE_ALREADY_OPEN", item=int(open_idle[0]["id"]))
+            return None
+        done = run(conn, backend,
+                   f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin={ph} "
+                   f"AND status='COMPLETED'", (ORIGIN_IDLE,)) or []
+        used = int((done[0]["n"] if done else 0) or 0)
+        if used >= IDLE_MAX_ITEMS:
+            emit("IDLE_BUDGET_SPENT", used=used, cap=IDLE_MAX_ITEMS)
+            return None
+        kind, title = FOLLOWUP_CONTRACTS[used % len(FOLLOWUP_CONTRACTS)]
+        summary = (f"lanjutan otomatis setelah item selesai — tidak ada utang terukur yang menunggu, "
+                   f"jadi kontrak penajaman '{kind}' diantrikan; anggaran idle sisa "
+                   f"{IDLE_MAX_ITEMS - used - 1}")
+        if backend == "POSTGRESQL":
+            rows = run(conn, backend,
+                       "INSERT INTO quest_tasks (title, status, phase, summary, cli_engine, origin, "
+                       "ws_path) VALUES (%s, 'PENDING', 'followup', %s, %s, %s, %s) RETURNING id",
+                       (title[:255], summary[:2000], cli_engine, ORIGIN_IDLE, str(REPO)))
+            new_id = int(rows[0]["id"]) if rows else None
+        else:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO quest_tasks (title, status, phase, summary, cli_engine, origin, "
+                        "ws_path) VALUES (?, 'PENDING', 'followup', ?, ?, ?, ?)",
+                        (title[:255], summary[:2000], cli_engine, ORIGIN_IDLE, str(REPO)))
+            conn.commit()
+            new_id = cur.lastrowid
+            cur.close()
+        if not new_id:
+            return None
+        emit("FOLLOWUP_QUEUED", item=int(new_id), kind=kind, used=used + 1, cap=IDLE_MAX_ITEMS)
+        return get_item(conn, backend, int(new_id))
+    except Exception as exc:  # noqa: BLE001
+        emit("IDLE_DEBT_UNKNOWN", why=f"lanjutan tidak bisa diantrikan ({str(exc)[:60]})")
+        return None
+
+
+def finish(conn, engine, item_id, status, evidence=None, reason=None, followup=_MEASURE,
+           emit=None):
+    """COMPLETED menuntut bukti. Laporan tidak boleh ditulis tangan (§12).
+
+    `emit` diteruskan sampai ke `queue_followup`. Tanpa itu peristiwa "DONE -> lanjut" hilang tanpa
+    suara: barisnya tetap ada, tapi tidak ada satu pun log yang mengatakan mengapa baris itu muncul
+    — dan baris lanjutan yang tidak bisa dijelaskan asal-usulnya persis laporan yang tidak boleh
+    ditulis tangan.
+    """
     if status == "COMPLETED" and not (evidence or "").strip():
         return False, "COMPLETED tanpa evidence ditolak: jalankan check_command-nya"
     item = get_item(conn, engine, item_id)
@@ -1183,6 +1272,17 @@ def finish(conn, engine, item_id, status, evidence=None, reason=None):
         decide(conn, engine,
                f"Item «{item['title']}» berhenti di ambang: {reason or 'alasan tidak tercatat'}",
                [], "heavy", item_id)
+    if status == "COMPLETED" and (item.get("origin") or ORIGIN_LEGACY) != ORIGIN_IDLE:
+        # DONE -> lanjut, bukan DONE -> diam. Hanya di ON: di SEMI yang menggerakkan mesin adalah
+        # orang, dan pekerjaan yang dipilih sendiri di bawah mode itu adalah penyalahgunaan nama
+        # yang sama. Baris idle yang selesai TIDAK mengantrikan penerusnya — itu loop tanpa rem:
+        # setiap lanjutan akan melahirkan lanjutan berikutnya selamanya.
+        want = followup
+        if want is _MEASURE:
+            ap = autopilot(conn, engine) or {}
+            want = str(ap.get("mode") or "").upper() == "ON"
+        if want:
+            queue_followup(conn, engine, item.get("cli_engine"), emit=emit)
     return True, f"{item['title']} -> {status}"
 
 
@@ -2798,24 +2898,27 @@ def push_gate(events_path=None):
     # Pindah ke sini bukan pelonggaran: klaim operator yang selama ini tersumbat jadi jalan, dan
     # yang menahan sekarang adalah gerbang yang menghadap keluar.
     dirty_now = tree_dirty()
+    blocking = []
     if dirty_now is True:
-        reasons.append("working tree kotor — dorong hanya setelah pekerjaan yang belum di-commit "
-                       "di-commit atau dikembalikan, supaya riwayat publik tidak menyapu kerja orang")
+        blocking.append("working tree kotor — dorong hanya setelah pekerjaan yang belum di-commit "
+                        "di-commit atau dikembalikan, supaya riwayat publik tidak menyapu kerja orang")
     elif dirty_now is None:
-        reasons.append("git tidak terbaca — UNKNOWN, dan UNKNOWN tidak pernah berarti boleh dorong")
+        blocking.append("git tidak terbaca — UNKNOWN, dan UNKNOWN tidak pernah berarti boleh dorong")
     if undelivered:
         reasons.append(f"{len(undelivered)} commit belum berangkat TANPA vonis dan tanpa catatan "
                        f"ditahan (contoh {undelivered[0][:12]})")
     # `git push` tidak memilih per-sha: ia mendorong SELURUH branch. Jadi satu commit yang sengaja
-    # DITAHAN tidak bisa "diloloskan" dengan cara tidak dihitung — selama ia masih ada di belakang
-    # HEAD, setiap dorongan akan ikut membawanya. Versi sebelumnya memperlakukan `held` sebagai
-    # kebalikan dari `undelivered`, sehingga kombinasi "satu commit diloloskan + satu ditahan"
-    # mengembalikan ok=True dan pemanggil yang patuh justru mendorong yang ditahan.
+    # DITAHAN tidak bisa "lulus" dengan cara tidak dihitung — selama ia masih di belakang HEAD,
+    # setiap dorongan ikut membawanya. Versi sebelumnya mengecualikan `held` dari `undelivered`,
+    # sehingga keadaan "satu diloloskan + satu ditahan" mengembalikan ok=True.
+    # Tapi ia masuk ke `blocking`, BUKAN ke `reasons`: `declared` menjawab "apakah nasib setiap
+    # commit tercatat", dan commit yang ditahan NASIBNYA tercatat — justru catatan `push_held`-nya
+    # yang membuatnya ditahan. Mencampur keduanya membuat satu kata berarti dua hal, dan itu §12.
     held_pending = [x for x in unpushed if x[:12] in held]
     if held_pending:
-        reasons.append(f"{len(held_pending)} commit belum berangkat DAN DITAHAN dengan sengaja "
-                       f"(contoh {held_pending[0][:12]}) — dorong branch akan tetap membawanya, "
-                       "jadi tidak ada dorongan yang aman sampai commit itu dihapus atau diloloskan")
+        blocking.append(f"{len(held_pending)} commit belum berangkat DAN DITAHAN dengan sengaja "
+                        f"(contoh {held_pending[0][:12]}) — dorong branch tetap membawanya, jadi "
+                        "tidak ada dorongan yang aman sampai commit itu dihapus atau diloloskan")
     # Sejarah TIDAK diadili di sini. `shipped_without` hampir selalu besar — semua commit sebelum
     # F10.9 lahir berangkat tanpa peristiwa verdict — dan membuat pagar merah permanen untuk keadaan
     # yang tidak bisa lagi diubah lebih buruk daripada tidak punya pagar: orang belajar melewati
@@ -2825,15 +2928,17 @@ def push_gate(events_path=None):
     # kesembilan membaca `ok: True` pada keadaan "semua commit DITAHAN" sebagai "semua commit boleh
     # didorong". Satu nama untuk dua keadaan berbeda adalah dua laporan yang boleh berbeda (§12),
     # dan yang salah baca di sini adalah pagar yang menahan kode keluar dari mesin orang lain.
-    return {"declared": not reasons, "ok": not reasons and not undelivered and bool(cleared),
+    return {"declared": not reasons,
+            "ok": not reasons and not blocking and bool(cleared),
             "tree_dirty": dirty_now,
+            "held_pending": [x[:12] for x in held_pending][:5],
             "pushable": [x for x in unpushed if x[:12] in cleared][:5],
             "unpushed": len(unpushed),
             "cleared": len(cleared), "held": len(held),
             "undelivered": undelivered[:5],
             "shipped_without": len(shipped_without),
             "shipped_without_example": shipped_without[0][:12] if shipped_without else None,
-            "why": reasons}
+            "why": reasons + blocking, "blocking": blocking}
 
 
 def subprocess_run_sha():
@@ -4449,6 +4554,58 @@ def idle_selftest(check):
               "backend tidak menulis baris yang menunjuk mesin hantu",
               bogus is None and int((leaked[0]["n"] if leaked else 0) or 0) == 0,
               str([a for a, _ in ev])[:160])
+
+        # --- DONE -> lanjut, bukan DONE -> diam -------------------------------------------------
+        run(c, "SQLITE", "DELETE FROM quest_tasks WHERE origin='idle'")
+        c.commit()
+        c.execute("INSERT INTO skills_inventory (name,category,level,description,file_path,"
+                  "auto_learned,use_count) VALUES ('probe2','coding',1,'x','',0,1)")
+        c.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin) "
+                  "VALUES ('pekerjaan nyata selesai','PENDING','qoder','roadmap')")
+        c.commit()
+        real_id = int(c.execute("SELECT id FROM quest_tasks WHERE title='pekerjaan nyata selesai'"
+                                ).fetchone()[0])
+        ev.clear()
+        okf, _msg = finish(c, "SQLITE", real_id, "COMPLETED", evidence="gerbang hijau 82/82",
+                           followup=True, emit=emit)
+        fu = run(c, "SQLITE", "SELECT id,phase,origin FROM quest_tasks WHERE phase='followup'") or []
+        check("DONE mengantrikan lanjutan: satu item selesai di ON langsung melahirkan putaran "
+              "berikutnya, bukan diam", okf and len(fu) == 1
+              and fu[0]["origin"] == ORIGIN_IDLE and any(a == "FOLLOWUP_QUEUED" for a, _ in ev),
+              str([a for a, _ in ev])[:150])
+
+        # baris IDLE yang selesai tidak boleh melahirkan penerusnya
+        run(c, "SQLITE", "DELETE FROM quest_tasks WHERE phase='followup'")
+        c.commit()
+        c.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin) "
+                  "VALUES ('idle selesai','PENDING','qoder','idle')")
+        c.commit()
+        idle_id = int(c.execute("SELECT id FROM quest_tasks WHERE title='idle selesai'"
+                                ).fetchone()[0])
+        ev.clear()
+        finish(c, "SQLITE", idle_id, "COMPLETED", evidence="selesai", followup=True, emit=emit)
+        still = run(c, "SQLITE", "SELECT COUNT(*) AS n FROM quest_tasks WHERE phase='followup'")
+        check("baris idle yang selesai TIDAK melahirkan penerusnya — kalau iya, setiap lanjutan "
+              "akan mengantrikan lanjutan berikutnya selamanya",
+              int((still[0]["n"] if still else 0) or 0) == 0, str([a for a, _ in ev])[:150])
+
+        # dan anggaran tetap langit-langitnya
+        for i in range(IDLE_MAX_ITEMS):
+            c.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin,completed_at,"
+                      "evidence) VALUES (?, 'COMPLETED', 'qoder', 'idle', ?, 'x')",
+                      (f"idle penuh {i}", _ts))
+        c.commit()
+        c.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin) "
+                  "VALUES ('satu lagi','PENDING','qoder','roadmap')")
+        c.commit()
+        another = int(c.execute("SELECT id FROM quest_tasks WHERE title='satu lagi'").fetchone()[0])
+        ev.clear()
+        finish(c, "SQLITE", another, "COMPLETED", evidence="x", followup=True, emit=emit)
+        over = run(c, "SQLITE", "SELECT COUNT(*) AS n FROM quest_tasks WHERE phase='followup'")
+        check("lanjutan tetap kena langit-langit anggaran — penajaman diri tidak boleh memakan "
+              "malam tanpa batas",
+              int((over[0]["n"] if over else 0) or 0) == 0
+              and any(a == "IDLE_BUDGET_SPENT" for a, _ in ev), str([a for a, _ in ev])[:150])
     finally:
         c.close()
         tmp.unlink(missing_ok=True)

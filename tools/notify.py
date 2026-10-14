@@ -66,7 +66,10 @@ PROGRESS = {"WORK_DISPATCHED", "GATE_PASSED", "CONTINUE_SENT", "ANSWER_SENT", "C
             "SEMI_INJECTED",
             # Baris kerja idle baru dibuka. Bukan alarm: ini jawaban atas "lalu untuk apa ON",
             # dan kejadiannya tetap dilaporkan lewat WORK_DISPATCHED saat benar-benar terkirim.
-            "IDLE_QUEUED"}
+            "IDLE_QUEUED",
+            # Sebuah item selesai dan penerusnya langsung diantrikan — inilah peristiwa "DONE ->
+            # lanjut" yang operator minta, jadi ia harus terlihat sebagai kemajuan, bukan catatan.
+            "FOLLOWUP_QUEUED"}
 # Peristiwa yang layak masuk banner tanpa alarming dan tanpa ditahan: tercatat sebagai pilihan,
 # bukan sebagai sisa yang tidak kebagian keranjang.
 NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD", "ENGINE_BUSY",
