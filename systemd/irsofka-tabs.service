@@ -1,6 +1,6 @@
 [Unit]
 Description=Irsofka AI Workstation - Persistent PTY Host (tmux server di luar cgroup daemon)
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 After=default.target irsofka-ai-workstation.service
 
 [Service]

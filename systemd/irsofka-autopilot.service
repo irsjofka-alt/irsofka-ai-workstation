@@ -3,7 +3,7 @@
 # Unit ini TIDAK di-enable oleh install_units.sh. Mengaktifkannya adalah keputusan orang yang
 # bangun, bukan keputusan yang bisa dibuat kode: lihat `arm` di tools/work_order.py.
 Description=Irsofka AI Workstation - Autopilot drainer tick
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 After=network-online.target irsofka-ai-workstation.service
 Wants=irsofka-ai-workstation.service
 

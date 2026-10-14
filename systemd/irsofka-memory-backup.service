@@ -1,6 +1,6 @@
 [Unit]
 Description=Irsofka AI Workstation - Cadangan Memori Jangka Panjang
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 After=irsofka-ai-workstation.service
 
 [Service]

@@ -3,7 +3,7 @@
 # bin/install_units.sh: penjadwal yang bisa menulis berkas atas nama orang yang sedang tidur tidak
 # boleh lahir aktif. Menyalakannya satu perintah dari terminal orang itu sendiri.
 Description=Irsofka AI Workstation - Dream phase schedule (memory consolidation)
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 
 [Timer]
 # Ritme 30 menit dipilih oleh alat ukurnya, bukan oleh jadwal: gerbang idle di dalam

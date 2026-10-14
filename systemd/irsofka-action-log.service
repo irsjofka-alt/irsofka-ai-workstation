@@ -1,6 +1,6 @@
 [Unit]
 Description=Irsofka AI Workstation - Session Action Log Ingestor (rekam jejak prompt/perintah AI ke SQL)
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 After=default.target
 
 [Service]

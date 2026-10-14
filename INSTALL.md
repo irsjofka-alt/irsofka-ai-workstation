@@ -66,7 +66,7 @@ compatibility symlinks. Run it first in dry-run mode, then with `--apply`.
 The codebase expects the exact location `~/.ai-station`:
 
 ```bash
-git clone https://github.com/irsjofka-alt/IRSofka-Ai-Workstation.git ~/.ai-station
+git clone https://github.com/irsjofka-alt/irsofka-ai-workstation.git ~/.ai-station
 mkdir -p ~/.ai-station/{brain/memory,brain/skills,brain/rules,logs,engines,bin}
 chmod +x ~/.ai-station/bin/*.sh
 ```

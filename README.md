@@ -21,7 +21,7 @@ curl -fsSL https://qoder.com/install | bash
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 
 # 2. Clone the workstation repository
-git clone https://github.com/irsjofka-alt/IRSofka-Ai-Workstation.git ~/.ai-station
+git clone https://github.com/irsjofka-alt/irsofka-ai-workstation.git ~/.ai-station
 ```
 
 If you are trying Qoder for the first time and wish to support this project, you may register
@@ -242,7 +242,7 @@ repositories so the cockpit can stay public while engine-specific source and pro
 
 | Stage | Repository | Visibility |
 |---|---|---|
-| Cockpit, rules, telemetry, autopilot | `irsjofka-alt/IRSofka-Ai-Workstation` | **public** — this repository |
+| Cockpit, rules, telemetry, autopilot | `irsjofka-alt/irsofka-ai-workstation` | **public** — this repository |
 | Generative studio (ComfyUI + Blender MCP wiring) | no repository: a per-machine install, described by roadmap **F7** | local only |
 | Unreal Engine 5.8 MCP editor bridge (`IRSofka-UE-AIStation-Core`) | `irsjofka-alt/IRSofka-UE-AIStation-Core` | **private** |
 | Unreal Engine gameplay project | `irsjofka-alt/IRSofkaEngine` | **private** |

@@ -1,6 +1,6 @@
 [Unit]
 Description=Irsofka AI Workstation Core Daemon (Native Rust Engine)
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 After=network.target default.target
 
 [Service]

@@ -3,7 +3,7 @@
 # Bekerja sendirian atas tabel yang sama dipakai semua engine, jadi ia TIDAK memanggil model apa pun
 # dan tidak menghabiskan kuota siapa pun — lihat tools/dream_phase.py.
 Description=Irsofka AI Workstation - Dream phase (memory consolidation)
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 After=network-online.target irsofka-ai-workstation.service
 
 [Service]

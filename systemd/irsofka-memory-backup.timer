@@ -1,6 +1,6 @@
 [Unit]
 Description=Cadangkan memori workstation tiap jam (dan susulan setelah mesin mati)
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 
 [Timer]
 # Persistent=true penting: kalau mesin mati saat jam cadangan, ia mengejar

@@ -3,7 +3,7 @@
 # ini tetapi TIDAK meng-enable-nya. Timer yang bisa memulai loop ini hanya aman di belakang
 # sakelar yang bisa menghentikannya (F10.8), jadi ia lahir dalam keadaan `observe` dan OFF.
 Description=Irsofka AI Workstation - Autopilot drainer schedule
-Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
 
 [Timer]
 # Persistent=false adalah pilihan, bukan kelalaian. Dengan true, mesin yang mati semalam akan
