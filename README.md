@@ -181,7 +181,7 @@ server's own source, not from documentation.
 | Server | Tools | Version | What it reaches |
 |---|---:|---|---|
 | `local-workstation` | 13 | in-repo (`tools/mcp_workstation_local.py`) | Hardware telemetry, Wayland screenshots, desktop notifications, volume, SQL state queries, quest logging, PTY read/write (`read_terminal`, `send_to_terminal`), UI refresh, daemon restart, inter-engine peer messaging |
-| `irsofka-unreal-mcp` | 6 | ships with the UE plugin | Unreal Engine 5.8 editor. Six master domains carrying **38 canonical actions + 15 accepted aliases**; see the ecosystem section for why six |
+| `irsofka-unreal-mcp` | 6 | ships with the UE plugin | A live Unreal Engine 5.8 editor, driven through six master domains — see below |
 | `mcp-blender` | 218 | 0.4.0 | A live Blender session: mesh editing, modifiers, geometry nodes, sculpting, baking, UV, rigging, export (FBX/glTF/USD/STL), PolyHaven assets |
 | `comfy-mcp` | 40 | 0.10.0 | A local ComfyUI install via `comfy-cli`: templates, slots, workflows, jobs, model inventory and download, node packs, custom-node install, VRAM control |
 
@@ -284,12 +284,30 @@ diffusion set is 9,7–11,3 GB resident while the Unreal editor alone holds ~4 G
 The one step that is easy to forget: unload before switching (`free_memory`, then confirm with
 `system_stats`), because ComfyUI keeps weights resident and the next phase needs that memory.
 
-**Why six domains and not hundreds.** The Unreal bridge consolidates its capabilities into six tools on
-purpose. Tool definitions are paid for on every agent turn, near-synonym micro-tools are where models
-pick the wrong one, and the six-domain shape is also the clean-room boundary: it is the re-architecture
-that let the plugin drop the micro-tool surface it was replacing, so the code carries Epic's public API
-usage and nothing else. A legacy figure of "949 tools" still circulates in old notes; it belongs to a
-different, abandoned plugin and is not true of this one.
+**Six tools is not a small surface — it is a compressed one.** Each domain commands a whole subsystem of
+the editor:
+
+| Domain | What an agent can make the editor do |
+|---|---|
+| `ue_world` | Spawn, bulk-spawn, duplicate, parent, delete, transform and select actors; lighting, physics, visibility, outliner folders, gameplay tags, material assignment, level streaming |
+| `ue_blueprint` | Create assets, add variables and functions, place `K2Node_CallFunction` nodes, **connect pins through a fuzzy resolver that matches pin names instead of failing on case**, set default values, compile with error diagnostics |
+| `ue_material` | Author master materials and `MaterialInstanceConstant`s; set scalar, vector, texture and static-switch parameters; reflect the full parameter list |
+| `ue_media` | Import WAV → `USoundWave`, bind audio components, one-shot playback at a world position, spawn Niagara emitters and drive their user parameters, create Level Sequences |
+| `ue_vision` | Grab the active viewport as PNG and frame the camera on any actor — the agent's eyes, used to verify its own work visually |
+| `ue_pipeline` | Execute an ordered array of domain steps as one job with **partial-success reporting**: if step *k* fails, steps 0..*k−1* are preserved and the failure is isolated, not rolled back blindly |
+
+And 38 named actions is the menu, not the ceiling. `ue_blueprint.add_call_function` accepts *any*
+target class and method name, so it reaches engine functions the domain layer never enumerates;
+`ue_pipeline` composes that into multi-step operations that no single tool would express. Every
+mutation runs inside a two-tier transaction sandbox — memory rollback via `FScopedTransaction`, plus
+disk and package purge on failure, with `ResetLoaders()` before object deletion so a rollback cannot
+leave a use-after-free behind.
+
+The consolidation is deliberate on three counts: tool definitions are paid for on every agent turn,
+near-synonym micro-tools are exactly where models pick the wrong one, and the six-domain shape is the
+clean-room boundary — the re-architecture that let the plugin leave behind the micro-tool surface it
+replaces (the legacy notes still circulating quote that older surface at 949 tools; it describes a
+different, abandoned plugin, not this one).
 
 ### Requesting access to a private stage
 
