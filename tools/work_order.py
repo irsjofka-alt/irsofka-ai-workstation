@@ -514,25 +514,48 @@ def idle_debt_menu(conn, engine, brain_root=None):
 
     # Sumber keempat: integritas indeks skill. Ini bukan dugaan — sesi ini sendiri menelan judul
     # seksi yang sama empat kali karena menyunting dengan heading sebagai jangkar, dan tidak ada
-    # satu pun pemeriksaan yang menangkapnya sampai manusia membacanya. Yang diukur di sini murni
-    # dari disk: berkas .md yang tidak disebut indeksnya sendiri, berkas yang disebut tapi tidak
-    # ada, dan daftar bernomor yang menggantung tanpa judul di atasnya.
+    # satu pun pemeriksaan yang menangkapnya sampai manusia membacanya.
+    #
+    # Aturan paket, lahir dari dua kali salah. Direktori adalah PAKET kalau punya `SKILL.md`
+    # (subdirektorinya lalu isi paket — `scripts/`, `references/` — dan tidak dimasuki), atau punya
+    # berkas `.md` tanpa `SKILL.md` (paket tanpa pintu masuk: itu temuan, bukan wadah). Direktori
+    # tanpa `SKILL.md` dan tanpa `.md` tapi dengan subdirektori adalah WADAH (`legacy/`), jadi
+    # dimasuki satu tingkat. Versi pertama melompati apa pun yang punya subdirektori, akibatnya
+    # `l2/` — paket yang justru saya salah tulis hari ini, karena ia menyimpan `scripts/` dan
+    # `references/` — tidak pernah diaudit. Detektor yang buta pada kasus yang melahirkannya bukan
+    # detektor.
+    def _pack_dirs(base, depth=0):
+        found = []
+        try:
+            kids = sorted(p for p in base.iterdir() if p.is_dir())
+        except OSError:
+            return found
+        for p in kids:
+            try:
+                has_index = (p / "SKILL.md").is_file()
+                mds = sorted(p.glob("*.md"))
+                subdirs = any(c.is_dir() for c in p.iterdir())
+            except OSError:
+                continue
+            if has_index:
+                found.append((p, True))
+            elif mds:
+                found.append((p, False))
+            elif subdirs and depth < 1:
+                found.extend(_pack_dirs(p, depth + 1))
+        return found
+
     try:
         skills_root = root / "skills"
         if skills_root.is_dir():
-            for pack in sorted(p for p in skills_root.iterdir() if p.is_dir()):
-                # Direktori yang berisi subdirektori adalah WADAH, bukan paket — `legacy/`
-                # menampung paket-paket lama, bukan paket itu sendiri. Menghitungnya sebagai paket
-                # menghasilkan temuan palsu "legacy/ tidak punya SKILL.md", dan detektor yang
-                # menghasilkan sampah akan berhenti dipercaya orang yang membacanya.
-                if any(child.is_dir() for child in pack.iterdir()):
+            for pack, has_index in _pack_dirs(skills_root):
+                if not has_index:
+                    items.append(("skill_no_index",
+                                  f"Paket skill {pack.name}/ punya berkas .md tapi tidak punya "
+                                  f"SKILL.md sebagai pintu masuk, jadi tidak ada yang tahu kapan "
+                                  f"harus membukanya"))
                     continue
                 idx = pack / "SKILL.md"
-                if not idx.is_file():
-                    items.append(("skill_no_index",
-                                  f"Paket skill {pack.name}/ tidak punya SKILL.md sebagai pintu "
-                                  f"masuk, jadi tidak ada yang tahu kapan harus membukanya"))
-                    continue
                 text = idx.read_text(encoding="utf-8", errors="replace")
                 for md in sorted(pack.glob("*.md")):
                     if md.name == "SKILL.md":
@@ -541,7 +564,10 @@ def idle_debt_menu(conn, engine, brain_root=None):
                         items.append(("skill_unlisted",
                                       f"{pack.name}/{md.name} ada di disk tapi tidak disebut "
                                       f"SKILL.md — tidak akan pernah terbaca oleh mesin mana pun"))
-                for ref in re.findall(r"`([0-9A-Za-z_\-]+\.md)`", text):
+                # Hanya nama berkonvensi paket sendiri (`NN-topik.md`) yang ditagih ke direktori
+                # ini. Memindai SEMUA `.md` dalam backtick membuat rujukan ke `AGENTS.md` atau
+                # `README.md` — berkas di tempat lain, bukan bagian paket — jadi temuan fiktif.
+                for ref in re.findall(r"`(\d{2}-[A-Za-z0-9_\-]+\.md)`", text):
                     if not (pack / ref).is_file():
                         items.append(("skill_missing",
                                       f"SKILL.md {pack.name}/ merujuk {ref} yang tidak ada di disk"))
@@ -2780,6 +2806,16 @@ def push_gate(events_path=None):
     if undelivered:
         reasons.append(f"{len(undelivered)} commit belum berangkat TANPA vonis dan tanpa catatan "
                        f"ditahan (contoh {undelivered[0][:12]})")
+    # `git push` tidak memilih per-sha: ia mendorong SELURUH branch. Jadi satu commit yang sengaja
+    # DITAHAN tidak bisa "diloloskan" dengan cara tidak dihitung — selama ia masih ada di belakang
+    # HEAD, setiap dorongan akan ikut membawanya. Versi sebelumnya memperlakukan `held` sebagai
+    # kebalikan dari `undelivered`, sehingga kombinasi "satu commit diloloskan + satu ditahan"
+    # mengembalikan ok=True dan pemanggil yang patuh justru mendorong yang ditahan.
+    held_pending = [x for x in unpushed if x[:12] in held]
+    if held_pending:
+        reasons.append(f"{len(held_pending)} commit belum berangkat DAN DITAHAN dengan sengaja "
+                       f"(contoh {held_pending[0][:12]}) — dorong branch akan tetap membawanya, "
+                       "jadi tidak ada dorongan yang aman sampai commit itu dihapus atau diloloskan")
     # Sejarah TIDAK diadili di sini. `shipped_without` hampir selalu besar — semua commit sebelum
     # F10.9 lahir berangkat tanpa peristiwa verdict — dan membuat pagar merah permanen untuk keadaan
     # yang tidak bisa lagi diubah lebih buruk daripada tidak punya pagar: orang belajar melewati
