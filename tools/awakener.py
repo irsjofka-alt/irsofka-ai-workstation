@@ -147,11 +147,25 @@ def main(argv=None):
         # yang salah: pengukuran hari ini tab qoder berdiri di /home/irsofka/Documents/
         # ai-workstation, dan mengirim baris ber-ws_path lain ditolak PANE_WRONG_DIR oleh
         # hand_new_work — jadi wake yang tampaknya terkirim tidak pernah sampai ke sesiapa.
+        # Temuan audit `gemini-byok` atas diff ini (verdict PERLU_KOREKSI, 04:3x): versi pertama
+        # menulis `cv.tab_project(target) or str(wo.REPO)` — fail-open ke direktori TEBAKAN ketika
+        # proyek tab tidak terbaca. §6 melarang menebak tujuan: yang benar adalah menolak dengan
+        # nama dan tidak menulis baris sama sekali. Alasannya bukan estetika: baris ber-ws_path
+        # karangan akan diantar ke pane yang duduk di proyek lain, dan engine mengerjakan satu
+        # tree sambil melaporkan tree lain.
         try:
             import cross_verify as cv
-            where = cv.tab_project(target) or str(wo.REPO)
-        except Exception:  # noqa: BLE001 — proyek tab tidak terbaca: pakai default, dan biarkan
-            where = str(wo.REPO)      # hand_new_work melaporkan PANE_DIR_UNKNOWN, bukan menebak.
+            where = (cv.tab_project(target) or "").strip()
+        except Exception as exc:  # noqa: BLE001 — tidak terbaca BUKAN berarti REPO
+            where = ""
+            why_read = f"({str(exc)[:60]})"
+        else:
+            why_read = ""
+        if not where:
+            out.update({"queued": False, "why": f"PANE_DIR_UNKNOWN {why_read}".strip(),
+                        "ws_path": None, "gate": ""})
+            print(json.dumps(out, ensure_ascii=False))
+            return 1        # keluar bukan-nol: jam berikutnya mencoba lagi, bukan menulis diam-diam
         wrote, msg, item_id = wo.queue_command(conn, engine, WAKE_PHRASE, target,
                                                gate="", ws_path=where, who="operator")
         out.update({"queued": wrote, "item": item_id, "gate": "", "ws_path": where,
