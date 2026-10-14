@@ -325,8 +325,16 @@ def night_state(conn, engine, dirty=_MEASURE):
     budget_col = int((ap or {}).get("item_budget") or 0)
     cap = NIGHT_MAX_ITEMS if budget_col <= 0 else min(NIGHT_MAX_ITEMS, budget_col)
     if done >= cap:
-        sumber = ("kolom item_budget" if budget_col > 0 and budget_col <= NIGHT_MAX_ITEMS
-                  else "konstanta NIGHT_MAX_ITEMS")
+        if budget_col > 0 and budget_col == NIGHT_MAX_ITEMS:
+            # Kedua sumber menyebut angka yang sama, dan menyebut salah satunya akan menuding
+            # pihak yang tidak sendirian bertanggung jawab — persis kelas teks yang membuat orang
+            # salah menaikkan angka.
+            sumber = f"kolom item_budget == konstanta NIGHT_MAX_ITEMS == {budget_col}"
+        elif budget_col > 0 and budget_col < NIGHT_MAX_ITEMS:
+            sumber = "kolom item_budget lebih ketat"
+        else:
+            sumber = "konstanta NIGHT_MAX_ITEMS lebih ketat" if budget_col > NIGHT_MAX_ITEMS \
+                else "konstanta NIGHT_MAX_ITEMS (kolom tidak diisi)"
         why.append(f"batas {cap} item per sesi terlampaui ({sumber}; done={done})")
     return {"mode": (ap or {}).get("mode"), "failures_run": n_fail, "items_done": done,
             "item_cap": cap,
