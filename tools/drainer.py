@@ -430,7 +430,13 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
             # bersyarat, pelepasan saat kirim gagal. Tidak ada jalur kedua dengan pagar sendiri.
             # SEMI tidak pernah sampai ke sini: `wanted == "ON"` adalah satu-satunya gerbangnya,
             # dan `claim()` tetap menolak keranjangnya sebagai lapis kedua.
-            item = wo.ensure_idle_item(conn, engine, emit=emit)
+            # Ditulis sebagai kata kunci, bukan posisi: argumen kedua `ensure_idle_item` adalah
+            # JENIS DATABASE, dan argumen ketiganya — mesin tujuan — sengaja tidak diisi supaya
+            # diturunkan dari ledger dan divalidasi ke registri di dalam fungsi itu. `engine,` tanpa
+            # nama mudah dibaca sebagai "mesin ini", dan membacanya begitu akan menulis baris yang
+            # menunjuk mesin bernama 'SQLITE'. Tesnya ada di selftest: panggilan ini direkam dan
+            # backend-nya harus masuk sebagai backend, bukan sebagai tujuan.
+            item = wo.ensure_idle_item(conn, backend=engine, emit=emit)
         if not item:
             emit("QUEUE_EMPTY", origin=origin or "apa pun")
             return None
@@ -1600,6 +1606,44 @@ def selftest():
         acts = [e["action"] for e in out]
         check("SEMI dengan antrean tanpa perintah operator tidak mengambil apa pun — itu isi kata 'semi'",
               "QUEUE_EMPTY" in acts and not sent, str(out))
+
+        # Jalur idle diuji pada BATASNYA, bukan di dalam: yang harus dibuktikan di sini adalah apa
+        # yang drainer serahkan ke `ensure_idle_item`, karena satu-satunya cara fungsi itu menulis
+        # mesin hantu adalah kalau pemanggilnya menukar arti dua argumen. Versi pertama jalur ini
+        # mengirim `engine` secara posisi — benar kebetulan, dan tetap benar kalau suatu hari
+        # dipanggil dengan target di tempat lain. Yang direkam di bawah adalah kata kuncinya.
+        _seen_call = {}
+        _orig_idle = wo.ensure_idle_item
+
+        def _spy_idle(_conn, *a, **kw):
+            _seen_call["positional"] = list(a)
+            _seen_call["kw"] = dict(kw)
+            return None          # sengaja: yang diukur adalah SERAHAN, bukan isi fungsinya
+
+        wo.ensure_idle_item = _spy_idle
+        try:
+            sent.clear(); out = []
+            hand_new_work(conn, "SQLITE", "ON", runner=runner, sender=sender, emit=sink(out),
+                          capture=quiet_pane, busy=not_busy, tab_project=cwd_of, pane_cwd=cwd_of,
+                          gap=0, dirty=False)
+        finally:
+            wo.ensure_idle_item = _orig_idle
+        _backend_pos = _seen_call.get("positional", [])
+        _backend = (_backend_pos[0] if _backend_pos else _seen_call.get("kw", {}).get("backend"))
+        check("ON + antrean kosong memanggil jalur idle, dan menyerahkan JENIS DATABASE sebagai "
+              "backend — bukan sebagai mesin tujuan (mesin tujuan datang dari ledger)",
+              _seen_call and _backend == "SQLITE"
+              and "cli_engine" not in _seen_call.get("kw", {})
+              and len(_backend_pos) == 0
+              and any(e["action"] == "QUEUE_EMPTY" for e in out) and not sent,
+              str(_seen_call)[:160])
+
+        # Sisi negatifnya TIDAK diuji di sini: `ensure_idle_item` punya lima penolakan sebelum
+        # INSERT, dan mode jendela dibacakan dari ledger tes yang isinya berubah-ubah antar cek --
+        # jadi menolak di sini bisa berarti menolak karena registri, atau karena mode bukan ON, dan
+        # tesnya akan hijau tanpa membuktikan apa pun. Itu diuji di selftest work_order, di mana
+        # mode-nya ditetapkan sendiri dan alasan penolakannya bisa dibandingkan dengan kata
+        # "registri". Yang menjadi tanggung jawab drainer hanya bentuk serahannya, dan itu di atas.
 
         op = make("selftest-semi-cmd", gate="false", engine_key="qoder",
                   origin="operator", ws="/tmp")

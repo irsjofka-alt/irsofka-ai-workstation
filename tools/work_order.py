@@ -149,11 +149,16 @@ def _mute_banners():
     return calls, orig
 
 
-def tree_dirty() -> bool | None:
-    """True/False dari git; None kalau git tidak bisa dibaca — dan None BUKAN berarti bersih."""
+def tree_dirty(repo=None) -> bool | None:
+    """True/False dari git; None kalau git tidak bisa dibaca — dan None BUKAN berarti bersih.
+
+    `repo` hanya ada supaya gerbang push bisa diuji pada pohon yang angkanya diketahui, bukan pada
+    repo nyata yang berubah setiap kali seseorang commit. Tanpa itu, tes "tree bersih tidak boleh
+    menyebut tree kotor" mengadili keadaan mesin yang tidak bisa ia perintahkan.
+    """
     try:
         import subprocess
-        r = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"],
+        r = subprocess.run(["git", "-C", str(repo or REPO), "status", "--porcelain"],
                            capture_output=True, text=True, timeout=10)
     except Exception:  # noqa: BLE001
         return None
@@ -2817,11 +2822,11 @@ def record_push_held(shas, reason, events_path=None):
     return out
 
 
-def _git(*args):
+def _git(*args, repo=None):
     """Satu pembacaan git; None berarti TIDAK TERBACA, yang bukan berarti kosong."""
     import subprocess
     try:
-        r = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True,
+        r = subprocess.run(["git", "-C", str(repo or REPO), *args], capture_output=True, text=True,
                            timeout=20)
     except Exception:  # noqa: BLE001
         return None
@@ -2850,8 +2855,14 @@ def push_events(events_path=None):
     return out
 
 
-def push_gate(events_path=None):
+def push_gate(events_path=None, repo=None):
     """Pagar push: setiap commit yang belum berangkat harus DINYATAKAN, bukan didiamkan.
+
+    `repo` adalah direktori git yang diadili; default-nya repo nyata mesin ini. Gerbangnya sendiri
+    tidak berubah karena itu — yang berubah hanya bahwa selftest boleh membangun repo dengan angka
+    yang DIKETAHUI. Mengadili per-sha terhadap repo nyata membuat tesnya merah justru saat repo
+    itu sehat, dan keadaan yang merah karena alasan yang salah berhenti dipercaya orang yang
+    membacanya.
 
     Gerbang f109 versi sebelumnya adalah dua `grep -q` global: begitu satu baris `push_verified`
     dan satu baris `push_held` pernah tertulis di masa lalu, ia keluar 0 selamanya — dua pemeriksa
@@ -2879,8 +2890,8 @@ def push_gate(events_path=None):
                and str(r.get("verdict") or "").upper() in CLEARANCE_VERDICTS} - {""}
     held = {_norm(r.get("sha")) for r in ev
             if r.get("kind") == "push_held" and (r.get("reason") or "").strip()} - {""}
-    unpushed_raw = _git("rev-list", "@{u}..HEAD")
-    pushed_raw = _git("rev-list", "--max-count=200", "@{u}")
+    unpushed_raw = _git("rev-list", "@{u}..HEAD", repo=repo)
+    pushed_raw = _git("rev-list", "--max-count=200", "@{u}", repo=repo)
     if unpushed_raw is None or pushed_raw is None:
         return {"ok": False, "readable": False,
                 "why": ["git tidak terbaca — UNKNOWN, dan UNKNOWN tidak pernah berarti boleh"]}
@@ -2897,7 +2908,7 @@ def push_gate(events_path=None):
     # pekerjaan orang lain yang belum selesai, dan satu `git add -A` nanti akan menyapu keduanya".
     # Pindah ke sini bukan pelonggaran: klaim operator yang selama ini tersumbat jadi jalan, dan
     # yang menahan sekarang adalah gerbang yang menghadap keluar.
-    dirty_now = tree_dirty()
+    dirty_now = tree_dirty(repo)
     blocking = []
     if dirty_now is True:
         blocking.append("working tree kotor — dorong hanya setelah pekerjaan yang belum di-commit "
@@ -2932,10 +2943,10 @@ def push_gate(events_path=None):
             "ok": not reasons and not blocking and bool(cleared),
             "tree_dirty": dirty_now,
             "held_pending": [x[:12] for x in held_pending][:5],
-            "pushable": [x for x in unpushed if x[:12] in cleared][:5],
+            "pushable": [x[:12] for x in unpushed if x[:12] in cleared][:5],
             "unpushed": len(unpushed),
             "cleared": len(cleared), "held": len(held),
-            "undelivered": undelivered[:5],
+            "undelivered": [x[:12] for x in undelivered][:5],
             "shipped_without": len(shipped_without),
             "shipped_without_example": shipped_without[0][:12] if shipped_without else None,
             "why": reasons + blocking, "blocking": blocking}
@@ -2947,6 +2958,48 @@ def subprocess_run_sha():
     r = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
                        capture_output=True, text=True, timeout=15)
     return (r.stdout or "").strip()
+
+
+def fixture_git_repo(base):
+    """Repo git sungguhan dengan upstream yang terbaca dan angka yang DIKETAHUI lebih dulu.
+
+    Dipakai selftest pagar push. Alasannya terukur, bukan selera: gerbang per-sha yang mengadili
+    repo nyata akan merah justru pada saat repo itu sehat (tidak ada commit yang belum berangkat),
+    dan biru saat ada pekerjaan menggantung — persis kebalikan dari yang ingin dilaporkan. Di sini
+    HEAD sengaja satu commit di depan upstream, jadi `unpushed == 1` adalah fakta yang diciptakan,
+    bukan yang ditebak.
+
+    Mengembalikan (direktori, sha_commit_pertama_yang_sudah_berangkat, sha_kedua_yang_belum).
+    """
+    import subprocess
+
+    def g(*args):
+        r = subprocess.run(["git", "-C", str(base), *args], capture_output=True, text=True,
+                           timeout=30, env={**os.environ,
+                                            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                            "GIT_COMMITTER_NAME": "t",
+                                            "GIT_COMMITTER_EMAIL": "t@t"})
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout or "git gagal").strip()[:200])
+        return (r.stdout or "").strip()
+
+    Path(base).mkdir(parents=True, exist_ok=True)
+    g("init", "-q", "-b", "main")
+    (Path(base) / "a.txt").write_text("satu\n", encoding="utf-8")
+    g("add", "-A")
+    g("commit", "-qm", "satu")
+    first = g("rev-parse", "HEAD")
+    bare = Path(base).parent / (Path(base).name + "-up.git")
+    if subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True,
+                      text=True, timeout=30).returncode != 0:
+        raise RuntimeError("bare repo tidak bisa dibuat")
+    g("remote", "add", "origin", str(bare))
+    g("push", "-q", "-u", "origin", "main")
+    (Path(base) / "b.txt").write_text("dua\n", encoding="utf-8")
+    g("add", "-A")
+    g("commit", "-qm", "dua")
+    second = g("rev-parse", "HEAD")
+    return Path(base), first, second
 
 
 def selftest():
@@ -2965,7 +3018,11 @@ def selftest():
     # working tree SUNGGUHAN — yang selama tes ini berjalan pasti kotor oleh tesnya sendiri.
     # Tanpa sambatan ini ratusan klaim fixture ditolak karena berkas yang sedang diedit modul ini.
     orig_tree_dirty = globals()["tree_dirty"]
-    globals()["tree_dirty"] = lambda: False
+    # Nama kedua ini TIDAK pernah ditimpa. Bloks lain di bawah mengambil `orig_tree_dirty` lagi
+    # saat global-nya sudah disambat, jadi nama itu kemudian menunjuk sambatan, bukan git — dan
+    # satu cek di pagar push yang memulihkannya akan mengira tree fixture bersih.
+    tree_dirty_real = orig_tree_dirty
+    globals()["tree_dirty"] = lambda *_a: False
     # `queue_command` sekarang MENGANTARKAN perintahnya, dan jalur kirim asli berbicara ke daemon
     # pane sungguhan. Selftest yang tidak menukar sambatan ini akan mengetik ke terminal operator
     # saat orang sedang tidur, jadi pagarnya dipasang sebelum satu baris tes pun berjalan dan
@@ -3769,7 +3826,7 @@ def selftest():
                      "until_epoch=? WHERE id=1", (now(), now() + 3600))
         conn.commit()
         orig_tree_dirty = globals()["tree_dirty"]
-        globals()["tree_dirty"] = lambda: False
+        globals()["tree_dirty"] = lambda *_a: False
         try:
             for k in range(NIGHT_MAX_FAILURES):
                 conn.execute("INSERT INTO quest_tasks (title, status, completed_at) "
@@ -4141,40 +4198,80 @@ def selftest():
               and "mustahil" not in (_g105[0]["c"] or ""), str(_g105)[:160])
 
         # --- pagar per-sha: dua grep global lulus selamanya, ini tidak ---------------------------
+        # Dijalankan di atas repo fixture, bukan repo nyata. Yang diuji adalah aturan pembanding
+        # sha, dan aturan itu tidak boleh bergantung pada berapa commit yang kebetulan sedang
+        # menunggu di mesin ini.
         _d3 = Path(_tf.mkdtemp(prefix="pushgate_"))
         _e3 = _d3 / "events.jsonl"
-        _head = subprocess_run_sha()
-        _un = _git("rev-list", "@{u}..HEAD").splitlines()
+        _repo3, _sha_shipped, _sha_pending = fixture_git_repo(_d3 / "src")
         _e3.write_text("", encoding="utf-8")
-        g_empty = push_gate(events_path=_e3)
-        check("tanpa satu peristiwa pun, setiap commit yang belum berangkat dianggap BELUM dinyatakan",
-              g_empty["ok"] is False and g_empty["unpushed"] >= 1
-              and len(g_empty["undelivered"]) >= 1, str(g_empty["why"])[:120])
-        held_rows = record_push_held(_un, "no-verdict", events_path=_e3)
-        g_held = push_gate(events_path=_e3)
+        g_empty = push_gate(events_path=_e3, repo=_repo3)
+        check("tanpa satu peristiwa pun, commit yang belum berangkat dianggap BELUM dinyatakan "
+              "(diukur pada repo fixture: unpushed=1, undelivered=sha itu persis)",
+              g_empty["ok"] is False and g_empty["declared"] is False
+              and g_empty["unpushed"] == 1 and g_empty["undelivered"] == [_sha_pending[:12]],
+              str(g_empty["why"])[:120])
+        held_rows = record_push_held([_sha_pending], "no-verdict", events_path=_e3)
+        g_held = push_gate(events_path=_e3, repo=_repo3)
         # Dua kata yang berbeda, dan tes ini yang menegakkan perbedaannya: dinyatakan ≠ boleh
         # dorong. Ronde kesembilan membaca yang pertama sebagai yang kedua.
         check("satu catatan `ditahan dengan alasan` menutup celah DITOLAK-TANPA-SEBAB, tapi tidak "
               "membuatnya boleh didorong",
               g_held["declared"] is True and g_held["ok"] is False
-              and g_held["pushable"] == [] and len(held_rows) == len(_un), str(g_held)[:160])
+              and g_held["pushable"] == [] and len(held_rows) == 1
+              and g_held["held_pending"] == [_sha_pending[:12]], str(g_held)[:160])
         check("penahan tanpa alasan tidak dihitung sebagai pernyataan",
               record_push_held(["abc1234def"], "  ", events_path=_e3) == [], "alasan kosong")
         _e3.write_text("", encoding="utf-8")
-        _e3.write_text(json.dumps({"kind": "push_verified", "sha": _head[:12],
+        _e3.write_text(json.dumps({"kind": "push_verified", "sha": _sha_pending[:12],
                                    "model": "gemini-3.8-flash-high", "verdict": "FAIL"}) + "\n",
                        encoding="utf-8")
-        g_fail = push_gate(events_path=_e3)
+        g_fail = push_gate(events_path=_e3, repo=_repo3)
         check("peristiwa push_verified dengan verdict FAIL BUKAN izin — nilai verdict dibaca, "
-              "bukan hanya kata kuncinya", _head[:12] not in
-              [x[:12] for x in g_fail["undelivered"]] or g_fail["ok"] is False, str(g_fail)[:160])
+              "bukan hanya kata kuncinya",
+              g_fail["ok"] is False and g_fail["cleared"] == 0
+              and g_fail["undelivered"] == [_sha_pending[:12]], str(g_fail)[:160])
         _e3.write_text("", encoding="utf-8")
         _e3.write_text(json.dumps({"kind": "push_verified", "sha": "0" * 40,
                                    "model": "m", "verdict": "SETUJU"}) + "\n", encoding="utf-8")
-        g_other = push_gate(events_path=_e3)
+        g_other = push_gate(events_path=_e3, repo=_repo3)
         check("vonis untuk sha lain tidak membebaskan commit yang menganggur (pengikatan per-sha)",
-              g_other["ok"] is False and g_other["unpushed"] >= 1, str(g_other["why"])[:120])
-        _e3.unlink(missing_ok=True); _d3.rmdir()
+              g_other["ok"] is False and g_other["unpushed"] == 1
+              and g_other["undelivered"] == [_sha_pending[:12]], str(g_other["why"])[:120])
+        # dan sisi positifnya, karena pagar yang hanya pernah dites merah tidak terbukti pagar:
+        # vonis SETUJU yang menyebut sha yang benar membuka gerbang, dan commit yang SUDAH
+        # berangkat tidak ikut dihitung sebagai utang.
+        _e3.write_text("", encoding="utf-8")
+        _e3.write_text(json.dumps({"kind": "push_verified", "sha": _sha_pending,
+                                   "model": "claude-opus", "verdict": "SETUJU"}) + "\n",
+                       encoding="utf-8")
+        g_go = push_gate(events_path=_e3, repo=_repo3)
+        check("vonis SETUJU pada sha yang benar MELULUSKAN gerbang — termasuk saat peristiwa "
+              "menyebut sha panjang dan git menyebut sha pendek (dinormalisasi ke 12)",
+              g_go["ok"] is True and g_go["declared"] is True and g_go["blocking"] == []
+              and g_go["pushable"] == [_sha_pending[:12]], str(g_go)[:200])
+        # satu berkas kerja yang belum di-commit menutupnya lagi, di atas vonis yang sama.
+        # Selftest memasang `tree_dirty -> False` di seluruh jalurnya (kalau tidak, ratusan klaim
+        # fixture ditolak karena berkas yang sedang diedit), jadi cek ini MEMASANG ULANG fungsi
+        # aslinya khusus untuk repo fixture — dan melepaskannya lagi. Tanpa itu yang terukur adalah
+        # sambungannya, bukan gerbangnya. Nama `orig_tree_dirty` TIDAK dipakai di sini: blok
+        # pemutus malam di atas mengambil nama itu saat global-nya sudah disambat, jadi ia sekarang
+        # menunjuk sambatan. Yang dipasang adalah salinan fungsi asli yang diambil sebelum apa pun
+        # menyambatnya.
+        globals()["tree_dirty"] = tree_dirty_real
+        try:
+            (Path(_repo3) / "kerja-orang-lain.txt").write_text("jangan disentuh\n", encoding="utf-8")
+            g_dirty_fixture = push_gate(events_path=_e3, repo=_repo3)
+        finally:
+            globals()["tree_dirty"] = lambda *_a: False
+        check("tree kotor menahan dorongan sekalipun vonisnya sudah lolos — dan ia menyebut "
+              "tree, bukan sha", g_dirty_fixture["ok"] is False
+              and g_dirty_fixture["tree_dirty"] is True
+              and any("kotor" in w for w in g_dirty_fixture["blocking"]),
+              str(g_dirty_fixture["blocking"])[:150])
+        _e3.unlink(missing_ok=True)
+        import shutil as _sh
+        _sh.rmtree(_d3, ignore_errors=True)
 
         # --- push tertunda harus menjadi keadaan yang tercatat ---
         # §6 menjanjikan "commit lokal + push masuk digest pagi" bila verifier tidak tercapai.
@@ -4397,9 +4494,9 @@ def dirty_tree_selftest(check):
 
         orig_td = globals()["tree_dirty"]
         try:
-            globals()["tree_dirty"] = lambda: True
+            globals()["tree_dirty"] = lambda *_a: True
             g_dirty = push_gate()
-            globals()["tree_dirty"] = lambda: False
+            globals()["tree_dirty"] = lambda *_a: False
             g_clean = push_gate()
         finally:
             globals()["tree_dirty"] = orig_td
@@ -4539,21 +4636,36 @@ def idle_selftest(check):
         check("ON mengklaim baris idle lewat `claim()` yang sama — tidak ada jalur kedua "
               "dengan pagar sendiri", ok_on is True, str(why_on)[:120])
 
-        # --- regresi blocker: `engine` adalah backend DB, bukan nama CLI ------------------------
+        # --- regresi blocker: `backend` adalah jenis DB, `cli_engine` adalah mesin tujuan --------
         # Versi pertama fungsi ini memakai SATU parameter untuk dua arti, jadi di produksi baris
-        # idle akan ditulis dengan cli_engine='POSTGRESQL' — mesin yang tidak ada — dan tesnya
-        # tetap hijau karena SQLite menerima nama backend apa pun sebagai teks biasa. Yang diuji
-        # di bawah: menyebut backend sebagai mesin tujuan tidak boleh menghasilkan baris apa pun,
-        # dan tidak boleh ada baris yang menyimpan nama backend di kolom mesin.
+        # idle akan ditulis dengan cli_engine='POSTGRESQL' — mesin yang tidak ada. Tes yang
+        # menambalnya dulu juga salah, dan dengan cara yang lebih sunyi lagi: ia memanggil
+        # backend="POSTGRESQL" di atas koneksi SQLite, jadi yang menolak panggilan itu adalah
+        # placeholder `%s` yang tidak dikenali, bukan pagarnya — hijau tanpa membuktikan apa pun.
+        # Yang diuji sekarang dijalankan sampai ke gerbang registri: tujuannya disebut dengan nama
+        # backend, dan yang diharapkan adalah penolakan yang MENYEBUT REGISTRI, plus sisi
+        # positifnya — utang yang sama dengan tujuan sah harus benar-benar menulis baris.
         run(c, "SQLITE", "DELETE FROM quest_tasks WHERE origin='idle'")
         c.commit()
         ev.clear()
-        bogus = ensure_idle_item(c, "POSTGRESQL", emit=emit)
-        leaked = run(c, "SQLITE", "SELECT COUNT(*) AS n FROM quest_tasks WHERE cli_engine='POSTGRESQL'")
-        check("backend DB tidak pernah merembes ke kolom cli_engine — menyebut POSTGRESQL sebagai "
-              "backend tidak menulis baris yang menunjuk mesin hantu",
-              bogus is None and int((leaked[0]["n"] if leaked else 0) or 0) == 0,
+        ghost = ensure_idle_item(c, "SQLITE", "SQLITE", emit=emit, brain_root=_broot)
+        leaked = run(c, "SQLITE", "SELECT COUNT(*) AS n FROM quest_tasks WHERE cli_engine IN "
+                                 "('SQLITE','POSTGRESQL')")
+        by_registry = any(a == "IDLE_DEBT_UNKNOWN" and "registri" in str(k.get("why") or "")
+                          for a, k in ev)
+        check("backend yang dipakai sebagai mesin tujuan ditolak OLEH GERBANG REGISTRI — alasannya "
+              "harus menyebut registri, bukan kegagalan SQL",
+              ghost is None and by_registry
+              and int((leaked[0]["n"] if leaked else 0) or 0) == 0,
               str([a for a, _ in ev])[:160])
+
+        # Sisi yang membuat penolakan di atas berarti: fungsi yang sama, utang yang sama, tujuan
+        # yang terdaftar — dan satu baris tertulis. Tanpa ini, "ditolak" bisa berarti apa saja.
+        ev.clear()
+        legit = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
+        check("utang yang sama dengan tujuan TERDAFTAR menulis satu baris — penolakan di atas "
+              "bukti gerbang, bukan bukti jalur yang mati",
+              legit is not None and legit.get("cli_engine") == "qoder", str(legit)[:120])
 
         # --- DONE -> lanjut, bukan DONE -> diam -------------------------------------------------
         run(c, "SQLITE", "DELETE FROM quest_tasks WHERE origin='idle'")
