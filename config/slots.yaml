@@ -51,6 +51,9 @@ teams:
   - role_id: resolver-alt
     title: Decision Resolver fallback
     registry_key: gemini-verify
+  - role_id: resolver-byok
+    title: "Decision Resolver, kolam BYOK milik operator (5 slot / 3 kunci nyata, akun PRO) — kolam yang BERBEDA dari agy, jadi ia tidak memotong napas tier di atasnya"
+    registry_key: gemini-byok
   - role_id: resolver-local
     title: Decision Resolver, local tier, last rung
     registry_key: local

@@ -314,9 +314,22 @@ def night_state(conn, engine, dirty=_MEASURE):
     if dirty is None:
         dirty_why.append("git tidak terbaca — UNKNOWN, bukan bersih")
     why += dirty_why
-    if done >= NIGHT_MAX_ITEMS:
-        why.append(f"batas {NIGHT_MAX_ITEMS} item per sesi terlampaui")
+    # C dari keputusan 46 (dijawab `resolver-byok`/gemini-3.8-flash, setelah dua tingkat agy gagal):
+    # SATU kata untuk "anggaran malam" punya dua sumber — konstanta NIGHT_MAX_ITEMS di kode dan
+    # kolom `autopilot_state.item_budget` yang disunting operator dari Station. Terukur 04:2x:
+    # kolom berisi 8, `items_done_in_window` sudah 14, dan `claim()` tetap mengabulkan karena yang
+    # menahan hanyalah konstanta — jadi Dashboard melaporkan angka yang tidak mengikat dan operator
+    # membaca "sisa -6" sebagai keadaan yang sebenarnya tidak ada. Yang menang adalah yang
+    # LEBIH KETAT, dan alasan yang dilaporkan menyebut number yang sebenarnya menjatuhkan pemutus,
+    # bukan yang paling mudah dituduh.
+    budget_col = int((ap or {}).get("item_budget") or 0)
+    cap = NIGHT_MAX_ITEMS if budget_col <= 0 else min(NIGHT_MAX_ITEMS, budget_col)
+    if done >= cap:
+        sumber = ("kolom item_budget" if budget_col > 0 and budget_col <= NIGHT_MAX_ITEMS
+                  else "konstanta NIGHT_MAX_ITEMS")
+        why.append(f"batas {cap} item per sesi terlampaui ({sumber}; done={done})")
     return {"mode": (ap or {}).get("mode"), "failures_run": n_fail, "items_done": done,
+            "item_cap": cap,
             "lookback_seconds": FAILURE_LOOKBACK,
             "tree_dirty": dirty, "ok": not why, "why": why,
             "blocking": [w for w in why if w not in dirty_why], "dirty_why": dirty_why}
@@ -2111,7 +2124,7 @@ def decide(conn, engine, question, options=None, weight="heavy", item_id=None):
 
 # --- F10.1 decision broker ---------------------------------------------------
 
-RESOLVER_ROLES = ("resolver", "resolver-alt", "resolver-local")
+RESOLVER_ROLES = ("resolver", "resolver-alt", "resolver-byok", "resolver-local")
 
 
 def normalise_options(options):
