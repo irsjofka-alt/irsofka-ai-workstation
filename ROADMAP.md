@@ -150,10 +150,17 @@ int8 produced `~/runtime/f7-bukti/17d7b8e8_000.png` — 1,468,916 bytes, PNG 832
 with `error: null`, and `spends_credits: false`. Amended again the same hour: the 3D half produced
 `~/runtime/f7-bukti/9c23b91f_008.glb` — 23,136,068 bytes, glTF 2.0 (magic verified, declared length
 equals actual length), 1 mesh / 1 primitive / 3 images / 1 material, prompt_id
-`9c23b91f-f7ea-4476-a55f-f2e5953e4629`, `error: null`. **That is a model, not an asset**: the node
-report reads 2,783,400 vertices and 5,406,248 faces, so the decimate stage did not bound what got
-saved, and no game ships a 5.4-million-face rock. F7 stays 🟡 until the retopo/decimate half is
-measured in Blender and the VRAM gate is enforced by a scheduler instead of read as advice.
+`9c23b91f-f7ea-4476-a55f-f2e5953e4629`, `error: null`. The node report for that run reads
+2,783,400 vertices / 5,406,248 faces — **and that is not what the file holds.** Importing the same
+GLB into headless Blender measures **80,847 vertices / 99,810 faces**, i.e. exactly under the
+100,000 target that was set: decimation did bound the saved mesh, and the 23 MB is three texture
+maps, not geometry. The claim written an hour earlier on this line ("the decimate stage did not
+bound what got saved") was inferred from node text without opening the file, and it was wrong.
+A headless decimate to 50,000 faces left `boundary_edges=0`, `nonmanifold=1`, `degenerate=0`
+unchanged, so the blanket rule that decimation worsens AI meshes does not apply to a watertight
+source — measure `boundary_pct` first. F7 stays 🟡 for what is still actually missing: nothing has
+entered UE, no UV/retopo pass has been visually reviewed, and the VRAM gate is still a rule an
+engine has to read rather than one a scheduler enforces.
 
 ### Verified
 
