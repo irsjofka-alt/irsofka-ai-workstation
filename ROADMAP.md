@@ -13,7 +13,7 @@ F3 Telemetry & SQL State          ✅ Completed
 F4 Native Rust Window GUI         ✅ Completed
 F5 Memory & Session Integrity     ✅ Completed (Oct 6)
 F6 Cross-Verification Ecosystem   🟡 In Progress
-F7 Creative Studio (ComfyUI/UE5)  ⬜ Planned
+F7 Creative Studio (ComfyUI/UE5)  🟡 In Progress (tooling wired; zero model weights)
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
@@ -138,9 +138,48 @@ Pending:
   test fail, restore. Removing the success sweep leaves one grandchild alive in the Rust test and one
   in the Python selftest. `cargo test` is now 3 tests and is a deploy gate.
 
-## F7 — Creative Studio ⬜
+## F7 — Creative Studio 🟡
 
-Planned integration: ComfyUI HTTP API (`:8188`) integration via `comfy_workflow` MCP tool sharing the same VRAM gate to prevent resource contention with local LLMs and graphical viewports.
+Original plan: ComfyUI HTTP API (`:8188`) integration via a `comfy_workflow` MCP tool sharing the same
+VRAM gate, to prevent resource contention with local LLMs and graphical viewports.
+
+Measured on Oct 14, 2026: the **integration layer is done**, the **asset layer is not**. F7 moves to
+🟡 on the strength of the wiring, not on the strength of a generated image — there is none yet.
+
+### Verified
+
+| Component | State | Evidence (reproducible) |
+|---|---|---|
+| MCP server registered for the CLI | ✅ | `engines/qoder/settings.json` → `mcpServers: [local-workstation, irsofka-unreal-mcp, mcp-blender, comfy-mcp]` |
+| comfy-cli | ✅ 1.22.0 | `server_info` → `compatibility.comfy_cli_version` |
+| ComfyUI core | 🟡 v0.39.2, v0.40.0 available | `server_info` → `freshness.core.outdated: true` |
+| Node packs | ✅ ComfyUI-Manager 3.42, BiRefNet-ZHO, Trellis2 1.0.27 | `server_info` → `freshness.packs` |
+| One shared model root for CLI **and** Desktop | ✅ | `extra_model_paths.yaml` (`is_default: true`) and the ComfyUI Desktop app's own `settings.json` resolve to the **same** `models`/`input`/`output` directories — the "which root is actually used" trap is closed by config, not by guessing |
+| Hardware routing decision | ✅ RTX 3060 12 GB → 8–24 GB band: images local, video not | `server_info` → `hardware.gpu` |
+| Skill library | ✅ `SKILL.md` + 9 measured documents under `brain/skills/comfyui/01–09` (untracked, per the skills policy in the contract) | `~/.agents/skills/comfyui` → symlink to that directory |
+
+### Still blocking F7
+
+- ⬜ **No model weights exist on this machine.** `checkpoints/`, `unet/`, `diffusion_models/`, `vae/` and
+  `text_encoders/` are empty in both roots; a bounded search of the home directory
+  (`-maxdepth 4 -name '*.safetensors'`) returns 0. Nothing can generate until at least one checkpoint
+  is downloaded.
+- ⬜ **Server is down and has never produced output here.** `server_info` → `server.running: false`,
+  port 8188 unowned, and `output/` holds only the placeholder file.
+- ⬜ **The VRAM gate is not shared.** `comfy-mcp` and `local_llm.py` each decide on their own; nothing
+  prevents a diffusion run and a 14 B local model from colliding on the same 12 GB. This is the actual
+  engineering work left in F7, not the MCP wiring.
+- ⬜ **The UE5 half of "Creative Studio" is not in this repository.** See *Ecosystem — three
+  repositories, one pipeline* in `README.md`: the editor bridge is private.
+
+### Acceptance path (in order, no step skippable)
+
+Download one licence-verified image checkpoint into the shared models root resolved by
+`extra_model_paths.yaml`
+(contract §7: check free VRAM first), start with `comfy launch --background`, then run
+`search_templates` → `fetch_template` → `set_workflow_slot` → `run_workflow` and confirm
+`local_check` cleared before the run. F7 becomes ✅ only when a generated file exists on disk and the
+same run coexisted with a local LLM without either seizing VRAM the other was holding.
 
 ## F8 — Station: System of Record 🟡
 

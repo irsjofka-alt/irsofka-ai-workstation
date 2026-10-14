@@ -172,12 +172,27 @@ Local LLMs operate under strict constraints:
 ollama ps        # must be empty following verification
 ```
 
-## MCP Server `local-workstation`
+## MCP Servers — the workstation's hands
 
-Registered in both AI CLIs. Exposes 13 tools: hardware telemetry, Wayland desktop screenshots,
-system notifications, volume control, SQL state queries, quest task logging, terminal PTY
-read/write (`read_terminal`, `send_to_terminal`), UI refresh, daemon restart, and inter-engine
-peer messaging.
+Four MCP servers are registered in **both** CLIs (verified: `engines/qoder/settings.json` and
+`engines/gemini_config/mcp_config.json` list the same four). Tool counts below were read from each
+server's own source, not from documentation.
+
+| Server | Tools | Version | What it reaches |
+|---|---:|---|---|
+| `local-workstation` | 13 | in-repo (`tools/mcp_workstation_local.py`) | Hardware telemetry, Wayland screenshots, desktop notifications, volume, SQL state queries, quest logging, PTY read/write (`read_terminal`, `send_to_terminal`), UI refresh, daemon restart, inter-engine peer messaging |
+| `irsofka-unreal-mcp` | 6 | ships with the UE plugin | Unreal Engine 5.8 editor. Six master domains carrying **38 canonical actions + 15 accepted aliases**; see the ecosystem section for why six |
+| `mcp-blender` | 218 | 0.4.0 | A live Blender session: mesh editing, modifiers, geometry nodes, sculpting, baking, UV, rigging, export (FBX/glTF/USD/STL), PolyHaven assets |
+| `comfy-mcp` | 40 | 0.10.0 | A local ComfyUI install via `comfy-cli`: templates, slots, workflows, jobs, model inventory and download, node packs, custom-node install, VRAM control |
+
+**277 tools in total.** Two of those numbers are worth reading carefully, because both have been
+misquoted inside this project at some point: the Unreal surface is **6 tools, not hundreds** (that is a
+deliberate design decision, documented below), and the large numbers belong to Blender and ComfyUI,
+which are third-party servers with their own upstreams.
+
+Registration is per-machine and lives in the engine state directories, which are **not** tracked here —
+a fresh clone ships the MCP server for the workstation itself, and the other three are installed by
+their own projects.
 
 ## Safety Guardrails
 
@@ -203,6 +218,97 @@ systemctl --user list-timers irsofka-memory-backup.timer
 Automated hourly backups with `Persistent=true` catch up after power cycles, retaining 24 hourly
 and 30 daily snapshots in `~/runtime/backups/`. Restore operations are verified against a temporary
 database before acceptance.
+
+## Ecosystem — Three Repositories, One Pipeline
+
+This console is the control layer of a longer pipeline. The stages are deliberately split across
+repositories so the cockpit can stay public while engine-specific source and project content does not:
+
+```
+   source assets & terrain references        (Lineage 2 extraction, heightmaps, splatmaps)
+                       │
+                       ▼
+   Irsofka AI Workstation  ◀── this repo     cockpit, telemetry, autopilot, cross-verification
+                       │
+        ┌──────────────┴──────────────┐
+        ▼                             ▼
+   ComfyUI (roadmap F7)            Blender        generative + assembly:
+   images, PBR textures, 3D        mesh, UV,       meshes, textures
+   meshes via MCP                  FBX/glTF
+                       │
+                       ▼
+              Unreal Engine 5.8                   driven through the MCP editor bridge
+```
+
+| Stage | Repository | Visibility |
+|---|---|---|
+| Cockpit, rules, telemetry, autopilot | `irsjofka-alt/IRSofka-Ai-Workstation` | **public** — this repository |
+| Generative studio (ComfyUI + Blender MCP wiring) | no repository: a per-machine install, described by roadmap **F7** | local only |
+| Unreal Engine 5.8 MCP editor bridge (`IRSofka-UE-AIStation-Core`) | `irsjofka-alt/IRSofka-UE-AIStation-Core` | **private** |
+| Unreal Engine gameplay project | `irsjofka-alt/IRSofkaEngine` | **private** |
+| Extracted terrain sources | no repository | **cannot be published** — derived from third-party game assets |
+
+### How the three stages actually connect
+
+The connection is concrete, not aspirational — three local ports, one database, and a rule about who
+owns the GPU at any moment.
+
+```
+ ComfyUI  :8188          Blender  :9876          Unreal editor  :9877
+     │                       │                        │
+     └───────┬───────────────┴──────────────┬─────────┘
+             │        MCP (stdio)           │
+             ▼                              ▼
+        AI CLIs  ◀──── tmux PTY ────  irsofka-station-core :8999
+             │                              │
+             └──────────► PostgreSQL ◄──────
+                     irsofka_ai_workstation
+              (action_log · quest_tasks · world_memory
+                incident_log · ai_message · decisions)
+```
+
+Every stage writes into the same ledger, which is what makes the chain auditable: a generated image,
+a Blender export and an editor action are all `action_log` rows with the engine, the command and the
+exit code attached. Nothing about the pipeline is trusted because it is neat.
+
+**One phase, one GPU owner.** The card is 12 GB and the workloads do not fit together — a full
+diffusion set is 9,7–11,3 GB resident while the Unreal editor alone holds ~4 GB. So the stages are
+*sequenced*, and that sequencing is the design, not a limitation discovered later:
+
+| Phase | Holds the GPU | Why |
+|---|---|---|
+| Find a base 2D, iterate on look | ComfyUI only | the operator is choosing images; the editor is closed |
+| Image → 3D, UV, retopology | Blender + editor | opened only after the 2D is settled |
+| Local LLM verification tier | Ollama, or CPU | never concurrently with generation |
+
+The one step that is easy to forget: unload before switching (`free_memory`, then confirm with
+`system_stats`), because ComfyUI keeps weights resident and the next phase needs that memory.
+
+**Why six domains and not hundreds.** The Unreal bridge consolidates its capabilities into six tools on
+purpose. Tool definitions are paid for on every agent turn, near-synonym micro-tools are where models
+pick the wrong one, and the six-domain shape is also the clean-room boundary: it is the re-architecture
+that let the plugin drop the micro-tool surface it was replacing, so the code carries Epic's public API
+usage and nothing else. A legacy figure of "949 tools" still circulates in old notes; it belongs to a
+different, abandoned plugin and is not true of this one.
+
+### Requesting access to a private stage
+
+The two Unreal Engine repositories are private because they carry in-engine C++ and project content that
+is not offered under this repository's PolyForm terms. An account without access receives **HTTP 404**,
+which is how GitHub hides a private repository — it is not evidence that the name is wrong or that the
+project does not exist.
+
+There is no invite link and no automated grant. To ask for access:
+
+1. Open an issue on this repository stating the intended use — which AI engine will drive it, which
+   Unreal Engine version, and which of the six master domain tools are needed.
+2. Or contact the repository administrator through the GitHub profile:
+   <https://github.com/irsjofka-alt>
+
+Access is granted per repository. A workstation clone without the private stages still starts: the
+bridge reports `UNAVAILABLE` when it cannot reach a running editor, and this project's reporting rule
+forbids an engine from narrating an action it did not perform — an unavailable tool is
+`UNAVAILABLE`, never `COMPLETED`.
 
 ## License
 

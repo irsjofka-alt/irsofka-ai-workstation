@@ -25,6 +25,9 @@ station-coding:$B/coding
 station-sysadmin:$B/sysadmin
 station-analysis:$B/analysis
 station-learned:$B/learned
+ue5-station:$B/ue5-station
+blender:$B/blender
+comfyui:$B/comfyui
 "
 for p in "$B"/legacy/*/; do
   [ -f "$p/SKILL.md" ] || continue

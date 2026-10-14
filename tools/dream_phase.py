@@ -10,6 +10,7 @@ berkas dan menulis peringkat butuh `dispatch`, dan `dispatch` hanya bisa dinaikk
 """
 
 import io
+import os
 import sys
 import json
 import time
@@ -83,7 +84,7 @@ def run_stamp(ts=None):
     secs = int(base)
     _SEQ[0] += 1
     return (time.strftime("%Y-%m-%d_%H%M%S", time.localtime(secs)) + "_%06d" % int((base - secs) * 1_000_000)
-            + f".{_SEQ[0]}")
+            + f".{os.getpid()}x{_SEQ[0]}")
 
 
 def now_ts():
@@ -192,7 +193,16 @@ def tracked_state():
 
 # --- pekerjaan 1: menata ulang dunia memori ----------------------------------
 def _norm(content):
-    return " ".join((content or "").lower().split())[:72]
+    """Bentuk kanonik isi untuk mendeteksi salinan PersIS.
+
+    Dulu memotong ke 72 karakter pertama. Itu membuat dua catatan panjang yang kebetulan
+    berawalan sama — judul yang disalin, atau kalimat pembuka boilerplate — dihitung sebagai
+    duplikat dan keduanya dihukum skor, padahal isinya berbeda di bawah. Duplikat itu keadaan
+    yang ada di dunia (handoff otomatis menghasilkan salinan persis), jadi pengukurnya juga harus
+    persis: normalisasi whitespace lalu hash, bukan potong.
+    """
+    import hashlib
+    return hashlib.sha256(" ".join((content or "").lower().split()).encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def rank_memories(conn, engine):
@@ -738,15 +748,19 @@ def selftest():
 
         # --- satu detik, satu pembacaan, dan kunci yang tidak bisa berbagi -----------------------
         _a, _b = run_stamp(1_700_000_000.9999996), run_stamp(1_700_000_001.0000001)
+        _clock = lambda k: k.split(".")[0]
         check("pembulatan ke bawah tidak memundurkan stempel: instant beda dapat kunci beda dan urut",
-              _a != _b and _a.split(".")[0] < _b.split(".")[0], f"a={_a} b={_b}")
+              _a != _b and _clock(_a) < _clock(_b), f"a={_a} b={_b}")
         check("frac tidak pernah melampaui 999999 dan tidak pernah membawa carry",
               int(_a.split("_")[2].split(".")[0]) <= 999999, _a)
         _same = [run_stamp(1_700_000_000.5) for _ in range(12)]
         check("dua belas putaran dalam mikrodetik yang sama tetap menghasilkan kunci berbeda",
               len(set(_same)) == 12, f"{len(set(_same))} unik dari 12")
-        check("kunci tetap diurutkan menurut jam meski urutannya yang membedakan",
-              all(x.split(".")[0] <= y.split(".")[0] for x, y in zip(_same, _same[1:])), str(_same[:3]))
+        check("kunci membawa identitas proses, jadi dua proses yang berlari bersamaan tidak "
+              "saling menimpa hanya karena urutannya kebetulan sama",
+              all(str(os.getpid()) in k for k in _same), _same[0])
+        check("kunci tetap diurutkan menurut jam meski penanda proses yang membedakan",
+              all(_clock(x) <= _clock(y) for x, y in zip(_same, _same[1:])), str(_same[:2]))
 
         # --- tangga tak terbaca -------------------------------------------------------------------
         orig_drain = wo.drain_level

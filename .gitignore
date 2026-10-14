@@ -6,6 +6,8 @@
 # 1. KREDENSIAL — tidak boleh masuk repo dalam bentuk apa pun
 # ============================================================
 config/db_local.json
+# BYOK keys for the Unreal in-engine chat (Gemini/Claude/OpenAI). Real values, repo is public.
+config/byok.json
 # penanda sekali-pakai "start this tab without --continue", ditulis daemon, dihapus run_tab.sh
 config/fresh.*
 .env
