@@ -147,9 +147,13 @@ Measured on Oct 14, 2026: the **integration layer is done**, the **asset layer i
 Amended Oct 15, 2026 04:3x: the sentence "there is no generated image yet" stopped being true. Z-Image-Turbo
 int8 produced `~/runtime/f7-bukti/17d7b8e8_000.png` — 1,468,916 bytes, PNG 832×1216 RGB, md5
 `29fd1c67edc64757f0e5743b7e960df9`, prompt_id `17d7b8e8-5e34-4520-b534-de198518ec71`, `status: completed`
-with `error: null`, and `spends_credits: false`. One image is not an asset pipeline: the 3D half (TRELLIS.2
-→ GLB → Blender retopo → UE) still has no verified output, and the VRAM gate is still a rule the engine has
-to read rather than one the scheduler enforces. F7 stays 🟡.
+with `error: null`, and `spends_credits: false`. Amended again the same hour: the 3D half produced
+`~/runtime/f7-bukti/9c23b91f_008.glb` — 23,136,068 bytes, glTF 2.0 (magic verified, declared length
+equals actual length), 1 mesh / 1 primitive / 3 images / 1 material, prompt_id
+`9c23b91f-f7ea-4476-a55f-f2e5953e4629`, `error: null`. **That is a model, not an asset**: the node
+report reads 2,783,400 vertices and 5,406,248 faces, so the decimate stage did not bound what got
+saved, and no game ships a 5.4-million-face rock. F7 stays 🟡 until the retopo/decimate half is
+measured in Blender and the VRAM gate is enforced by a scheduler instead of read as advice.
 
 ### Verified
 
