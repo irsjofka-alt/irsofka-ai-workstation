@@ -606,6 +606,29 @@ def idle_debt_menu(conn, engine, brain_root=None):
             "partial": bool(unreadable), "items": items}
 
 
+def idle_budget_used(conn, backend):
+    """Berapa baris idle yang sudah MEMAKAN anggaran pada jendela ON yang sedang berjalan.
+
+    Satu definisi untuk dua pemanggil. Sebelumnya `ensure_idle_item` menghitung
+    COMPLETED+FAILED+PARKED sejak `on_epoch`, sementara `queue_followup` menghitung
+    HANYA COMPLETED dan TANPA batas jendela — dua aturan di bawah satu kata "anggaran".
+    Yang kedua adalah bug yang menunggu jam: setelah lima baris idle selesai sepanjang
+    sejarah basis data, aturan DONE->lanjutan berhenti selamanya, termasuk besok dan
+    lusa, tanpa satu pun pesan yang mengatakannya.
+    """
+    ph = "%s" if backend == "POSTGRESQL" else "?"
+    ap = autopilot(conn, backend) or {}
+    on_epoch = int(ap.get("on_epoch") or 0)
+    spent = run(conn, backend,
+                f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin={ph} "
+                f"AND status IN ('COMPLETED','FAILED','PARKED') AND "
+                + (f"EXTRACT(EPOCH FROM completed_at::timestamptz) >= {ph}"
+                   if backend == "POSTGRESQL"
+                   else f"CAST(strftime('%s', completed_at) AS INTEGER) >= {ph}"),
+                (ORIGIN_IDLE, on_epoch)) or []
+    return int((spent[0].get("n") if spent else 0) or 0)
+
+
 def ensure_idle_item(conn, backend, cli_engine=None, who=IDLE_HOLDER, emit=None, brain_root=None):
     """Satu baris 'idle' ketika ON tidak punya apa pun DAN ada utang yang terukur.
 
@@ -695,17 +718,12 @@ def ensure_idle_item(conn, backend, cli_engine=None, who=IDLE_HOLDER, emit=None,
         return None
 
     try:
-        # Semua keadaan akhir dihitung, bukan hanya COMPLETED. Kalau hanya keberhasilan yang
-        # memakan anggaran, baris idle yang gagal tidak pernah mengurangi sisa dan menu yang sama
-        # dibuat ulang selamanya — satu-satunya remnya jadi pemutus malam, itu terlalu jauh.
-        spent = run(conn, backend,
-                    f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin={ph} "
-                    f"AND status IN ('COMPLETED','FAILED','PARKED') AND "
-                    + (f"EXTRACT(EPOCH FROM completed_at::timestamptz) >= {ph}"
-                       if backend == "POSTGRESQL"
-                       else f"CAST(strftime('%s', completed_at) AS INTEGER) >= {ph}"),
-                    (ORIGIN_IDLE, on_epoch)) or []
-        used_idle = int((spent[0].get("n") if spent else 0) or 0)
+        # Semua keadaan akhir dihitung, bukan hanya COMPLETED, dan hanya dalam jendela ON ini —
+        # keduanya hidup di `idle_budget_used`, satu tempat untuk dua pemanggil. Kalau hanya
+        # keberhasilan yang memakan anggaran, baris idle yang gagal tidak pernah mengurangi sisa
+        # dan menu yang sama dibuat ulang selamanya; kalau tanpa batas jendela, lima baris idle
+        # yang selesai tahun lalu membekukan aturan ini untuk selamanya.
+        used_idle = idle_budget_used(conn, backend)
     except Exception as exc:  # noqa: BLE001
         emit("IDLE_DEBT_UNKNOWN", why=f"anggaran idle tidak terbaca ({str(exc)[:50]})")
         return None
@@ -1228,10 +1246,7 @@ def queue_followup(conn, backend, cli_engine, emit=None):
         if open_idle:
             emit("IDLE_ALREADY_OPEN", item=int(open_idle[0]["id"]))
             return None
-        done = run(conn, backend,
-                   f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin={ph} "
-                   f"AND status='COMPLETED'", (ORIGIN_IDLE,)) or []
-        used = int((done[0]["n"] if done else 0) or 0)
+        used = idle_budget_used(conn, backend)
         if used >= IDLE_MAX_ITEMS:
             emit("IDLE_BUDGET_SPENT", used=used, cap=IDLE_MAX_ITEMS)
             return None
@@ -4821,11 +4836,19 @@ def idle_selftest(check):
               "akan mengantrikan lanjutan berikutnya selamanya",
               int((still[0]["n"] if still else 0) or 0) == 0, str([a for a, _ in ev])[:150])
 
-        # dan anggaran tetap langit-langitnya
+        # dan anggaran tetap langit-langitnya — diisi CAMPURAN, bukan hanya keberhasilan.
+        # Ini pengunci `idle_budget_used`: `queue_followup` dulu menghitung HANYA COMPLETED dan
+        # TANPA batas jendela, jadi tiga kegagalan tidak memakan apa pun dan baris yang selesai
+        # di jendela lain yang sudah lewat ikut terhitung selamanya.
         for i in range(IDLE_MAX_ITEMS):
+            _st = 'FAILED' if i % 2 else 'COMPLETED'
             c.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin,completed_at,"
-                      "evidence) VALUES (?, 'COMPLETED', 'qoder', 'idle', ?, 'x')",
-                      (f"idle penuh {i}", _ts))
+                      "evidence) VALUES (?, ?, 'qoder', 'idle', ?, 'x')",
+                      (f"idle penuh {i} {_st}", _st, _ts))
+        c.commit()
+        # dan satu baris idle yang selesai SEBELUM jendela ini tidak boleh ikut memakan sisa
+        c.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin,completed_at,evidence) "
+                  "VALUES ('idle jendela lama','COMPLETED','qoder','idle',datetime('now','-2 days'),'x')")
         c.commit()
         c.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin) "
                   "VALUES ('satu lagi','PENDING','qoder','roadmap')")
@@ -4834,10 +4857,27 @@ def idle_selftest(check):
         ev.clear()
         finish(c, "SQLITE", another, "COMPLETED", evidence="x", followup=True, emit=emit)
         over = run(c, "SQLITE", "SELECT COUNT(*) AS n FROM quest_tasks WHERE phase='followup'")
-        check("lanjutan tetap kena langit-langit anggaran — penajaman diri tidak boleh memakan "
-              "malam tanpa batas",
-              int((over[0]["n"] if over else 0) or 0) == 0
-              and any(a == "IDLE_BUDGET_SPENT" for a, _ in ev), str([a for a, _ in ev])[:150])
+        spent_ev = [k for a, k in ev if a == "IDLE_BUDGET_SPENT"]
+        # Angka yang diharapkan dihitung ulang dengan ekspresi SQL yang ditulis tangan di sini —
+        # kalau dibandingkan dengan konstanta saja, tes ini akan merah pada fixture yang punya baris
+        # idle sah lain (persis yang terjadi), dan kalau dibandingkan dengan hasil fungsi itu
+        # sendiri, ia hanya menggemakan dirinya.
+        _oe = int((autopilot(c, "SQLITE") or {}).get("on_epoch") or 0)
+        _exp = run(c, "SQLITE",
+                   "SELECT COUNT(*) AS n FROM quest_tasks WHERE origin='idle' AND status IN "
+                   "('COMPLETED','FAILED','PARKED') AND "
+                   "CAST(strftime('%s', completed_at) AS INTEGER) >= ?", (_oe,))
+        _expected = int((_exp[0]["n"] if _exp else 0) or 0)
+        check("lanjutan kena langit-langit yang SAMA seperti kerja idle: kegagalan ikut dihitung, "
+              "hanya jendela ON ini yang dihitung, dan baris jendela lama tidak ikut",
+              int((over[0]["n"] if over else 0) or 0) == 0 and spent_ev
+              and spent_ev[0].get("used") == _expected
+              and _expected >= IDLE_MAX_ITEMS
+              and "idle jendela lama" not in str(run(c, "SQLITE",
+                    "SELECT title FROM quest_tasks WHERE origin='idle' AND status IN "
+                    "('COMPLETED','FAILED','PARKED') AND CAST(strftime('%s', completed_at) AS "
+                    "INTEGER) >= ?", (_oe,))),
+              f"used={spent_ev[0].get('used') if spent_ev else None} expected={_expected}")
     finally:
         c.close()
         tmp.unlink(missing_ok=True)
