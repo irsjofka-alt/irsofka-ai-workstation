@@ -252,6 +252,20 @@
         ]
       },
       "note": "Ditambahkan 2026-10-09 atas perintah operator, bersama kontrak bobot-pertanyaan. Pemikir RINGAN untuk keputusan level preferensi. Untuk penalaran medium ke tinggi gunakan `gemini-pro` (3.1 Pro High), bukan kunci ini."
+    },
+    "gemini-byok": {
+      "binary": "python3",
+      "kind": "cli",
+      "model": "gemini-3.8-flash",
+      "role": "byok-pool",
+      "template": [
+        "python3",
+        "tools/byok.py",
+        "ask",
+        "{prompt}"
+      ],
+      "breath": "kolam 5 slot / 3 kunci nyata milik operator (akun PRO); rotasi terjadi di tools/byok.py dan index-nya ditulis balik ke config/byok.json",
+      "note": "Kolam BYOK yang selama ini hanya dipakai editor UE (IRSofkaEngine/Saved/IRSofkaBYOK.json) sekarang punya jalur CLI, jadi cross_verify dan tangga resolver bisa sampai ke pool yang berbeda dari agy. Kunci TIDAK pernah lewat argv maupun stdout: hanya x-goog-api-key. Bukti panggilan nyata: 'Balas hanya satu kata: HIDUP' -> HIDUP. Ditambahkan 2026-10-15 atas item 241/242."
     }
   },
   "local_tiers": {
