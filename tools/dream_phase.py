@@ -226,12 +226,18 @@ def rank_memories(conn, engine):
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "why": f"world_memory tidak terbaca: {str(exc)[:80]}"}
 
-    by_cat, by_prefix = {}, {}
+    by_cat, by_prefix, prefix_label = {}, {}, {}
     for r in rows:
         c = (r["category"] or "").strip().lower()
         by_cat[c] = by_cat.get(c, 0) + 1
         p = _norm(r["content"])
         by_prefix[p] = by_prefix.get(p, 0) + 1
+        # Hash adalah identitas, bukan label. Sejak `_norm` berubah dari potongan 76 karakter
+        # menjadi SHA-256, `duplicates` tanpa sengaja ikut berubah bentuk menjadi
+        # {"d12ca4ab…": 2} — angka yang benar tapi tidak bisa dibaca siapa pun, dan laporan yang
+        # kuncinya berupa hash tidak memberi tahu BARIS MANA yang kembar. Jadi teks aslinya
+        # disimpan sekali per hash: pengelompokan tetap presisi, laporannya tetap manusiawi.
+        prefix_label.setdefault(p, " ".join((r["content"] or "").split())[:76])
 
     scored = []
     for r in rows:
@@ -259,7 +265,8 @@ def rank_memories(conn, engine):
         "ok": True, "count": len(scored), "rows": scored, "top": scored[:RETRIEVAL_SLOTS],
         "bottom": scored[-3:],
         "crowded": {k: v for k, v in by_cat.items() if v > CROWD_LIMIT},
-        "duplicates": {k: v for k, v in by_prefix.items() if v > 1},
+        "duplicates": {prefix_label[k]: v for k, v in by_prefix.items() if v > 1},
+        "duplicate_ids": {k: v for k, v in by_prefix.items() if v > 1},
         "invisible_rules": invisible_rules,
         "retrievable": sum(1 for r in scored if r["visible"]),
     }
