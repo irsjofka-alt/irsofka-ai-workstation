@@ -298,15 +298,23 @@ def night_state(conn, engine, dirty=_MEASURE):
     if n_fail >= NIGHT_MAX_FAILURES:
         why.append(f"{n_fail} kegagalan beruntun tanpa satu pun keberhasilan "
                    f"(batas {NIGHT_MAX_FAILURES})")
+    # Dua klausul tree dipisah dari sisanya, BUKAN karena ia kurang penting, melainkan karena ia
+    # menahan hal yang berbeda. Bahaya "tree kotor" adalah MENIMBUN pekerjaan mesin di atas berkas
+    # orang yang belum selesai — dan itu terjadi di jalur commit/push, bukan di jalur baca-jawab.
+    # `dirty_why` membuat perbedaan itu bisa ditegakkan per-baris di `claim()`, dan `blocking`
+    # menjaga `ok`/`why` yang dibaca semua permukaan lama tetap seperti adanya.
+    dirty_why = []
     if dirty is True:
-        why.append("working tree kotor")
+        dirty_why.append("working tree kotor")
     if dirty is None:
-        why.append("git tidak terbaca — UNKNOWN, bukan bersih")
+        dirty_why.append("git tidak terbaca — UNKNOWN, bukan bersih")
+    why += dirty_why
     if done >= NIGHT_MAX_ITEMS:
         why.append(f"batas {NIGHT_MAX_ITEMS} item per sesi terlampaui")
     return {"mode": (ap or {}).get("mode"), "failures_run": n_fail, "items_done": done,
             "lookback_seconds": FAILURE_LOOKBACK,
-            "tree_dirty": dirty, "ok": not why, "why": why}
+            "tree_dirty": dirty, "ok": not why, "why": why,
+            "blocking": [w for w in why if w not in dirty_why], "dirty_why": dirty_why}
 
 
 def norm(status: str | None) -> str:
@@ -833,6 +841,11 @@ def claim(conn, engine, item_id, who, dirty=_MEASURE, mode=None):
         # awal tick. Keduanya cocok lewat satu pembedaan — yang mahal dan bergantung lingkungan
         # boleh diwarisi, yang merupakan keputusan tidak.
         st = night_state(conn, engine, dirty=dirty)
+        # Tidak ada pengecualian mode di sini, dan itu keputusan yang sudah diambil dan diuji,
+        # bukan kelalaian: lihat `working tree kotor menutup SEMI juga — §6 tidak punya mode
+        # pengecualian`. §6 menahan SEMUA klaim selama tree kotor, termasuk baris yang ditulis
+        # operator sendiri. Yang BOLEH berubah adalah berapa lama tree itu kotor — jawabannya di
+        # `push_gate`, yang sekarang benar-benar melihat tree, bukan di sini.
         if st["why"]:
             return False, "circuit breaker: " + "; ".join(st["why"])
     if ap.get("mode") == "SEMI" and (item.get("origin") or ORIGIN_LEGACY) != ORIGIN_OPERATOR:
@@ -2705,6 +2718,19 @@ def push_gate(events_path=None):
     shipped_without = [sha for sha in pushed if sha[:12] not in cleared]
     assert "" not in cleared and "" not in held   # sebuah sha kosong tidak boleh membebaskan apa pun
     reasons = []
+    # Di sinilah pemutus "working tree kotor" seharusnya berdiri, dan hari ini ia tidak berdiri di
+    # mana pun: `push_gate` hanya mengadili sha terhadap peristiwa verdict, jadi mendorong di atas
+    # pekerjaan yang belum di-commit selama ini lulus diam-diam. Itu bahaya yang sebenarnya dari
+    # tree kotor — bukan "mesin membaca berkas", melainkan "sejarah publik ditulis sambil ada
+    # pekerjaan orang lain yang belum selesai, dan satu `git add -A` nanti akan menyapu keduanya".
+    # Pindah ke sini bukan pelonggaran: klaim operator yang selama ini tersumbat jadi jalan, dan
+    # yang menahan sekarang adalah gerbang yang menghadap keluar.
+    dirty_now = tree_dirty()
+    if dirty_now is True:
+        reasons.append("working tree kotor — dorong hanya setelah pekerjaan yang belum di-commit "
+                       "di-commit atau dikembalikan, supaya riwayat publik tidak menyapu kerja orang")
+    elif dirty_now is None:
+        reasons.append("git tidak terbaca — UNKNOWN, dan UNKNOWN tidak pernah berarti boleh dorong")
     if undelivered:
         reasons.append(f"{len(undelivered)} commit belum berangkat TANPA vonis dan tanpa catatan "
                        f"ditahan (contoh {undelivered[0][:12]})")
@@ -2718,6 +2744,7 @@ def push_gate(events_path=None):
     # didorong". Satu nama untuk dua keadaan berbeda adalah dua laporan yang boleh berbeda (§12),
     # dan yang salah baca di sini adalah pagar yang menahan kode keluar dari mesin orang lain.
     return {"declared": not reasons, "ok": not reasons and not undelivered and bool(cleared),
+            "tree_dirty": dirty_now,
             "pushable": [x for x in unpushed if x[:12] in cleared][:5],
             "unpushed": len(unpushed),
             "cleared": len(cleared), "held": len(held),
@@ -4124,12 +4151,80 @@ def selftest():
           all(isinstance(b, str) for _a, b, _u in banners) and banners, str(len(banners)))
 
     idle_selftest(check)
+    dirty_tree_selftest(check)
 
     bad = [c for c in checks if not c[1]]
     for name, okval, detail in checks:
         print(f"[{'ok    ' if okval else 'GAGAL '}] {name}" + (f" — {detail}" if detail and not okval else ""))
     print(f"\nwork_order selftest: {len(checks) - len(bad)}/{len(checks)} sesuai")
     return 1 if bad else 0
+
+
+def dirty_tree_selftest(check):
+    """Pemutus tree kotor: apa yang boleh dan tidak boleh disentuh, diuji dua sisi.
+
+    Percobaan 2026-10-15 untuk mengecualikan baris `operator` dari klausul ini DIBATALKAN setelah
+    menabrak tes lama yang menulis alasannya sendiri — §6 tidak punya mode pengecualian. Yang
+    tersisa dari percobaan itu adalah bagian yang tidak menabrak apa pun dan menutup celah nyata:
+    `push_gate`, satu-satunya pintu keluar, sebelumnya buta terhadap tree. Jadi yang diuji di
+    bawah: klausul tree masih bisa dipisah datanya, SEMUA klaim (operator termasuk) tetap tertutup,
+    dan mendorong sekarang menolak di atas tree kotor — tempat bahaya itu memang berada.
+    """
+    import sqlite3 as _sq
+    tmp = Path(f"/tmp/dirty_tree_{now()}.db")
+    c = _sq.connect(str(tmp)); c.row_factory = sqlite3.Row
+    try:
+        ensure_schema(c, "SQLITE")
+        c.execute("UPDATE autopilot_state SET mode='ON', on_epoch=?, until_epoch=?, level='dispatch' "
+                  "WHERE id=1", (now() - 60, now() + 7200))
+        c.commit()
+        st = night_state(c, "SQLITE", dirty=True)
+        check("tree kotor masih MENUTUP loop secara umum (ok=False, `why` tidak berubah bentuk)",
+              st["ok"] is False and any("kotor" in w for w in st["why"]), str(st["why"])[:120])
+        check("klausul tree bisa dipisah: ia ada di `dirty_why` dan TIDAK di `blocking`",
+              any("kotor" in w for w in st["dirty_why"])
+              and not any("kotor" in w for w in st["blocking"]), str(st)[:160])
+
+        def _mk(origin):
+            c.execute("INSERT INTO quest_tasks (title, status, cli_engine, origin) "
+                      "VALUES (?, 'PENDING', 'qoder', ?)", (f"baris {origin}", origin))
+            c.commit()
+            return int(c.execute("SELECT id FROM quest_tasks WHERE title=?",
+                                 (f"baris {origin}",)).fetchone()[0])
+
+        ok_op, why_op = claim(c, "SQLITE", _mk(ORIGIN_OPERATOR), who="qoder", dirty=True, mode="ON")
+        ok_rd, why_rd = claim(c, "SQLITE", _mk(ORIGIN_ROADMAP), who="qoder", dirty=True, mode="ON")
+        ok_id, why_id = claim(c, "SQLITE", _mk(ORIGIN_IDLE), who="qoder", dirty=True, mode="ON")
+        # Tiga-tiganya DITOLAK, dan itu bukan kebetulan yang belum sempat dilonggarkan. Percobaan
+        # 2026-10-15 untuk mengecualikan baris operator dari klausul ini ditabrakkan pada tes lama
+        # `working tree kotor menutup SEMI juga — §6 tidak punya mode pengecualian` dan dibatalkan:
+        # §6 tidak mengenal mode pengecualian. Yang diubah di sini hanya menambah penjaga di
+        # `push_gate`, tempat bahaya tree kotor sebenarnya hidup.
+        check("tree kotor menutup klaim operator JUGA — §6 tidak punya pengecualian, dan itu "
+              "sudah diuji; yang menahan perintah orang adalah tree itu sendiri, bukan kodenya",
+              ok_op is False and "kotor" in (why_op or ""), str(why_op)[:120])
+        check("pekerjaan yang dimulai mesin juga tertutup",
+              ok_rd is False and "kotor" in (why_rd or ""), str(why_rd)[:120])
+        check("kerja idle juga tertutup", ok_id is False and "kotor" in (why_id or ""),
+              str(why_id)[:120])
+
+        orig_td = globals()["tree_dirty"]
+        try:
+            globals()["tree_dirty"] = lambda: True
+            g_dirty = push_gate()
+            globals()["tree_dirty"] = lambda: False
+            g_clean = push_gate()
+        finally:
+            globals()["tree_dirty"] = orig_td
+        check("PUSH sekarang menolak di atas tree kotor — gerbang keluar yang sebelumnya buta",
+              g_dirty["ok"] is False and g_dirty["tree_dirty"] is True
+              and any("kotor" in w for w in g_dirty.get("why", [])), str(g_dirty.get("why"))[:150])
+        check("dan ia tidak lagi menyebut tree kotor kalau tree bersih — kelaian bukan tameng",
+              g_clean["tree_dirty"] is False
+              and not any("kotor" in w for w in g_clean.get("why", [])), str(g_clean.get("why"))[:150])
+    finally:
+        c.close()
+        tmp.unlink(missing_ok=True)
 
 
 def idle_selftest(check):
