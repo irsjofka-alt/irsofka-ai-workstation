@@ -430,7 +430,7 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
             # bersyarat, pelepasan saat kirim gagal. Tidak ada jalur kedua dengan pagar sendiri.
             # SEMI tidak pernah sampai ke sini: `wanted == "ON"` adalah satu-satunya gerbangnya,
             # dan `claim()` tetap menolak keranjangnya sebagai lapis kedua.
-            item = wo.ensure_idle_item(conn, engine, who=wo.IDLE_HOLDER, emit=emit)
+            item = wo.ensure_idle_item(conn, engine, emit=emit)
         if not item:
             emit("QUEUE_EMPTY", origin=origin or "apa pun")
             return None

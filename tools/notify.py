@@ -87,7 +87,11 @@ NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD"
         # utang terukur, atau anggaran idle habis — bukan kegagalan pembacaan. Yang terakhir itu
         # sengaja dibedakan: `IDLE_BUDGET_SPENT` berarti pengayaan-diri berhenti karena sudah
         # cukup banyak dikerjakan malam ini, dan itu hasil, bukan kerusakan.
-        "IDLE_ENGINE_BUSY", "IDLE_ALREADY_OPEN", "IDLE_NO_DEBT", "IDLE_BUDGET_SPENT"}
+        "IDLE_ENGINE_BUSY", "IDLE_ALREADY_OPEN", "IDLE_NO_DEBT", "IDLE_BUDGET_SPENT",
+        # Mode tersimpan bukan ON: rem yang dipatuhi, bukan mesin macet. `hand_new_work` sudah
+        # memeriksa ini di pemanggil; pemeriksaan kedua di `ensure_idle_item` melaporkan lewat sini
+        # supaya pagar kedua tidak pernah diam-diam mengasumsikan yang pertama sudah jalan.
+        "IDLE_HELD_BY_MODE"}
 # `CLOSED_OFF` pernah ada di daftar ini dan dibuang dengan alasan "OFF bukan lagi sebuah mode".
 # Alasan itu tidak berlaku sejak 2026-10-09: OFF kembali menjadi state yang disimpan, dan nama
 # kejadiannya `MODE_OFF` (lihat keranjang NOTE di atas). Yang tetap benar dari komentar lama:
