@@ -125,11 +125,40 @@ def decide_wake(conn, engine, target, now=None, beats=None, heartbeat=None):
     return True, f"DONE — item {int(last[0]['id'])} {last[0]['status']}, pane terbukti tenang"
 
 
+def open_wake(conn, engine):
+    """Baris wake yang masih terbuka, kalau ada. Nilainya lewat parameter, bukan sisipan string."""
+    ph = "%s" if engine == "POSTGRESQL" else "?"
+    return wo.run(conn, engine,
+                  f"SELECT id, status FROM quest_tasks WHERE title={ph} "
+                  f"AND status IN ('PENDING','CLAIMED','WORKING') ORDER BY id LIMIT 1",
+                  (WAKE_PHRASE,)) or []
+
+
 def main(argv=None):
     a = argv if argv is not None else sys.argv[1:]
     target = (a[0] if a else "qoder")
     conn, engine = db_state.get_db_connection()
     try:
+        # Retry dulu, baru Create. Deadlock yang ditemukan sendiri setengah jam sebelum operator
+        # pergi tidur: `decide_wake` menolak membuat baris kedua selama satu baris wake masih
+        # terbuka (ALREADY_OPEN) — itu benar, dua wake di pane yang sama akan saling menelan. Tapi
+        # pada level observe TIDAK ADA yang mengantar ulang baris yang gagal terkirim: tick timer
+        # hanya OBSERVED, dan satu-satunya jalur yang tidak digembok `level` adalah jalur tulis di
+        # saat penulisan. Hasil terukur: item 258 PENDING tanpa pemegang, tanpa due_epoch, tanpa
+        # alasan — dan setiap tick sesudahnya menjawab ALREADY_OPEN. Loop mati oleh penjaga yang
+        # saya tulis sendiri. Jadi baris wake yang menggantung diantar ulang di sini, lewat pagar
+        # yang sama persis (pane tenang, direktori tab, klaim bersyarat), bukan pagar baru.
+        stuck = open_wake(conn, engine)
+        if stuck:
+            import drainer as dr
+            res = dr.deliver_now(conn, engine, int(stuck[0]["id"]), mode="ON")
+            ev = [e["action"] for e in (res.get("events") or [])] if isinstance(res, dict) else []
+            out = {"target": target, "retry": int(stuck[0]["id"]), "sent": bool(
+                isinstance(res, dict) and res.get("sent")), "actions": ev,
+                "why": (res.get("refused") if isinstance(res, dict) else None) or "retry dilakukan"}
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+
         ok, why = decide_wake(conn, engine, target)
         out = {"target": target, "wake": ok, "why": why}
         if not ok:
