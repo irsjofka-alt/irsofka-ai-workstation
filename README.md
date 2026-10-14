@@ -221,23 +221,25 @@ database before acceptance.
 
 ## Ecosystem — Three Repositories, One Pipeline
 
-This console is the control layer of a longer pipeline. The stages are deliberately split across
-repositories so the cockpit can stay public while engine-specific source and project content does not:
+This console is the control layer of a longer pipeline. It is **content-agnostic by design**: the
+stages below drive generation, assembly and editor automation for any project — terrain, characters,
+props, VFX, cinematics — and nothing in the tooling assumes a particular genre, world or source. The
+workstation is the instrument, not the composition.
 
 ```
-   source assets & terrain references        (Lineage 2 extraction, heightmaps, splatmaps)
+   reference & source data          heightmaps · masks · concept art · meshes · audio
                        │
                        ▼
-   Irsofka AI Workstation  ◀── this repo     cockpit, telemetry, autopilot, cross-verification
+   Irsofka AI Workstation  ◀── this repo     cockpit · telemetry · autopilot · cross-verification
                        │
         ┌──────────────┴──────────────┐
         ▼                             ▼
-   ComfyUI (roadmap F7)            Blender        generative + assembly:
-   images, PBR textures, 3D        mesh, UV,       meshes, textures
-   meshes via MCP                  FBX/glTF
+   ComfyUI (roadmap F7)            Blender          generative + assembly
+   images · PBR textures · 3D      mesh · UV ·       via MCP
+   meshes                          FBX / glTF
                        │
                        ▼
-              Unreal Engine 5.8                   driven through the MCP editor bridge
+              Unreal Engine 5.8                     driven through the MCP editor bridge
 ```
 
 | Stage | Repository | Visibility |
@@ -246,7 +248,7 @@ repositories so the cockpit can stay public while engine-specific source and pro
 | Generative studio (ComfyUI + Blender MCP wiring) | no repository: a per-machine install, described by roadmap **F7** | local only |
 | Unreal Engine 5.8 MCP editor bridge (`IRSofka-UE-AIStation-Core`) | `irsjofka-alt/IRSofka-UE-AIStation-Core` | **private** |
 | Unreal Engine gameplay project | `irsjofka-alt/IRSofkaEngine` | **private** |
-| Extracted terrain sources | no repository | **cannot be published** — derived from third-party game assets |
+| Working reference material | no repository | **not published** — third-party licences may not permit redistribution, and project content is not for sale |
 
 ### How the three stages actually connect
 

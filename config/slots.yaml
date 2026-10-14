@@ -22,14 +22,25 @@ teams:
     title: QA & Code Auditor
     engine: qoder_cli
     instruction_ref: skills/coding_standards.md
+  # Tangga pemeriksa (kebijakan operator 2026-10-15): pakai pool yang kuotanya masih ada; kalau
+  # tidak ada, Gemini 3.8 Flash High sudah cukup sebagai PELAPIS. Target masa depan adalah
+  # Gemini 4 Aragon begitu id itu muncul di `agy models` — belum ada hari ini, jadi jangan
+  # ditulis lebih dulu: §12 melarang memilih model dari ingatan, dan id yang belum terbit akan
+  # membuat dispatch mati dalam diam.
+  #
+  # Batas yang harus diketahui siapa pun menyunting berkas ini: TIDAK ADA fall-through otomatis
+  # antara decider dan verifier. `work_order` hanya mengumpulkan semua registry_key untuk
+  # menghitung anggaran, dan `cross_verify` menolak sebagai UNAVAILABLE kalau meter tidak bisa
+  # dibaca atau jendela habis. Jadi saat pool Claude kosong, decider TIDAK berpindah sendiri ke
+  # Flash High — yang memanggil harus memilih lapisannya secara sadar.
   - role_id: decider
-    title: "Independent Verifier (final decide, penalaran medium-ke-high: Gemini 3.8 Flash High)"
-    registry_key: gemini-verify
+    title: "Independent Verifier (final decide; Claude Opus 5.5 High — pool terpisah dari si penulis kode)"
+    registry_key: claude-opus
   - role_id: decider-light
     title: "Independent Verifier (keputusan level preferensi, penalaran ringan: Gemini 3.8 Flash Medium)"
     registry_key: gemini-verify-light
   - role_id: verifier
-    title: "Second-tier Verifier (penalaran medium-ke-high: Gemini 3.8 Flash High)"
+    title: "Pelapis (penalaran medium-ke-high: Gemini 3.8 Flash High) — dipakai saat pool utama habis"
     registry_key: gemini-verify
   - role_id: verifier-light
     title: "Second-tier Verifier (penalaran ringan: Gemini 3.8 Flash Medium)"
