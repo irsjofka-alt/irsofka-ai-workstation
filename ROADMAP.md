@@ -13,7 +13,7 @@ F3 Telemetry & SQL State          ✅ Completed
 F4 Native Rust Window GUI         ✅ Completed
 F5 Memory & Session Integrity     ✅ Completed (Oct 6)
 F6 Cross-Verification Ecosystem   🟡 In Progress
-F7 Creative Studio (ComfyUI/UE5)  🟡 In Progress (tooling wired; zero model weights)
+F7 Creative Studio (ComfyUI/UE5)  🟡 In Progress (weights on disk; first real run produced a file)
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
@@ -143,8 +143,13 @@ Pending:
 Original plan: ComfyUI HTTP API (`:8188`) integration via a `comfy_workflow` MCP tool sharing the same
 VRAM gate, to prevent resource contention with local LLMs and graphical viewports.
 
-Measured on Oct 14, 2026: the **integration layer is done**, the **asset layer is not**. F7 moves to
-🟡 on the strength of the wiring, not on the strength of a generated image — there is none yet.
+Measured on Oct 14, 2026: the **integration layer is done**, the **asset layer is not**.
+Amended Oct 15, 2026 04:3x: the sentence "there is no generated image yet" stopped being true. Z-Image-Turbo
+int8 produced `~/runtime/f7-bukti/17d7b8e8_000.png` — 1,468,916 bytes, PNG 832×1216 RGB, md5
+`29fd1c67edc64757f0e5743b7e960df9`, prompt_id `17d7b8e8-5e34-4520-b534-de198518ec71`, `status: completed`
+with `error: null`, and `spends_credits: false`. One image is not an asset pipeline: the 3D half (TRELLIS.2
+→ GLB → Blender retopo → UE) still has no verified output, and the VRAM gate is still a rule the engine has
+to read rather than one the scheduler enforces. F7 stays 🟡.
 
 ### Verified
 
@@ -152,11 +157,13 @@ Measured on Oct 14, 2026: the **integration layer is done**, the **asset layer i
 |---|---|---|
 | MCP server registered for the CLI | ✅ | `engines/qoder/settings.json` → `mcpServers: [local-workstation, irsofka-unreal-mcp, mcp-blender, comfy-mcp]` |
 | comfy-cli | ✅ 1.22.0 | `server_info` → `compatibility.comfy_cli_version` |
-| ComfyUI core | 🟡 v0.39.2, v0.40.0 available | `server_info` → `freshness.core.outdated: true` |
+| ComfyUI core | ✅ v0.40.0 (commit 3541246a), `outdated: false` | `server_info` → `freshness.core` — re-measured 2026-10-15; the row above previously read "v0.39.2, v0.40.0 available", which had since stopped being true |
 | Node packs | ✅ ComfyUI-Manager 3.42, BiRefNet-ZHO, Trellis2 1.0.27 | `server_info` → `freshness.packs` |
 | One shared model root for CLI **and** Desktop | ✅ | `extra_model_paths.yaml` (`is_default: true`) and the ComfyUI Desktop app's own `settings.json` resolve to the **same** `models`/`input`/`output` directories — the "which root is actually used" trap is closed by config, not by guessing |
 | Hardware routing decision | ✅ RTX 3060 12 GB → 8–24 GB band: images local, video not | `server_info` → `hardware.gpu` |
 | Skill library | ✅ `SKILL.md` + 9 measured documents under `brain/skills/comfyui/01–09` (untracked, per the skills policy in the contract) | `~/.agents/skills/comfyui` → symlink to that directory |
+| Model weights | ✅ 3 diffusion + 2 text encoders + 3 VAE on disk | `search_models`: `diffusion_models/{lumina_2_model_bf16, z_image_turbo_int8_convrot, trellis_2_int8_convrot}.safetensors`, `text_encoders/{qwen_3_4b_fp8_mixed, gemma_2_2b_fp16}.safetensors`, `vae/{ae, trellis_2_shape_vae_bf16, trellis_2_texture_vae_bf16}.safetensors` |
+| **First real generation** | ✅ Z-Image-Turbo int8, 8 steps, cfg 1, 832×1216 | prompt_id `17d7b8e8-5e34-4520-b534-de198518ec71` → `status: completed`, `error: null`; `fetch_outputs` wrote 1,468,916 bytes to `~/runtime/f7-bukti/17d7b8e8_000.png`; `file` confirms `PNG 832x1216 8-bit RGB`; md5 `29fd1c67edc64757f0e5743b7e960df9`. Route: `fetch_template(image_z_image_turbo_int8)` → `local_check.runnable: true, error_count: 0` → `set_workflow_slot` (5 slots) → `validate_workflow` (`valid: true`, `spends_credits: false`, 10 nodes) → `run_workflow(wait=false)`. Free local graph: no partner node, no credit spent. |
 
 ### Still blocking F7
 
