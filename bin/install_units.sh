@@ -16,7 +16,8 @@ DEST="${SYSTEMD_DIR_OVERRIDE:-$HOME/.config/systemd/user}"
 UNITS=(irsofka-ai-workstation.service irsofka-tabs.service irsofka-action-log.service
        irsofka-memory-backup.service irsofka-memory-backup.timer
        irsofka-autopilot.service irsofka-autopilot.timer
-       irsofka-dream.service irsofka-dream.timer)
+       irsofka-dream.service irsofka-dream.timer
+       irsofka-awakener.service irsofka-awakener.timer)
 ENABLE=(irsofka-ai-workstation.service irsofka-tabs.service irsofka-action-log.service
         irsofka-memory-backup.timer)
 # irsofka-autopilot.timer sengaja tidak ikut ENABLE. Sakelar yang menyalakan loop ini harus
