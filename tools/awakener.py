@@ -125,13 +125,21 @@ def decide_wake(conn, engine, target, now=None, beats=None, heartbeat=None):
     return True, f"DONE — item {int(last[0]['id'])} {last[0]['status']}, pane terbukti tenang"
 
 
-def open_wake(conn, engine):
-    """Baris wake yang masih terbuka, kalau ada. Nilainya lewat parameter, bukan sisipan string."""
+def open_wake(conn, engine, now=None):
+    """Baris wake yang masih terbuka DAN tidak sedang di-cooldown.
+
+    `due_epoch` ikut disaring karena temuan audit saya sendiri pada jalur retry ini (pesan
+    ai_message id 8, dikirim ke Antigravity): tanpa filter itu satu tick setiap 20 detik akan
+    memanggil `deliver_now` pada baris yang baru saja ditahan cooldown, selamanya — dan tidak ada
+    satu pun anggaran yang menghitungnya, karena MAX_WAKE_1H menghitung BARIS wake yang ditulis,
+    bukan percobaan kirim ulang.
+    """
     ph = "%s" if engine == "POSTGRESQL" else "?"
     return wo.run(conn, engine,
                   f"SELECT id, status FROM quest_tasks WHERE title={ph} "
-                  f"AND status IN ('PENDING','CLAIMED','WORKING') ORDER BY id LIMIT 1",
-                  (WAKE_PHRASE,)) or []
+                  f"AND status IN ('PENDING','CLAIMED','WORKING') "
+                  f"AND COALESCE(due_epoch, 0) <= {ph} ORDER BY id LIMIT 1",
+                  (WAKE_PHRASE, now or wo.now())) or []
 
 
 def main(argv=None):
@@ -139,28 +147,34 @@ def main(argv=None):
     target = (a[0] if a else "qoder")
     conn, engine = db_state.get_db_connection()
     try:
-        # Retry dulu, baru Create. Deadlock yang ditemukan sendiri setengah jam sebelum operator
-        # pergi tidur: `decide_wake` menolak membuat baris kedua selama satu baris wake masih
-        # terbuka (ALREADY_OPEN) — itu benar, dua wake di pane yang sama akan saling menelan. Tapi
-        # pada level observe TIDAK ADA yang mengantar ulang baris yang gagal terkirim: tick timer
-        # hanya OBSERVED, dan satu-satunya jalur yang tidak digembok `level` adalah jalur tulis di
-        # saat penulisan. Hasil terukur: item 258 PENDING tanpa pemegang, tanpa due_epoch, tanpa
-        # alasan — dan setiap tick sesudahnya menjawab ALREADY_OPEN. Loop mati oleh penjaga yang
-        # saya tulis sendiri. Jadi baris wake yang menggantung diantar ulang di sini, lewat pagar
-        # yang sama persis (pane tenang, direktori tab, klaim bersyarat), bukan pagar baru.
-        stuck = open_wake(conn, engine)
-        if stuck:
-            import drainer as dr
-            res = dr.deliver_now(conn, engine, int(stuck[0]["id"]), mode="ON")
-            ev = [e["action"] for e in (res.get("events") or [])] if isinstance(res, dict) else []
-            out = {"target": target, "retry": int(stuck[0]["id"]), "sent": bool(
-                isinstance(res, dict) and res.get("sent")), "actions": ev,
-                "why": (res.get("refused") if isinstance(res, dict) else None) or "retry dilakukan"}
-            print(json.dumps(out, ensure_ascii=False))
-            return 0
-
         ok, why = decide_wake(conn, engine, target)
         out = {"target": target, "wake": ok, "why": why}
+
+        # Retry hanya jika SEMUA pagar memutuskan mesin ini memang boleh dibangunkan. Versi
+        # pertama meletakkan retry SEBELUM gerbang-gerbang itu, jadi MODE_OFF, ENGINE_BUSY,
+        # WINDOW_CLOSED dan BUDGET_SPENT tidak menahan apa pun, dan satu baris wake yang tidak
+        # bisa terkirim akan dicoba 180 kali per jam dalam diam — MAX_WAKE_1H tidak menghitungnya
+        # karena ia menghitung baris yang ditulis, bukan percobaan kirim. Yang diizinkan di sini
+        # hanya satu keadaan: ALREADY_OPEN — wake memang belum mendarat di pane, dan mengirim
+        # ulang baris yang sama adalah pekerjaannya, bukan membuat baris kedua di atasnya.
+        if not ok and (why or "").startswith("ALREADY_OPEN"):
+            stuck = open_wake(conn, engine)
+            if not stuck:
+                print(json.dumps(dict(out, retried=False,
+                                      note="terbuka tapi di-cooldown — belum waktunya"),
+                                 ensure_ascii=False))
+                return 0
+            import drainer as dr
+            res = dr.deliver_now(conn, engine, int(stuck[0]["id"]), mode="ON")
+            sent = bool(isinstance(res, dict) and res.get("sent"))
+            ev = [e["action"] for e in (res.get("events") or [])] if isinstance(res, dict) else []
+            out.update({"retried": int(stuck[0]["id"]), "sent": sent, "actions": ev,
+                        "refused": (res.get("refused") if isinstance(res, dict) else None)})
+            print(json.dumps(out, ensure_ascii=False))
+            # Keluar bukan-nol kalau belum terkirim: journal harus bisa membedakan 'bangun'
+            # dari 'gagal terus', dan operator yang membaca systemctl harus menemukannya.
+            return 0 if sent else 1
+
         if not ok:
             print(json.dumps(out, ensure_ascii=False))
             return 0
