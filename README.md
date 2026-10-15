@@ -400,7 +400,7 @@ forbids an engine from narrating an action it did not perform — an unavailable
 
 Code in this repository is licensed under the **Business Source License 1.1** — you may copy,
 modify, create derivative works, redistribute and make **non-production** use of it freely;
-**production use requires a commercial licence** from PT IRSofka. Each version converts to the
+**production use requires a commercial licence** from the Licensor, PT IRSofka Data Teknologi (NIB 1258 0003 4132 6, DUNS 5645 3618 4) — write to <admin@irsofka.co.id>. Each version converts to the
 **MIT License** on its own Change Date, four years after that version is first made publicly
 available, so the clock never resets no matter how many releases follow. Full terms in
 [`LICENSE`](LICENSE).
