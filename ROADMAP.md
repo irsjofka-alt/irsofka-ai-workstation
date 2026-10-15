@@ -1012,7 +1012,37 @@ license ([fossa overview](https://fossa.com/blog/business-source-license-require
 | "jangan ada yang copy-paste lalu mengklaim hak" | copyright never transfers; notices must be retained; anyone re-releasing it as their own is infringing on text, not on interpretation. It is also public evidence of first publication date per release |
 | "saya ingin pamer sebagai showcase" | source is readable from day one; the Additional Use Grant can explicitly allow personal, evaluation, and non-production use so a visitor can actually run it |
 | "kalau ada yang mau beli, silakan" | Production Use *requires* a license from the licensor — that is the product being sold, with no renegotiation of terms later |
-| the escape hatch | Change Date (proposed: 4 years) converts it to Apache-2.0, so the asset still becomes open if the business does not want it |
+| the escape hatch | Change Date (4 years, per version) converts it to the MIT License, so the asset still becomes open even if the business never sells a licence |
+| GPL compatibility of the Change License | MIT is compatible with GPL-v2, so it satisfies covenant 1; **Apache-2.0 would not** — that is why the Change License is MIT and not Apache |
+
+#### Correction: the licence text I shipped was a scraped page, and the page is flattened
+
+The first `LICENSE` was copied from the rendered **mariadb.com/bsl11/** page. That page presents the
+*Covenants of Licensor* as two unnumbered paragraphs, and in doing so fuses three covenants into one
+sentence: *"…or (b) insert the text "None" to specify a Change Date. Not to modify this License in any
+other way."* Read that way, `"None"` — which belongs to the **Additional Use Grant** — becomes an
+instruction about the **Change Date**, and covenant 3 ("To specify a Change Date") and covenant 4 ("Not
+to modify this License in any other way.") cease to exist as separate terms. Copying it would have been
+modifying the License in exactly the way covenant 4 forbids, in a file whose whole job is to be the
+licence.
+
+Found by the independent push audit on 2026-10-15 (verdict `PERLU_KOREKSI`), not by me: I had checked
+the file against the page it came from, which is the weakest possible confirmation of a copy. The
+canonical numbered text is in SPDX (`license-list-data/text/BUSL-1.1.txt`), which carries four numbered
+covenants and the `Change Date` covenant as its own item.
+
+Both repositories' `LICENSE` files were then rebuilt **by insertion only**: the SPDX text is taken whole,
+the `Parameters` block is inserted after the header, and the `Notice` block MariaDB's page carries is
+appended. Nothing is sliced and rejoined — an earlier attempt that split the text at its own headings cut
+the sentence *"as long as you comply with the Covenants of Licensor below"* in half, which is how the
+insertion-only rule got written instead of hand-edits. Verified afterwards by line-set comparison: **0
+canonical lines missing** from each file, licence text copyright and trademark lines retained, and only
+`Licensor` / `Licensed Work` / `Additional Use Grant` / `Change Date` / `Change License` filled in.
+
+The rule this leaves behind: a licence is transcribed from the license-list entry or from a real
+adopter's `LICENSE` file, never from a rendered web page, and the transcription is checked by diffing
+against the source rather than by reading it back.
+
 
 Cost, stated plainly: **BSL is not OSI-approved open source**, so some contributors, distributions and
 enterprise legal teams will refuse it. If adoption breadth ever outranks the sale, the switch is
