@@ -241,9 +241,17 @@ server's own source, not from documentation.
 | `local-workstation` | 13 | in-repo (`tools/mcp_workstation_local.py`) | Hardware telemetry, Wayland screenshots, desktop notifications, volume, SQL state queries, quest logging, PTY read/write (`read_terminal`, `send_to_terminal`), UI refresh, daemon restart, inter-engine peer messaging |
 | `irsofka-unreal-mcp` | 6 | ships with the UE plugin | A live Unreal Engine 5.8 editor, driven through six master domains — see below |
 | `mcp-blender` | 218 | 0.4.0 | A live Blender session: mesh editing, modifiers, geometry nodes, sculpting, baking, UV, rigging, export (FBX/glTF/USD/STL), PolyHaven assets |
-| `comfy-mcp` | 40 | 0.10.0 | A local ComfyUI install via `comfy-cli`: templates, slots, workflows, jobs, model inventory and download, node packs, custom-node install, VRAM control |
+| `comfy-mcp` | 39 | 0.10.0 | A local ComfyUI install via `comfy-cli`: templates, slots, workflows, jobs, model inventory and download, node packs, custom-node install, VRAM control |
 
-**277 tools in total.** Two of those numbers are worth reading carefully, because both have been
+**276 tools in total**, re-measured 2026-10-15 against the code each server actually runs, not
+against its documentation. The method matters as much as the number, because the naive one is wrong
+by a factor of three: counting `def blender_*` in `mcp-blender/src` gives **61**, while
+`tools/list` returns **218** — that server declares its tools as data (`TOOLS: list[Tool]`, 218
+unique `name="blender_*"` entries, zero duplicates) and maps them to Blender commands by stripping
+the prefix, so most of them have no Python function of their own. `comfy-mcp` was documented at 40
+for 0.10.0; the installed 0.10.0 registers **39** (`@mcp.tool` definitions in `server.py`, all
+unique), so the older row was off by one and is corrected above. Two of those numbers are worth
+reading carefully, because both have been
 misquoted inside this project at some point: the Unreal surface is **6 tools, not hundreds** (that is a
 deliberate design decision, documented below), and the large numbers belong to Blender and ComfyUI,
 which are third-party servers with their own upstreams.
