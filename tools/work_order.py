@@ -3023,7 +3023,16 @@ ROADMAP_ITEMS = [
      "grep -qi 'Business Source License' ~/Apps/mcp/irsofka-blender-mcp/LICENSE && "
      "test -f ~/Apps/mcp/irsofka-blender-mcp/UPSTREAM && "
      "grep -qiE 'MIT|Apache' ~/Apps/mcp/irsofka-blender-mcp/UPSTREAM && "
-     "! grep -qiE 'AGPL' ~/Apps/mcp/irsofka-blender-mcp/UPSTREAM"),
+     "! grep -qiE 'AGPL' ~/Apps/mcp/irsofka-blender-mcp/UPSTREAM && "
+     # Empat klausa di atas cuma menanyakan KEHADIRAN BERKAS: gerbang ini keluar 0 pada repositori
+     # yang server.py-nya bahkan tidak bisa dijalankan. Jadi gerbang menanyakan yang sebenarnya
+     # merupakan F11/MCP-2: selftest server menyala (28 pemeriksaan: framing soket, jalur error,
+     # kosakata gerbang VRAM, permukaan JSON-RPC) dan modul vram benar-benar mendeklarasikan
+     # kosakata itu. Yang TIDAK ditanya gerbang: Blender hidup — ia tidak boleh diperlukan supaya
+     # gerbang bisa diukur jam 3 pagi, dan round-trip nyata dilaporkan sebagai bukti, bukan sebagai
+     # gate, karena alatnya tidak selalu terpasang.
+     "timeout 180 python3 ~/Apps/mcp/irsofka-blender-mcp/server.py --selftest && "
+     "grep -q 'GATE_GO' ~/Apps/mcp/irsofka-blender-mcp/vram.py"),
     ("f11step0", "F11/STEP-0 Jembatan UE: tulis probe round-trip (tools/ue_bridge_probe.py) lalu "
                  "perbaiki `set_transform`/`get_transform` dan bukti kelas `spawn`", "build", None,
      # Ini gerbang yang PEKERJAANNYA DULU HARUS ADA, dan itu ditulis di judul, bukan disembunyikan di
