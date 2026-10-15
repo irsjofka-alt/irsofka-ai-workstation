@@ -4578,6 +4578,9 @@ def selftest():
         check("push_clearance menerima kunci registry, bukan hanya id model",
               row_key is not None and str(row_key.get("model")) == "gemini-3.8-flash-high",
               str(row_key)[:140])
+        check("nama kosong tidak pernah sampai ke database sebagai `model IN ()` — ia None",
+              push_clearance(conn, "SQLITE", "") is None
+              and push_clearance(conn, "SQLITE", None) is None)
         # Pemalsuan lewat kutipan: ringkasan verification record menyimpan potongan jawaban model
         # setelah pemisah " :: ", dan potongan itu bisa memuat teks apa pun — termasuk baris vonis
         # yang dipetik dari prompt. Izin hanya boleh dibaca dari BIDANG vonis, bukan dari kutipan.
@@ -5279,7 +5282,12 @@ def push_clearance(conn, engine, model_id, within_minutes=CLEARANCE_WINDOW_MINUT
     # akan memberi izin kepada baris mana pun yang berpura-pura menyebut verifier — perluasan pagar,
     # bukan perbaikan.
     typed = (model_id or "").strip()
-    names = [n for n in (typed, verifier_log_name(typed)) if n]
+    names = [n for n in dict.fromkeys((typed, verifier_log_name(typed))) if n]
+    if not names:
+        # Nama kosong = tidak ada seorang pun yang bisa dimiliki izin ini. Mengirim `model IN ()`
+        # ke database akan dilempar dan ditelan blok di bawah: hasilnya sama (None), tapi lewat
+        # galat sintaks yang suatu hari disalahartikan sebagai "tabelnya rusak".
+        return None
     # Pembacaan yang gagal adalah TIDAK ADA IZIN, bukan "entah, lanjut saja". Arah gagalnya sama
     # dengan sisa kontrak ini: ketidaktahuan menutup jalur, tidak pernah membukanya.
     try:
