@@ -51,15 +51,23 @@ CONFIG = REPO / "config" / "tripo.json"
 
 # Semua baris ini BELUM TERVERIFIKASI. Labelnya sengaja menempel di data, bukan di komentar,
 # supaya layar yang menampilkan daftar ini tidak bisa membuatnya terlihat seperti fakta.
+# Endpoint yang dulu ada di sini adalah TEBAKAN path V2 saya, dan salah semua. Yang di bawah ini
+# TERUKUR: keluaran `tripo make ... --dry-run` pada 2026-10-15 11:1x, tanpa API key, tanpa poin
+# terpakai. Sumber kebenaran tetap CLI-nya (VAST, repo vast-enterprise/Tripo-API-CLI), bukan daftar ini.
+SPEND_COMMANDS = {"make", "ai", "redo"}
+
 ENDPOINTS = {
-    "balance": {"path": "/v2/account/balance", "method": "GET", "biaya_poin": 0,
-                "status": "belum diverifikasi — inilah yang harus dipanggil pertama, karena gratis"},
-    "image_to_model": {"path": "/v2/generate/image-to-3d", "method": "POST", "biaya_poin": "tidak diketahui",
-                       "status": "belum diverifikasi; JANGAN dijalankan tanpa --spend"},
-    "text_to_model": {"path": "/v2/generate/text-to-3d", "method": "POST", "biaya_poin": "tidak diketahui",
-                      "status": "belum diverifikasi; JANGAN dijalankan tanpa --spend"},
-    "task_status": {"path": "/v2/tasks/{task_id}", "method": "GET", "biaya_poin": 0,
-                    "status": "belum diverifikasi"},
+    "text_to_model": {"path": "/v3/generation/text-to-model", "method": "POST",
+                      "task_type": "text_to_model",
+                      "status": "TERUKUR lewat dry-run (rencana valid=true, model P1-20260311)",
+                      "biaya_poin": "cost_notes kosong saat dry-run tanpa kunci — ukur lewat whoami"},
+    "texture": {"path": "/v3/models/texture", "method": "POST", "task_type": "texture_model",
+                "status": "TERUKUR lewat dry-run", "biaya_poin": "belum terukur"},
+    "convert": {"path": "/v3/models/convert", "method": "POST", "task_type": "convert_model",
+                "status": "TERUKUR lewat dry-run", "biaya_poin": "belum terukur"},
+    "balance": {"path": "tripo whoami (CLI)", "method": "-",
+                "status": "GRATIS dan wajib dipanggil pertama; butuh `tripo login` lebih dulu",
+                "biaya_poin": 0},
 }
 
 DEFAULTS = {"base_url": "https://api.tripo3d.ai", "version": "v2", "model": "Tripo/TripoSG"}
@@ -179,6 +187,42 @@ def submit(cfg, kind, source, spend=False):
     return r
 
 
+def cli(argv, spend=False, timeout=600):
+    """Jalankan tripo-cli resmi (VAST), dengan pagar biaya yang sama seperti modul ini.
+
+    `tripo-cli` dipasang 2026-10-15 ke `~/runtime/npm-global` (bukan $HOME, sesuai §2) dan
+    menjelaskan hal yang tidak bisa saya pastikan dari dokumen: ia bicara ke **API V3**
+    (`--model tripo-v3.1 / tripo-p1 / tripo-p2`), punya `whoami` yang menampilkan saldo, dan
+    `make --dry-run` yang menyusun rencana tanpa memakai poin. Karena itu tabel ENDPOINTS di
+    atas jadi usang — jalurnya sekarang CLI, bukan tebakan path V2 saya.
+
+    Yang TIDAK diambil alih dari CLI: `--yes`-nya otomatis aktif saat headless, artinya
+    konfirmasi dilepas persis di lingkungan saya. Jadi fungsi ini memaksa `--dry-run` kecuali
+    `spend=True` disebut, dan menambahkan `--no-open` supaya tidak ada browser yang terbuka di
+    desktop operator saat dia tidur.
+    """
+    exe = os.environ.get("TRIPO_CLI", os.path.expanduser("~/runtime/npm-global/bin/tripo"))
+    if not Path(exe).exists():
+        return {"ok": False, "why": f"tripo-cli tidak ada di {exe} — npm install -g tripo-cli"}
+    args = [exe, *argv]
+    # Hanya perintah yang bisa memakai poin yang dipaksa --dry-run. Versi pertama menyisipkannya ke
+    # SEMUA perintah, dan `tripo whoami --dry-run` langsung mati: "error: unknown option '--dry-run'"
+    # — pagar yang menolak perintah baca gratis justru membuat orang menggugurkan pagarnya.
+    if not spend and argv and argv[0] in SPEND_COMMANDS and "--dry-run" not in args:
+        args.append("--dry-run")
+    if "--no-open" not in args:
+        args.append("--no-open")
+    import subprocess
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "why": f"TRANSPORT {str(e)[:160]}"}
+    out = {"ok": r.returncode == 0, "exit": r.returncode, "spent": bool(spend),
+           "argv_safe": [a if not a.startswith("AIza") else "[KEY]" for a in args],
+           "stdout": (r.stdout or "")[:1200], "stderr": (r.stderr or "")[:400]}
+    return out
+
+
 def selftest():
     """Semuanya diuji pada transport palsu — tidak ada satu byte pun yang keluar dari mesin."""
     cfg = {**DEFAULTS, "api_key": "TRIPO-KEY-PALSU-12345"}
@@ -214,20 +258,46 @@ def selftest():
 
     p404 = probe(cfg, transport=lambda c, path, m, b: {"ok": False, "status": 404, "why": "not found"})
     ok6 = "V2" in p404["verdict"]
+    # Pagarnya sendiri diuji tanpa memanggil CLI: yang diukur adalah apakah --dry-run dan --no-open
+    # benar-benar disisipkan, dan apakah ia TIDAK menyisipkannya saat operator memang menyuruh bayar.
+    import types
+    _captured = {}
+    def fake_run(args, **kw):
+        _captured["args"] = list(args)
+        return types.SimpleNamespace(returncode=0, stdout="ok", stderr="")
+    real_sub = __import__("subprocess").run
+    __import__("subprocess").run = fake_run
+    try:
+        cli(["make", "a rock"], spend=False)
+        dry = _captured.get("args", [])
+        cli(["make", "a rock"], spend=True)
+        paid = _captured.get("args", [])
+    finally:
+        __import__("subprocess").run = real_sub
+    ok7 = ("--dry-run" in dry and "--no-open" in dry and "--dry-run" not in paid)
+    print(f"[{'ok' if ok7 else 'GAGAL'}] tripo: cli memaksa --dry-run + --no-open kecuali spend=True "
+          f"(tanpa spend: {dry[-2:]} · dengan spend: {paid[-1:]})")
     print(f"[{'ok' if ok6 else 'GAGAL'}] tripo: 404 dibaca sebagai 'kemungkinan V2 dipensiunkan', "
           f"bukan sebagai keberhasilan")
-    return 0 if all([ok1, ok2, ok3, ok4, ok5, ok6]) else 1
+    return 0 if all([ok1, ok2, ok3, ok4, ok5, ok6, ok7]) else 1
 
 
 def main(argv=None):
     a = argparse.ArgumentParser(prog="tripo.py")
-    a.add_argument("cmd", choices=["status", "probe", "capabilities", "submit", "selftest"])
+    a.add_argument("cmd", choices=["status", "probe", "capabilities", "submit", "selftest", "cli"])
+    # REMAINDER, bukan nargs="*": argparse harus TIDAK mencerna flag yang ditujukan ke tripo-cli.
+    # nargs="*" terbukti salah: `tripo.py cli make x --for game-mobile` gagal di argparse saya
+    # sendiri sebelum sempat menyentuh CLI-nya.
+    a.add_argument("rest", nargs=argparse.REMAINDER, default=[])
     a.add_argument("--kind", default="image_to_model")
     a.add_argument("--input", default=None)
     a.add_argument("--spend", action="store_true")
     x = a.parse_args(argv)
     if x.cmd == "selftest":
         return selftest()
+    if x.cmd == "cli":
+        r = cli(x.rest, spend=x.spend)
+        print(json.dumps(r, ensure_ascii=False)); return 0 if r.get("ok") else 1
     if x.cmd == "capabilities":
         print(json.dumps({
             "endpoints": ENDPOINTS, "defaults": DEFAULTS,

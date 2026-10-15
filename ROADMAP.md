@@ -154,6 +154,37 @@ pertama kalinya. Yang ✅ ini klaim adalah: **integrasi terpasang dan menghasilk
 Angka wajah di baris terakhir itu sendiri adalah pelajaran: laporan node menulis 5.406.248, berkasnya
 berisi 99.810. Yang dipercaya adalah hitungan ulang, bukan teks node.
 
+### Tripo3D via the official CLI — prepared, and it corrected my guesses
+
+`tripo-cli` 0.6.1 (repo `vast-enterprise/Tripo-API-CLI`, no install lifecycle scripts) is installed to
+`~/runtime/npm-global`, not to `$HOME`; `~/runtime/shell/runtime.sh` gained `NPM_CONFIG_PREFIX` and the
+matching PATH entry so the bin resolves.
+
+What it settled that documentation could not: **the API is V3**. `tripo make --dry-run` runs *without an
+API key and without spending credits* and returns the real plan, which exposed my hand-written endpoint
+table as wrong on every line:
+
+| | my guess (V2) | measured from the CLI (V3) |
+|---|---|---|
+| text→3D | `/v2/generate/text-to-3d` | `/v3/generation/text-to-model` |
+| texture | — | `/v3/models/texture` |
+| convert | — | `/v3/models/convert` |
+
+`tools/tripo.py` now shells to the CLI instead of to my guesses, and keeps the cost guard the CLI does
+not have: `--dry-run` is forced for `make`/`ai`/`redo` unless `--spend` is passed, and `--no-open` is
+always added so nothing pops a browser on the operator's desktop. Two bugs were caught by testing this
+against the live CLI: the guard appended `--dry-run` to read-only commands too (`tripo whoami` rejects
+that flag), and argparse was eating flags meant for the CLI until `REMAINDER`.
+
+**Deliberately NOT registered in `config/engines.json`.** That file is the registry of models the
+workstation dispatches *decisions and verification* to; a 3D asset generator is not a decision-maker,
+and putting it there invites the resolver ladder to ask a mesh generator for a verdict. It belongs to
+the F7 toolchain, which is where it is recorded.
+
+Next step needs the operator, not me: `tripo login` (browser authorises, key arrives automatically —
+so no key is pasted into a chat log), then `python3 tools/tripo.py cli whoami --json` to read the
+balance and whether Studio points and API credits share a wallet.
+
 ### Gemini BYOK as a collaboration surface — measured, not assumed
 
 The operator's own Google AI Studio pool (5 slots, 3 real keys, PRO accounts) is now a first-class
