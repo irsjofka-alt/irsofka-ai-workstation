@@ -176,8 +176,36 @@ def ask(prompt, cfg=None, transport=None, model=None, timeout=120, persist=True,
     # tindakan berbeda: kolam yang benar-benar habis menunggu hari esok, kolam yang modelnya
     # sedang padat bisa dicoba sedetik lagi.
     if exhausted_any:
-        return {"ok": False, "why": "POOL_EXHAUSTED — semua slot terisi menjawab habis",
-                "tried": tried}
+        # "Semua kunci habis" dan "model ini habis untuk semua kunci" adalah dua keadaan yang
+        # berbeda dan menuntut tindakan berbeda. Terukur 2026-10-15 10:1x: ketiga kunci menjawab
+        # 429 untuk `gemini-4-argon` sementara kunci yang SAMA menjawab 200 untuk
+        # `gemini-3.8-flash` dalam hitungan detik sebelumnya — kuota Google dihitung per model.
+        # Melaporkan itu sebagai POOL_EXHAUSTED membuat operator kira kolamnya mati, lalu ia
+        # membuang waktu menambang kunci baru. Probe kecil pada model kolam memutuskan mana
+        # yang sebenarnya: kalau model lain masih menjawab, yang habis adalah MODEL ini.
+        # Probe memilih model LAIN dari kolam, bukan model yang baru saja gagal. Versi pertama
+        # menulis `probe = default if not model else model` — jadi setiap kali pemanggil menyebut
+        # model eksplisit (mis. gemini-4-argon), probe mengulang model yang sama, selalu gagal, dan
+        # kolam dilaporkan mati padahal hidup. Terukur: argon 429 pada ketiga kunci sementara
+        # gemini-3.8-flash menjawab 200 pada kunci yang sama beberapa menit sebelumnya.
+        pool_default = (cfg.get("GeminiModel") or MODEL_ORDER[0])
+        probe_model = next((m for m in [pool_default] + list(MODEL_ORDER) if m != base_model), None)
+        pool_alive = False
+        probed = []
+        if probe_model:
+            for _, k in order(cfg):
+                _, st, _e = post(probe_model, k, "ok", transport=transport, timeout=30)
+                probed.append((probe_model, st))
+                if st == 200:
+                    pool_alive = True
+                    break
+        if pool_alive:
+            return {"ok": False, "tried": tried, "probe": probed,
+                    "why": f"MODEL_EXHAUSTED {base_model} — {len(tried)} kunci menjawab habis untuk "
+                           f"model ini, sementara {probe_model} masih hidup di kunci yang sama"}
+        return {"ok": False, "why": "POOL_EXHAUSTED — semua slot terisi menjawab habis "
+                                    f"(probe {probe_model} ikut gagal: {probed})",
+                "tried": tried, "probe": probed}
     return {"ok": False, "why": "POOL_UNAVAILABLE — semua kunci dicoba; yang menjawab adalah "
                                 "kapasitas model, bukan kuota habis", "tried": tried}
 
@@ -200,7 +228,10 @@ def selftest():
     yang membuktikan itu tidak terjadi lagi.
     """
     import hashlib
-    disk_before = hashlib.sha256(CONFIG.read_bytes()).hexdigest()
+    # Checkout bersih TIDAK punya config/byok.json (berkas itu di-gitignore karena berisi kunci
+    # nyata), jadi membaca sidik jarinya tidak bisa menjadi prasyarat lulus. Yang diuji tetap ada:
+    # kalau berkasnya ADA, selftest tidak boleh mengubahnya barang satu byte.
+    disk_before = hashlib.sha256(CONFIG.read_bytes()).hexdigest() if CONFIG.exists() else None
     good = {"slot0": "kunci-a", "slot1": "kunci-b", "slot2": "kunci-c"}
     cfg = {"GeminiApiKeys": [good["slot0"], good["slot1"], good["slot2"], "", ""],
            "ActiveGeminiKeyIndex": 0, "GeminiModel": "gemini-3.8-flash"}
@@ -270,10 +301,10 @@ def selftest():
 
     # Dan pemeriksaan yang seharusnya ada sejak dulu, karena inilah yang menghilangkan kunci
     # operator: berkas produksi tidak boleh berubah sedikit pun selama selftest berjalan.
-    disk_after = hashlib.sha256(CONFIG.read_bytes()).hexdigest()
-    ok7 = disk_after == disk_before
+    ok7 = True if disk_before is None else (
+        hashlib.sha256(CONFIG.read_bytes()).hexdigest() == disk_before)
     print(f"[{'ok' if ok7 else 'GAGAL'}] byok: selftest TIDAK menulis ke config/byok.json "
-          f"(sidik jari berkas sama sebelum dan sesudah)")
+          f"(sidik jari sama)" + (" — berkas tidak ada di checkout bersih, dilewati" if disk_before is None else ""))
     return 0 if all([ok1, ok2, ok3, ok4, ok5, ok6, ok7]) else 1
 
 

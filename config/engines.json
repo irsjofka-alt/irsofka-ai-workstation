@@ -266,6 +266,22 @@
       ],
       "breath": "kolam 5 slot / 3 kunci nyata milik operator (akun PRO); rotasi terjadi di tools/byok.py dan index-nya ditulis balik ke config/byok.json",
       "note": "Kolam BYOK yang selama ini hanya dipakai editor UE (IRSofkaEngine/Saved/IRSofkaBYOK.json) sekarang punya jalur CLI, jadi cross_verify dan tangga resolver bisa sampai ke pool yang berbeda dari agy. Kunci TIDAK pernah lewat argv maupun stdout: hanya x-goog-api-key. Bukti panggilan nyata: 'Balas hanya satu kata: HIDUP' -> HIDUP. Ditambahkan 2026-10-15 atas item 241/242."
+    },
+    "gemini-argon": {
+      "binary": "python3",
+      "kind": "cli",
+      "model": "gemini-4-argon",
+      "role": "decider",
+      "template": [
+        "python3",
+        "tools/byok.py",
+        "ask",
+        "--model",
+        "gemini-4-argon",
+        "{prompt}"
+      ],
+      "breath": "FRONTIER kelas atas pada kolam BYOK milik operator. TERUKUR 2026-10-15 10:1x: model ini menjawab 429 pada KETIGA kunci, sementara gemini-3.8-flash menjawab 200 pada kunci yang sama dalam hitungan detik — kuota Google dihitung per model, bukan per kunci. Jadi rung ini akan sering MODEL_EXHAUSTED dan tangga akan jatuh ke rung berikutnya; itu perilaku yang benar, bukan kolam mati.",
+      "note": "Didaftarkan atas perintah operator langsung: 'untuk API ... bisa memakai gemini-4-argon sebagai DECIDER ini FRONTIER kelas atas dan available'. Kunci tidak pernah lewat argv maupun stdout."
     }
   },
   "local_tiers": {

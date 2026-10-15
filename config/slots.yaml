@@ -34,8 +34,8 @@ teams:
   # dibaca atau jendela habis. Jadi saat pool Claude kosong, decider TIDAK berpindah sendiri ke
   # Flash High — yang memanggil harus memilih lapisannya secara sadar.
   - role_id: decider
-    title: "Independent Verifier (final decide; Claude Opus 5.5 High — pool terpisah dari si penulis kode)"
-    registry_key: claude-opus
+    title: "Independent Verifier (final decide; gemini-4-argon lewat kolam BYOK operator — frontier, pool terpisah dari si penulis kode). TERUKUR 2026-10-15 10:2x: model ini menjawab 429 pada ketiga kunci sementara gemini-3.8-flash 200 di kunci yang sama, jadi dispatch ke rung ini akan jatuh sampai kuota argon pulih."
+    registry_key: gemini-argon   # perintah operator 2026-10-15 10:0x: gemini-4-argon sebagai DECIDER (frontier, kolam BYOK)
   - role_id: decider-light
     title: "Independent Verifier (keputusan level preferensi, penalaran ringan: Gemini 3.8 Flash Medium)"
     registry_key: gemini-verify-light

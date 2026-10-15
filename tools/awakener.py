@@ -84,6 +84,18 @@ def decide_wake(conn, engine, target, now=None, beats=None, heartbeat=None):
         return False, f"BUDGET_SPENT — {len(rows)} wake dalam 60 menit (cap {MAX_WAKE_1H})"
     if rows and now - int(rows[0]["c"]) < COOLDOWN_S:
         return False, f"COOLDOWN — wake terakhir {int(now - rows[0]['c'])}s lalu (< {COOLDOWN_S}s)"
+    # ALREADY_OPEN TIDAK boleh memakai jendela yang sama dengan anggaran. Baris wake yang gagal
+    # terkirim (CLAIM_REFUSED karena pemutus item, PANE_NOT_QUIET) tetap PENDING selamanya, dan
+    # `_wake_rows` hanya melihat 60 menit ke belakang — jadi begitu baris itu berumur satu jam,
+    # penjaganya buta dan tick berikutnya melahirkan baris baru. Terukur: 272, 273, 274, 275, 276
+    # semuanya PENDING dengan alasan yang sama, tercipta berjeda jam. Yang dihitung di sini adalah
+    # baris TERBUKA berapa pun umurnya; yang berjendela tetap anggaran dan cooldown.
+    still_open = wo.run(conn, engine,
+                        f"SELECT id FROM quest_tasks WHERE title={ph} "
+                        f"AND status IN ('PENDING','CLAIMED','WORKING') ORDER BY id LIMIT 1",
+                        (WAKE_PHRASE,)) or []
+    if still_open:
+        return False, f"ALREADY_OPEN — item {int(still_open[0]['id'])} masih terbuka"
     if any(r["status"] in ("PENDING", "WORKING", "CLAIMED") for r in rows):
         return False, "ALREADY_OPEN — satu baris wake belum selesai, tidak ditumpuk"
 
@@ -210,7 +222,7 @@ def main(argv=None):
             print(json.dumps(out, ensure_ascii=False))
             return 1        # keluar bukan-nol: jam berikutnya mencoba lagi, bukan menulis diam-diam
         wrote, msg, item_id = wo.queue_command(conn, engine, WAKE_PHRASE, target,
-                                               gate="", ws_path=where, who="operator")
+                                               gate="", ws_path=where, who="awakener atas perintah operator 03:17")
         out.update({"queued": wrote, "item": item_id, "gate": "", "ws_path": where,
                     "queue_why": msg[:200]})
         print(json.dumps(out, ensure_ascii=False))
