@@ -1014,7 +1014,7 @@ availability, whichever comes first**: a longer date is permitted and simply los
 
 | demand | how BSL answers it |
 |---|---|
-| "jangan ada yang copy-paste lalu mengklaim hak" | copyright never transfers; notices must be retained; anyone re-releasing it as their own is infringing on text, not on interpretation. and each version carries its own stated Change Date, so the conversion clock is published rather than argued later |
+| "jangan ada yang copy-paste lalu mengklaim hak" | copyright never transfers; notices must be retained; anyone re-releasing it as their own is infringing on text, not on interpretation. each version carries its own Change Date formula, so the conversion clock is fixed by the text rather than argued later — though it has not started yet: no version of this work has been made publicly available, the dates are relative to that event, and these commits are still unpushed |
 | "saya ingin pamer sebagai showcase" | source is readable from day one, and the first Terms paragraph already grants copy, modify, derivative works and **non-production** use — a visitor reads and runs it without asking. The Additional Use Grant is the lever for the opposite case: admitting limited **production** use for free, which is the pattern NVIDIA's `nsfc-comfy-ui` grant uses. Leaving it at `None` is our current answer, and it is a choice, not an omission |
 | "kalau ada yang mau beli, silakan" | Production Use *requires* a license from the licensor — that is the product being sold, with no renegotiation of terms later |
 | the escape hatch | Change Date (4 years, per version) converts it to the MIT License, so the asset still becomes open even if the business never sells a licence |
@@ -1150,7 +1150,7 @@ line. A positional `SequenceMatcher` over the SPDX span now reports, for **both*
 66 lines, ours 66 lines, **ratio 1.00000, 0 differing blocks**.
 
 **What this server does is gate a submit before it is sent, instead of queueing first and apologising
-later.** No comparison of other servers' submit paths was performed, so that is a description of this tree
+later.** No comparison of other servers' submit paths was performed, so that is a description of `server.py`
 and not a claim about theirs. `comfy_queue` calls
 `tools/gpu_gate.py` before `POST /prompt`, so the same discipline F11 step 4 asks of the plugin is
 enforced at the boundary the operator actually crosses — the MCP call — and not only at the scheduler.

@@ -22,7 +22,7 @@ the machine it runs on, not about the code.
 | folder | server | code lives in | owned by | license |
 |---|---|---|---|---|
 | [`local-workstation/`](local-workstation/README.md) | `local-workstation` | `tools/mcp_workstation_local.py` (this repo) | ours | **BSL 1.1** (Change License MIT, per-version Change Date) |
-| [`irsofka-comfyui-mcp/`](irsofka-comfyui-mcp/README.md) | *not registered yet* | `~/Apps/mcp/irsofka-comfyui-mcp` (own repo) | ours | **BSL 1.1** — written over ComfyUI's HTTP API with no code copied from any other server, and it gates a submit on VRAM before sending it (what the others do on that path was not measured) |
+| [`irsofka-comfyui-mcp/`](irsofka-comfyui-mcp/README.md) | *not registered yet* | `~/Apps/mcp/irsofka-comfyui-mcp` (own repo) | ours | **BSL 1.1** — written over ComfyUI's HTTP API with no code copied from `comfy_mcp` (the one package compared), and it gates a submit on VRAM before sending it (what the others do on that path was not measured) |
 | [`irsofka-unreal-mcp/`](irsofka-unreal-mcp/README.md) | `irsofka-unreal-mcp` | UE 5.8 plugin `IRSofkaStationCore` | ours | **BSL 1.1** (decided 2026-10-15, `ROADMAP.md` F11); own repo, never merged with this one |
 | [`mcp-blender/`](mcp-blender/README.md) | `mcp-blender` | `~/Apps/mcp/mcp-blender` (git checkout) | RFingAdam | **AGPL-3.0-or-later** since v0.4.0; **MIT up to v0.3.0** |
 | [`comfy-mcp/`](comfy-mcp/README.md) | `comfy-mcp` | `~/Apps/mcp/comfy-mcp/.venv` (wheel only) | Comfy Org | **AGPL-3.0-or-later OR commercial** |

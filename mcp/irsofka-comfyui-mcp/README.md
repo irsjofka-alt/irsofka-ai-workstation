@@ -13,8 +13,10 @@ stronger wording I put above it a moment ago, so the weaker one is what stands: 
 Seven is not zero, and they are `from __future__ import annotations`, `except Exception as exc:`,
 `if __name__ == "__main__":`, `if not isinstance(data, dict):` and `if action == "list":` — Python
 anyone writes the same way. Longest consecutive run **1**, no shared private identifier. The claim is
-about derivation, and a derived file shares structure and runs of lines; this one shares no run longer
-than a single idiomatic line. Scope note: only `server.py` was compared, not `pyproject.toml` or the
+about what the comparison can and cannot show. A derived file would normally share runs of lines, and
+none longer than one idiomatic line appear here; that is evidence against copying, and it is not
+evidence that no derivation exists, because the same paragraph admits a line-level comparison is blind
+to a rewrite that keeps the structure. Scope note: only `server.py` was compared, not `pyproject.toml` or the
 selftest blocks. Their `server.py` was still read once, to count tool
 definitions for `mcp/README.md`, so "nobody here ever looked at it" remains not a claim this file makes. What is shared with a ComfyUI is the wire.
 
