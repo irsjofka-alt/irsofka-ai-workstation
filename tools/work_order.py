@@ -4571,6 +4571,13 @@ def selftest():
               ok4 is True and len(w4) == 1, str(why4)[:150])
         check("peristiwa mencatat id model yang menjawab, bukan kunci yang diketik",
               w4 and w4[0].get("model") == "gemini-3.8-flash-high", str(w4[:1])[:160])
+        # Resolusi harus hidup di fungsi pembaca, bukan di pemanggilnya: temuan reviewer atas
+        # perbaikan pertama — begitu satu jalur ditambal di satu tempat, jalur berikutnya jatuh
+        # ke lubang yang sama.
+        row_key = push_clearance(conn, "SQLITE", "gemini-verify")
+        check("push_clearance menerima kunci registry, bukan hanya id model",
+              row_key is not None and str(row_key.get("model")) == "gemini-3.8-flash-high",
+              str(row_key)[:140])
         # Pemalsuan lewat kutipan: ringkasan verification record menyimpan potongan jawaban model
         # setelah pemisah " :: ", dan potongan itu bisa memuat teks apa pun — termasuk baris vonis
         # yang dipetik dari prompt. Izin hanya boleh dibaca dari BIDANG vonis, bukan dari kutipan.
@@ -5233,6 +5240,23 @@ def _registry_roles(model_id):
     return {}
 
 
+def verifier_log_name(model_id):
+    """Ejaan yang ditulis `cross_verify` di `action_log.model` untuk pemeriksa ini.
+
+    Satu pemeriksa punya dua nama: kunci registry (`gemini-verify`) dan id model yang menjawab
+    (`gemini-3.8-flash-high`). Baris verifikasi menyimpan yang kedua; `--list` dan para engine
+    menyebut yang pertama. Resolusinya hidup di SATU fungsi ini — menaruhnya di satu pemanggil saja
+    meninggalkan pemanggil berikutnya jatuh ke lubang yang sama, dan itu temuan reviewer atas
+    perbaikan pertama (commit 51fe713), bukan kesalahan yang mau diulang.
+
+    Registry yang memutuskan ejaan (§12: jangan pilih model dari ingatan). Nama yang tidak
+    terdaftar dikembalikan apa adanya: fungsi ini tidak menolak, itu tugas `_registry_roles`
+    di pemangku kebijakan.
+    """
+    reg = _registry_roles(model_id)
+    return str(reg.get("model") or model_id) if reg else (model_id or "")
+
+
 def push_clearance(conn, engine, model_id, within_minutes=CLEARANCE_WINDOW_MINUTES):
     """Satu catatan verifikasi COMPLETED yang sungguh ada, milik model ini, masih segar.
 
@@ -5242,14 +5266,24 @@ def push_clearance(conn, engine, model_id, within_minutes=CLEARANCE_WINDOW_MINUT
     bertanya kepada siapa pun. Jadi vonis tidak diterima di sini, vonis DIBACA dari `action_log`:
     baris `cross_verify` yang exit_code-nya 0 dan verdict-nya SETUJU.
 
+    Pemanggil boleh menyebut pemeriksa dengan kunci registry ATAU id model; keduanya dibaca ke
+    id model lewat `verifier_log_name` sebelum bertanya ke tabel.
+
     Jendela waktu ikut disaring karena verifikasi yang berumur seminggu bukan izin untuk commit
     yang baru saja berubah.
     """
     ph = "%s" if engine == "POSTGRESQL" else "?"
+    # Nama yang diketik dan nama yang ditulis di log boleh berbeda (kunci registry vs id model),
+    # jadi keduanya ikut ditanyakan. Yang TIDAK dilakukan di sini: mencocokkan lewat teks ringkasan.
+    # Ringkasan ditulis oleh mesin yang sama dengan yang memberi vonis, jadi cocok-cocok di sana
+    # akan memberi izin kepada baris mana pun yang berpura-pura menyebut verifier — perluasan pagar,
+    # bukan perbaikan.
+    typed = (model_id or "").strip()
+    names = [n for n in (typed, verifier_log_name(typed)) if n]
     # Pembacaan yang gagal adalah TIDAK ADA IZIN, bukan "entah, lanjut saja". Arah gagalnya sama
     # dengan sisa kontrak ini: ketidaktahuan menutup jalur, tidak pernah membukanya.
     try:
-        rows = _push_clearance_rows(conn, engine, model_id, within_minutes, ph)
+        rows = _push_clearance_rows(conn, engine, names, within_minutes, ph)
     except Exception:  # noqa: BLE001
         return None
     # Hanya bagian SEBELUM pemisah " :: " yang boleh dibaca sebagai vonis. Setelah pemisah itu
@@ -5304,15 +5338,18 @@ def clearance_covers(clearance, shas):
     return True, ref
 
 
-def _push_clearance_rows(conn, engine, model_id, within_minutes, ph):
+def _push_clearance_rows(conn, engine, names, within_minutes, ph):
+    # `names` adalah dua ejaan untuk pemeriksa yang sama (kunci registry + id model), bukan daftar
+    # pemeriksa: izin tetap harus berasal dari satu nama yang sama yang tercatat sebagai jawaban.
+    ph_list = ",".join([ph] * len(names))
     return run(conn, engine,
                f"SELECT ts, tab, model, summary, raw_ref FROM action_log "
                f"WHERE kind = 'cross_verify' "
-               f"AND model = {ph} AND exit_code = 0 AND ts >= " +
+               f"AND model IN ({ph_list}) AND exit_code = 0 AND ts >= " +
                ("NOW() - ({ph} || ' minutes')::interval" if engine == "POSTGRESQL"
                 else "datetime('now', '-' || {ph} || ' minutes')").format(ph=ph) +
                " ORDER BY ts DESC LIMIT 12",
-               (model_id, str(within_minutes)))
+               (*names, str(within_minutes)))
 
 
 def record_push_verified(conn, engine, model_id: str, shas: list[str], events_path=None) -> tuple:
@@ -5335,20 +5372,21 @@ def record_push_verified(conn, engine, model_id: str, shas: list[str], events_pa
         return False, (f"{model_id!r} tidak terdaftar sebagai pemeriksa di config/engines.json — "
                        "izin hanya bisa datang dari mesin yang memang dipasang sebagai verifier/"
                        "reviewer/decider, bukan dari nama yang cocok"), []
-    # Satu pemeriksa punya dua nama: kunci registry (`gemini-verify`) dan id model yang menjawab
-    # (`gemini-3.8-flash-high`). `cross_verify` menulis baris `action_log` dengan id model, jadi
-    # pencarian izin harus memakai nama itu — kalau tidak, vonis SETUJU yang baru saja dibaca
-    # manusia dilaporkan sebagai "tidak ada catatan verifikasi". Kegagalannya tertutup di arah yang
-    # benar (tidak ada izin), tapi harganya sebuah engine mengira verifikasinya hilang dan mengulang
-    # dispatch yang sudah bayar. Registry-lah yang memutuskan ejaan mana yang benar (§12).
-    logged_as = str(reg.get("model") or model_id)
-    clearance = push_clearance(conn, engine, logged_as)
+    # Dua nama untuk satu pemeriksa (kunci registry vs id model) diselesaikan oleh `push_clearance`
+    # lewat `verifier_log_name`, bukan di sini: menaruh resolusi di pemanggil meninggalkan pemanggil
+    # berikutnya di lubang yang sama — itu temuan reviewer atas perbaikan pertama (commit 51fe713).
+    clearance = push_clearance(conn, engine, model_id)
     if not clearance:
-        named = logged_as if logged_as == model_id else f"{logged_as} (kunci {model_id!r})"
+        resolved = verifier_log_name(model_id)
+        named = resolved if resolved == model_id else f"{resolved} (kunci {model_id!r})"
         return False, (f"tidak ada catatan verifikasi COMPLETED bervonis "
                        f"{'/'.join(CLEARANCE_VERDICTS)} dari {named} dalam "
                        f"{CLEARANCE_WINDOW_MINUTES} menit terakhir — vonis tidak bisa ditulis dari "
                        "sini, hanya bisa dibaca dari action_log"), []
+    # Yang dicatat di peristiwa adalah nama yang TERCATAT PADA BARIS VONIS, bukan yang diketik dan
+    # bukan yang registry klaim: kalau runtime menjawab dengan model lain, ledger harus menyebut
+    # model yang sungguh menjawab.
+    answered = str(clearance.get("model") or "").strip() or verifier_log_name(model_id)
     covers, why_cover = clearance_covers(clearance, shas)
     if not covers:
         return False, f"vonis tidak menutup commit ini: {why_cover}", []
@@ -5383,11 +5421,11 @@ def record_push_verified(conn, engine, model_id: str, shas: list[str], events_pa
     with ev.open("a", encoding="utf-8") as fh:
         for sha in good:
             row = {"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                   "kind": "push_verified", "sha": sha, "model": logged_as,
+                   "kind": "push_verified", "sha": sha, "model": answered,
                    "verdict": "SETUJU", "verified_at": str(clearance.get("ts"))}
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             written.append(row)
-    return True, f"{len(written)} peristiwa ditulis atas vonis {logged_as}", written
+    return True, f"{len(written)} peristiwa ditulis atas vonis {answered}", written
 
 
 def push_state() -> dict:
