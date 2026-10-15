@@ -660,6 +660,48 @@ def idle_debt_menu(conn, engine, brain_root=None):
             "partial": bool(unreadable), "items": items}
 
 
+PHASE_MARKS = ("✅", "🟡", "🟨", "⬜")
+
+
+def parse_phases(text):
+    """Fase ROADMAP.md yang belum selesai, dibaca dari blok `## Phases` saja.
+
+    Parser ini berdiri sendiri supaya bisa diuji dengan teks karangan sendiri — dan itu bukan
+    kemudahan: versi pertama hanya bisa diuji terhadap berkas nyata, jadi tiga keadaan salah
+    (penanda di dalam kurung, blok berpagar ganda, baris fase tanpa penanda) tidak terdeteksi
+    sampai ada yang membacanya satu-satu di layar.
+
+    Aturan yang dipakai, dan arah gagalnya dipilih:
+      * hanya blok berpagar di bawah `## Phases` yang dibaca; tidak ada blok, atau bloknya tidak
+        memuat satu pun baris fase = LEMPAR. Kegagalan parse harus menjadi UNKNOWN dan menutup
+        jalur, bukan `[]` yang berarti "semua fase sudah selesai".
+      * penanda fase adalah penanda PERTAMA di baris, bukan yang terakhir. Konvensi berkas ini
+        "F<n> <judul> <penanda> <keterangan>", jadi apa pun setelah penanda adalah prosesi; review
+        kedua menyarankan yang terakhir, dan itu justru salah pada baris nyata F7 dan F11 di mana
+        kurung keterangannya datang kemudian.
+      * baris fase TANPA penanda dihitung TERBUKA. Tidak ada penanda tidak berarti selesai; ia berarti
+        belum dinyatakan, dan memperlakukannya sebagai selesai adalah jalan pulang bagi keluhan
+        operator malam ini.
+    """
+    block = re.search(r"^## Phases\s*$.*?^```\s*$(.*?)^```\s*$", text, re.M | re.S)
+    if not block:
+        raise ValueError("blok `## Phases` tidak ditemukan")
+    body = block.group(1)
+    phase_lines = [ln.strip() for ln in body.splitlines() if re.match(r"^F\d+\b", ln.strip())]
+    if not phase_lines:
+        raise ValueError("blok `## Phases` terbaca tapi tidak memuat baris fase apa pun")
+    open_phases = set()
+    for ln in phase_lines:
+        n = int(re.match(r"^F(\d+)", ln).group(1))
+        hits = [(ln.index(e), e) for e in PHASE_MARKS if e in ln]
+        if not hits:
+            open_phases.add(n)          # tidak dinyatakan = belum selesai
+            continue
+        if min(hits)[1] != "✅":
+            open_phases.add(n)
+    return sorted(open_phases)
+
+
 def roadmap_open(conn, backend):
     """Pekerjaan ROADMAP yang masih terbuka — dibaca dari ledger DAN dari peta itu sendiri.
 
@@ -687,51 +729,16 @@ def roadmap_open(conn, backend):
         out["unreadable"].append(f"ledger ({str(exc)[:40]})")
     try:
         text = (REPO / "ROADMAP.md").read_text(encoding="utf-8")
-        # Dua koreksi dari reviewer, dan keduanya mengubah jawaban:
-        #  (1) dulu seluruh berkas dicari `^F<angka> ... emoji`. Baris catatan di bagian mana pun yang
-        #      dimulai dengan "F7 ..." ikut terhitung sebagai fase. Sekarang hanya blok "## Phases"
-        #      yang dibaca, dan bloknya dibatasi pagar ``` — persis bentuk yang ditulis dokumen.
-        #  (2) dulu `[^\n]*?` mengambil emoji PERTAMA, jadi "F5 ... (sebelumnya 🟡) ✅" terbaca
-        #      terbuka padahal barisnya menyatakan selesai. Yang dipakai sekarang emoji TERAKHIR:
-        #      penanda status ditulis paling belakang di setiap baris fase.
-        # `## Phases` diikuti satu blok berpagar: judul, lalu pagar PEMBUKA, lalu isinya, lalu
-        # pagar PENUTUP. Pola pertama saya menjodohkan judul dengan pagar pertama yang ketemu — itu
-        # pagar pembuka — sehingga isinya terbaca kosong dan `open_phases` menjadi [] tanpa satu pun
-        # fase dibuka. Sebuah parser yang melaporkan "tidak ada yang terbuka" karena ia tidak
-        # menemukan bloknya adalah parser yang meloloskan penulisan baris penajaman, persis yang
-        # pagar ini ditahan. Sekarang pagar pembuka dan penutup diminta keduanya, dan blok yang
-        # tidak ditemukan melempar, bukan mengembalikan kosong.
-        block = re.search(r"^## Phases\s*$.*?^```\s*$(.*?)^```\s*$", text, re.M | re.S)
-        if not block:
-            raise ValueError("blok `## Phases` tidak ditemukan")
-        body = block.group(1)
-        open_phases = set()
-        for ln in body.splitlines():
-            m = re.match(r"^F(\d+)\b", ln.strip())
-            if not m:
-                continue
-            marks = [e for e in ("✅", "🟡", "🟨", "⬜") if e in ln]
-            if marks:
-                # emoji terakhir yang MUNCUL di baris, bukan yang terakhir di daftar konstan
-                tail = max(ln.index(e) for e in marks)
-                status = next(e for e in marks if ln.index(e) == tail)
-                if status != "✅":
-                    open_phases.add(int(m.group(1)))
-        # Dua jenis "terbuka" dan bedannya menentukan pagar, bukan hiasan: fase yang ADA di
-        # ROADMAP_ITEMS tapi barisnya belum masuk ledger memang belum dipetakan (perbaikannya
-        # `seed --roadmap`); fase yang TIDAK ada di ROADMAP_ITEMS tidak akan pernah bisa dipetakan,
-        # dan memblokir penajaman karena itu berarti mengunci loop selamanya — persis kebuntuan
-        # yang ditemukan reviewer atas versi pertama pagar ini (F6 🟡 tidak punya baris dan tidak
-        # akan pernah punya).
-        # Nomor fase dibaca dari JUDUL item, bukan dari kunci. Kuncinya "f108"/"f91"/"f84" dan
-        # angka itu adalah penomoran butir (F10.8, F9.1, F8.4), bukan fase: memetakannya apa adanya
-        # membuat {84, 108, 91, ...} dan setiap fase peta tampak "belum pernah bisa dipetakan" —
-        # pagar yang kelihatannya longgar padahal diam-diam mengunci penajaman selamanya.
+        phases = parse_phases(text)
+        # Nomor fase dibaca dari JUDUL item, bukan dari kunci. Kuncinya "f108"/"f91"/"f84" dan angka
+        # itu adalah penomoran butir (F10.8, F9.1, F8.4), bukan fase: memetakannya apa membuat
+        # {84, 108, 91, ...} dan setiap fase peta tampak "belum pernah bisa dipetakan" — pagar yang
+        # kelihatannya longgar padahal diam-diam mengunci penajaman selamanya.
         mapped = {int(m.group(1)) for _k, title, *_ in ROADMAP_ITEMS
                   if (m := re.match(r"^F(\d+)", str(title)))}
-        out["open_phases"] = sorted(open_phases)
-        out["unprojected"] = sorted(ph for ph in open_phases if ph not in mapped)
-        out["projectable_open"] = sorted(ph for ph in open_phases if ph in mapped)
+        out["open_phases"] = phases
+        out["unprojected"] = [f for f in phases if f not in mapped]
+        out["projectable_open"] = [f for f in phases if f in mapped]
     except Exception as exc:  # noqa: BLE001
         out["unreadable"].append(f"ROADMAP.md ({str(exc)[:40]})")
     return out
@@ -814,11 +821,11 @@ def ensure_idle_item(conn, backend, cli_engine=None, who=IDLE_HOLDER, emit=None,
     _ro = roadmap_open(conn, backend)
     # Sama seperti di `queue_followup`: None ditanyakan lebih dulu, dan yang membeku hanya fase yang
     # memang bisa dipetakan.
-    if _ro["ledger_rows"] is None or _ro["open_phases"] is None:
-        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro["unreadable"]))
+    if _ro.get("ledger_rows") is None or _ro.get("open_phases") is None:
+        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro.get("unreadable") or []))
         return None
-    if _ro["ledger_rows"]:
-        emit("IDLE_HELD_BY_ROADMAP", rows=int(_ro["ledger_rows"]), open_phases=_ro["open_phases"])
+    if _ro.get("ledger_rows"):
+        emit("IDLE_HELD_BY_ROADMAP", rows=int(_ro.get("ledger_rows")), open_phases=_ro.get("open_phases"))
         return None
     if _ro.get("projectable_open"):
         emit("IDLE_MAP_NOT_PROJECT", open_phases=_ro["projectable_open"],
@@ -1398,12 +1405,12 @@ def queue_followup(conn, backend, cli_engine, emit=None):
     # tidak", jadi kegagalan membaca ledger (None) lolos sebagai "nol baris" dan baris penajaman
     # tetap ditulis — tepat keadaan yang pagar ini tutup. Bacaan yang gagal sekarang menutup lebih
     # dulu, dan menutup dengan nama kejadiannya sendiri.
-    if _ro["ledger_rows"] is None or _ro["open_phases"] is None:
-        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro["unreadable"]))
+    if _ro.get("ledger_rows") is None or _ro.get("open_phases") is None:
+        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro.get("unreadable") or []))
         return None
-    if _ro["ledger_rows"]:
-        emit("IDLE_HELD_BY_ROADMAP", rows=int(_ro["ledger_rows"]),
-             open_phases=_ro["open_phases"], why="antrean roadmap belum kosong — penajaman tidak ditulis")
+    if _ro.get("ledger_rows"):
+        emit("IDLE_HELD_BY_ROADMAP", rows=int(_ro.get("ledger_rows")),
+             open_phases=_ro.get("open_phases"), why="antrean roadmap belum kosong — penajaman tidak ditulis")
         return None
     if _ro.get("projectable_open"):
         emit("IDLE_MAP_NOT_PROJECT", open_phases=_ro["projectable_open"],
@@ -1811,6 +1818,14 @@ def work_rank(row):
     terlihat, bukan lenyap. Yang melarang pekerjaannya mengambil bukan daftar ini, melainkan
     `claim()`: ia menolak baris yang dipegang mesin lain. ditulis di sini supaya tidak ada yang
     mengira "ditawarkan" berarti "boleh diambil".
+
+    SATU BATAS LAGI, juga dinyatakan dan tidak diperbaiki diam-diam: di DALAM satu peringkat,
+    urutannya tetap `id`, jadi baris roadmap lama (misal F9.3) akan mendahului F11. Malam ini itu
+    tidak punya efek — yang bisa diklaim di peringkat 10 hanya F11 (294/295/297) — dan mengubahnya
+    jadi "prioritas" menuntut kolom baru yang tidak ada yang mengisinya: seorang engine yang
+    menentukan prioritas sendiri sedang memilih pekerjaan orang lain. Kalau nanti ada dua fase
+    roadmap yang hidup berdampingan dan urutannya penting, itu pertanyaan untuk orang, bukan untuk
+    `id`.
 
     BATAS YANG DISENGAJA, ditulis karena reviewer menemukannya dan tidak bisa dibantah: peringkat ini
     buta terhadap urgensi. Sebuah baris `origin='idle'` yang isinya pemulihan kritis (disk habis,
@@ -5313,6 +5328,43 @@ def idle_selftest(check):
         check("tanpa utang yang terukur mesin DIAM — ia tidak membuat pekerjaan supaya terlihat sibuk",
               none is None and _idle_count() == 0 and any(a == "IDLE_NO_DEBT" for a, _ in ev),
               str([a for a, _ in ev]))
+
+        # --- parser fase diuji dengan teks karangan, bukan hanya dengan berkas nyata --------------
+        # Ini jawaban untuk temuan round 5: versi pertama hanya bisa diuji terhadap ROADMAP.md yang
+        # ada, jadi tiga keadaan salah lolos tanpa suara. `ok` di bawah Sengaja ditulis dengan satu
+        # blok berpagar; keadaan rusak diuji terpisah karena fungsi ini harus LEMPAR, bukan kosong.
+        _ph_text = ("# Roadmap\n\n## Phases\n\n```\n"
+                    "F1 A       ✅ Completed\n"
+                    "F6 Cross   🟡 In Progress\n"
+                    "F7 Studio  ✅ Completed (scope note — UE handoff not in it)\n"
+                    "F11 Bridge 🟨 Partly shipped (subsistem ✅ sudah)\n"
+                    "F12 Tanpa penanda apa pun\n"
+                    "```\n")
+        check("penanda PERTAMA yang menentukan status, jadi catatan ber-✅ di dalam kurung tidak "
+              "menutup fase yang masih 🟨",
+              parse_phases(_ph_text) == [6, 11, 12], str(parse_phases(_ph_text)))
+        check("baris fase tanpa penanda dihitung TERBUKA — belum dinyatakan bukan berarti selesai",
+              12 in parse_phases(_ph_text), str(parse_phases(_ph_text)))
+        try:
+            parse_phases("# Roadmap\n\n## Phases\n\nteks tanpa blok berpagar\n")
+            _raised = False
+        except ValueError:
+            _raised = True
+        check("blok yang tidak ditemukan LEMPAR, bukan mengembalikan [] yang berarti semua selesai",
+              _raised, "ValueError diharapkan")
+        try:
+            parse_phases("## Phases\n\n```\ncatatan penjelas, tidak ada baris fase\n```\n")
+            _raised2 = False
+        except ValueError:
+            _raised2 = True
+        check("blok berpagar yang berisi prosa (bukan daftar fase) juga LEMPAR — inilah keadaan di "
+              "mana pagar pertama saya lolos membuat baris penajaman",
+              _raised2, "ValueError diharapkan")
+        _ro_live = _ro_orig(c, "SQLITE")   # fungsi sungguhan, bukan stub pagar di bawah
+        check("peta nyata terbaca dan fase yang bisa dipetakan dilaporkan terpisah dari yang tidak",
+              _ro_live.get("open_phases") and _ro_live.get("projectable_open") is not None
+              and set(_ro_live["unprojected"] or []).isdisjoint(set(_ro_live["projectable_open"] or [])),
+              str(_ro_live)[:150])
 
         # --- pagar baru: peta masih terbuka = baris penajaman TIDAK BOLEH LAHIR ------------------
         # Kemelut yang dilaporkan operator 2026-10-15 20:11 dan 20:2x: loop mengerjakan penajaman

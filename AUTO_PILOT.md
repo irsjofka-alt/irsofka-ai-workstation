@@ -49,9 +49,14 @@ The rules that bind rank 3, and these are the ones that were broken:
   `roadmap_open()` first, which reads BOTH the ledger and ROADMAP.md, and refuses with
   `IDLE_HELD_BY_ROADMAP` (rows still claimable), `IDLE_MAP_NOT_PROJECT` (phases open but never
   projected into the queue — run `seed --roadmap`, that is a finding, not a licence to polish) or
-  `IDLE_DEBT_UNKNOWN` (unreadable). That guard is the real answer to "whose command was that?": the
-  sharpening rows were the machine's own invention, written because the ledger looked empty while the
-  map was not.
+  `IDLE_DEBT_UNKNOWN` (unreadable — and unreadable is asked FIRST, because the first version asked it
+  last and a failed ledger read passed as "zero rows"). That guard is the real answer to "whose command
+  was that?": the sharpening rows were the machine's own invention, written because the ledger looked
+  empty while the map was not.
+- **The map has two kinds of "open" and only one of them blocks.** Measured now: `open_phases`
+  [6, 8, 9, 10, 11], of which `projectable_open` [8, 9, 10, 11] appear in `ROADMAP_ITEMS` and
+  `unprojected` [6] never will. Blocking on F6 would freeze the loop with no roadmap work and no
+  sharpening — the deadlock the second review round predicted — so only projectable phases refuse.
 - **Never take a sharpening row while any rank 0–2 item can be worked.** If `next_ready()` hands you
   an `origin='idle'` row while `ROADMAP.md` still has an F at 🟡 or ⬜, that is NOT the signal "the
   roadmap is done". It means the roadmap steps were never turned into rows. Fix the rows

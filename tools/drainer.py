@@ -146,17 +146,6 @@ def next_ready(conn, engine, origin=None):
     yang tidak ada adalah cara termudah membuat orang berikutnya mengira tombol itu ada. Baris warisan
     ber-lease mati sekarang selalu ada di daftar dan selalu di peringkat 25; yang menahan thrash
     adalah `respect_due` + cooldown, bukan penyaringan.
-
-    `drop_stale_legacy` default False SEJAK 2026-10-15 20:3x, dan itu pembalikan sadar atas keputusan
-    45 (dijawab `qwen3.5:9b`, 03:5x). Keputusan itu lahir saat satu-satunya urutan adalah
-    `ORDER BY id`: kepala antrean legacy tanpa lease menahan perintah operator di belakangnya, jadi
-    ia disembunyikan. Sekarang `work_rank()` menaruh barus usang di peringkat 25 — di bawah operator
-    (0) dan roadmap (10) — sehingga penyembunyian tidak lagi melindungi apa pun dan sisa efeknya cuma
-    satu: pekerjaan nyata tidak pernah ditawarkan lagi. Terukur malam ini: tiga baris pekerjaan
-    sesungguhnya (235 IP cleanup, 236 plafon VRAM, 244 F10.9) hilang dari penawaran sementara loop
-    melompat ke baris penajaman buatan mesin. Yang menahan thrash sekarang `respect_due` + cooldown,
-    bukan ketidak-terlihat-an. Flag tetap ada untuk pemanggil yang memang butuh daftar tanpa yang
-    usang.
     """
     return wo.next_item(conn, engine, respect_due=True, origin=origin)
 
