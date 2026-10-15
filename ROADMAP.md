@@ -17,7 +17,7 @@ F7 Creative Studio (ComfyUI/UE5)  ✅ Completed (scope: studio wired + producing
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
-F11 Unreal Bridge & MCP Ownership  ⬜ Planned (mcp/ map shipped; plugin path bug fixed pending rebuild; license chosen: BSL 1.1)
+F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP built clean-room: 61/61 selftest + live DENY and live ALLOW**; UE plugin path bug fixed pending rebuild; license chosen: BSL 1.1)
 ```
 
 ## F1–F4 — Foundation (Completed & Re-verified Oct 6)
@@ -1069,6 +1069,44 @@ One codebase, three states, and the plugin must never assume ai-station exists:
    `ai-station recovery`, VRAM handshake.
 3. **ai-station without the plugin** — headless only: cook, commandlets, build/UBT, config edits.
    It must refuse to *claim* live Blueprint editing; an unavailable engine reports `UNAVAILABLE`.
+
+### Shipped first because it was the only part with no unknowns: the ComfyUI repo
+
+Built 2026-10-15 at `~/Apps/mcp/irsofka-comfyui-mcp` (own repo, BSL 1.1, two commits). Written
+clean-room against ComfyUI's HTTP API on `127.0.0.1:8188` — no upstream MCP code read, standard library
+only, and that promise is *checked* by an AST scan inside the selftest rather than asserted in prose,
+because a third-party import would quietly put a licence in the mouth of a server that claims to have
+none. Forking `artokun`/`joenorton` was the other route and is now moot for this one: writing ~900 lines
+against a documented API was cheaper than auditing someone else's, and it produced the one feature none
+of them have.
+
+**The feature is that a submit is gated, not queued first and apologised to later.** `comfy_queue` calls
+`tools/gpu_gate.py` before `POST /prompt`, so F11 step 4's VRAM discipline is enforced at the second
+boundary the operator actually crosses — the MCP call — and not only at the scheduler.
+
+| gate | measured this machine |
+|---|---|
+| refused | 3D submit: rule `3d-trellis`, need 9966 MiB, free 7498 MiB, **shortfall 2468 MiB**, holders named (`UnrealEditor 2118MiB`, ComfyUI's own `python 1624MiB`). `/queue` re-read afterwards: running 0, pending 0 — the refusal blocked the wire, it did not fail downstream |
+| allowed | image submit: rule `image-diffusion`, need 5919 MiB against 7241 MiB free → `prompt_id 166cbff0…`, done in **21.0 s**, output 1 290 126 bytes `PNG 832x1216`, sha256 `2ea33e87…e4e5` |
+| both directions on a fake transport | **61/61** selftest checks, including "a DENY sends nothing" and "an absent gate refuses heavy work and stamps light work `unaudited`" |
+
+Three traps were found by measuring instead of assuming, and are encoded as tests:
+
+- `GET /object_info/<unknown node>` answers **200 with `{}`**. Trusting the status code reports a node
+  that does not exist as installed. It is the body that decides.
+- The whole catalog is **1 951 939 bytes across 976 classes** — one careless call costs more context
+  than an agent has, so the tool returns a *page of names* or a named node, never the catalog.
+- A UI-export workflow (`nodes`/`links`) is not the API form `POST /prompt` wants. It is refused here
+  with its own error name; posted, it produces a 400 that names neither format.
+
+One fact worth keeping so nobody re-derives it: a valid API graph does not have to be hand-written.
+`GET /history` returns the graph that produced each finished run inside `prompt[2]`, which is how the
+ALLOW-path test above got real node wiring without guessing a single input name.
+
+**Not done:** registration in either CLI's MCP config (a per-machine act, and loading a new server
+changes what the other engine sees), and `python -m build` — this system Python has no `setuptools` and
+`python3 -m venv` cannot seed one offline, so the wheel is unverified and the README says so. The
+`mcp/irsofka-comfyui-mcp/README.md` pointer carries the same numbers.
 
 ### Ordered work, each with a numeric gate
 

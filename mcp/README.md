@@ -1,7 +1,7 @@
 # MCP servers — where each one lives, what it may be, and who owns it
 
 This directory is the explicit map of the Model Context Protocol servers this workstation uses.
-It holds no server code of its own: the four servers live in four different places, and the point
+It holds no server code of its own: the five servers live in five different places, and the point
 of this folder is that nobody has to know that from memory.
 
 Registration is **per machine** and is not in this repository. Both CLIs read their own file, and
@@ -17,11 +17,12 @@ Measured 2026-10-15 with `git ls-files`: both files are untracked, while
 server and *no* registration — which is correct, because registering a server is a statement about
 the machine it runs on, not about the code.
 
-## The four servers
+## The five servers
 
 | folder | server | code lives in | owned by | license |
 |---|---|---|---|---|
 | [`local-workstation/`](local-workstation/README.md) | `local-workstation` | `tools/mcp_workstation_local.py` (this repo) | ours | **BSL 1.1** (Change License MIT, per-version Change Date) |
+| [`irsofka-comfyui-mcp/`](irsofka-comfyui-mcp/README.md) | *not registered yet* | `~/Apps/mcp/irsofka-comfyui-mcp` (own repo) | ours | **BSL 1.1** — clean-room over ComfyUI's HTTP API, and the only one of these five that gates a submit on VRAM before sending it |
 | [`irsofka-unreal-mcp/`](irsofka-unreal-mcp/README.md) | `irsofka-unreal-mcp` | UE 5.8 plugin `IRSofkaStationCore` | ours | **BSL 1.1** (decided 2026-10-15, `ROADMAP.md` F11); own repo, never merged with this one |
 | [`mcp-blender/`](mcp-blender/README.md) | `mcp-blender` | `~/Apps/mcp/mcp-blender` (git checkout) | RFingAdam | **AGPL-3.0-or-later** since v0.4.0; **MIT up to v0.3.0** |
 | [`comfy-mcp/`](comfy-mcp/README.md) | `comfy-mcp` | `~/Apps/mcp/comfy-mcp/.venv` (wheel only) | Comfy Org | **AGPL-3.0-or-later OR commercial** |
