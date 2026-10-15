@@ -3044,6 +3044,22 @@ ROADMAP_ITEMS = [
      # jadi menulisnya tanpa membaca `FIRSofkaSocketServer` adalah menebak — dan alat ukur yang
      # ditebak lebih buruk dari tidak ada alat ukur. Editor tutup = probe tidak bisa lolos: benar.
      "test -f tools/ue_bridge_probe.py && timeout 120 python3 tools/ue_bridge_probe.py"),
+    # Utang yang DIUKUR oleh probe di atas, bukan dirasakan. Probe hari ini keluar 0 dengan
+    # `engine_defects` berisi dua cacat plugin; dengan --strict ia keluar 1 selama cacat itu ada.
+    # Gerbang yang merah karena pekerjaannya belum selesai adalah gerbang yang bekerja — berbeda
+    # dari gerbang F10.8 yang merah karena argumennya tidak dikenal. Yang ditahan baris ini:
+    # (a) `LoadClass` ingin path penuh; nama polos jatuh ke `AActor::StaticClass()` yang tidak
+    # punya RootComponent, jadi semua transform jadi no-op dan engine tetap menjawab SUCCESS, dan
+    # balasan spawn menyebut lokasi yang DIMINTA, bukan yang mendarat; (b) `set_transform` hanya
+    # membalas {"status":"SUCCESS"} dan tidak memanggil Modify()/transaksi, jadi tulisan tidak
+    # bisa diaudit dari balasan dan level boleh tidak ditandai kotor.
+    # Perbaikannya di C++ (IRSofkaStationCore), dan itu butuh rebuild modul:Live Coding (Ctrl+Alt+F11)
+    # atau restart editor. Keduanya menyentuh sesi operator yang sedang hidup, jadi tidak dikerjakan
+    # oleh run yang tidak dijaga — baris ini ada supaya itu tercatat, bukan supaya dilupakan.
+    ("f11step0b", "F11/STEP-0b IRSofkaStationCore: hentikan fallback AActor diam-diam dan buat "
+                  "set_transform membalas transform yang mendarat (butuh rebuild modul plugin)",
+     "build", ["f11step0"],
+     "timeout 120 python3 tools/ue_bridge_probe.py --strict"),
     # Namanya IRSofka WORKSTATION MCP, bukan "Unreal Engine MCP": yang dimiliki repo ini adalah sisi
     # mesin dari jembatan (server, transport, gerbang), sedangkan plugin UE tetap artefak terpasang
     # di proyek engine dan menyebut merek Epic di nama repo kita hanya menambah masalah merek dagang
