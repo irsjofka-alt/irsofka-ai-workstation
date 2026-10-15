@@ -193,9 +193,12 @@ pool until a measurement says otherwise.
 `tools/tripo.py` wraps the official `tripo-cli` (0.6.1, API **V3**) as the workstation's paid 3D
 half: text/image → model, texture, conversion. It is deliberately a *gate*, not a faucet.
 
-- Every command that spends points (`make`, `ai`, `redo`) is `--dry-run` unless `--spend` is passed
-  explicitly, and `--spend` is refused when the endpoint's point cost is not yet recorded in
-  `cost_notes`. Unknown cost means no call, never an estimate guessed at runtime.
+- Every command that can spend points (`make`, `ai`, `redo`) runs with `--dry-run` unless `--spend`
+  is passed explicitly, and `--spend` is refused unless that operation's cost in
+  `tools/tripo.py:ENDPOINTS[...]["biaya_poin"]` is an actual **number**. A prose value like
+  "belum terukur" is not a price. The guard sits in `cost_is_known()` and is enforced at *both*
+  doors — `submit()` and `cli()` — because a gate that only guards one entry point is an open gate
+  with extra steps. Unknown cost means no call, never an estimate guessed at runtime.
 - The module never adds `--yes`: the vendor CLI enables it automatically when it detects a
   non-TTY, which is exactly the state an unattended tick runs in.
 - Keys never travel through argv, stdout or git. `config/tripo.json` is gitignored; credentials come

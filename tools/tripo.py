@@ -149,19 +149,23 @@ def probe(cfg=None, transport=None, cli_runner=None):
     cfg = cfg or load()
     spec = ENDPOINTS["balance"]
     kind = spec.get("kind")
-    # Kunci diperiksa DI SINI, bukan hanya di dalam call(). probe() menerima transport yang bisa
-    # disuntik supaya bisa diuji tanpa jaringan — dan kalau satu-satunya penjaga kunci hidup di
-    # call(), jalur yang diuji justru melewati jalur tanpa kunci. Terukur: tes "NO_KEY" dulu lulus
-    # dengan salah sampai transport palsunya menjawab 200 untuk permintaan tanpa kunci.
-    if not key_of(cfg):
-        return {"endpoint": spec["path"], "kind": kind, "ok": False, "status": None,
-                "why": "NO_KEY — jalankan `tripo login` (operator), atau isi config/tripo.json / "
-                       "env TRIPO_API_KEY untuk jalur HTTP",
-                "verdict": "UNVERIFIED"}
+    if kind == "http":
+        # Kunci diperiksa DI SINI, bukan hanya di dalam call(). probe() menerima transport yang bisa
+        # disuntik supaya bisa diuji tanpa jaringan — dan kalau satu-satunya penjaga kunci hidup di
+        # call(), jalur yang diuji justru melewati jalur tanpa kunci. Terukur: tes "NO_KEY" dulu lulus
+        # dengan salah sampai transport palsunya menjawab 200 untuk permintaan tanpa kunci.
+        if not key_of(cfg):
+            return {"endpoint": spec["path"], "kind": kind, "ok": False, "status": None,
+                    "why": "NO_KEY — isi config/tripo.json atau env TRIPO_API_KEY",
+                    "verdict": "UNVERIFIED"}
     if kind == "cli":
+        # Rute CLI TIDAK membutuhkan api_key: `tripo whoami` membaca sesi login vendor (operator),
+        # bukan config/tripo.json. Memeriksa kunci di sini akan melaporkan NO_KEY pada panggilan
+        # yang justru tidak memakai kunci itu sama sekali — dan pesan itu menyuruh operator mengisi
+        # sesuatu yang tidak ada hubungannya dengan kegagalan yang ia lihat.
         run = cli_runner or (lambda argv: cli(argv, spend=False))
         r = run(["whoami", "--json"])
-        out = {"endpoint": f"tripo {' '.join(['whoami', '--json'])}", "kind": "cli",
+        out = {"endpoint": "tripo whoami --json", "kind": kind,
                "ok": bool(r.get("ok")), "status": r.get("exit"),
                "why": (r.get("why") or r.get("stderr") or "")[:200]}
         if r.get("ok"):
@@ -169,9 +173,9 @@ def probe(cfg=None, transport=None, cli_runner=None):
             out["verdict"] = ("SALDO DAN AUTENTIKASI TERBUKTI lewat CLI — catat angkanya, karena "
                               "inilah satu-satunya angka biaya yang boleh dipakai memutuskan "
                               "--spend")
-        elif "login" in out["why"].lower() or r.get("exit") in (1, 2):
-            out["verdict"] = ("CLI MENOLAK — paling sering karena belum `tripo login`. Itu pekerjaan "
-                              "operator (sesi browser), bukan sesuatu yang boleh dilewati modul ini")
+        elif "login" in out["why"].lower():
+            out["verdict"] = ("CLI MENOLAK karena belum `tripo login`. Itu pekerjaan operator "
+                              "(sesi browser), bukan sesuatu yang boleh dilewati modul ini")
         else:
             out["verdict"] = "UNVERIFIED"
         return out
@@ -246,19 +250,23 @@ def submit(cfg, kind, source, spend=False, cli_runner=None):
                        "permintaan itu. Ukur lewat `tripo.py probe` (whoami, gratis), lalu isi "
                        "angkanya di ENDPOINTS."}
     if is_cli:
-        run = cli_runner or (lambda argv: cli(argv, spend=True))
-        r = run([spec["path"], "--json"])
+        run = cli_runner or (lambda argv, cost=None: cli(argv, spend=True, cost_confirmed=cost))
+        r = run([spec["path"], "--json"], cost=spec["biaya_poin"])
         r["plan"] = plan
-        r["sent"] = True
+        # `sent` adalah fakta bahwa sesuatu BERANGKAT, bukan niat pemanggil. Versi pertama menulis
+        # True di bawah tanpa peduli hasil, jadi NO_KEY, PATH_TIDAK_VALID, HTTP 4xx dan CLI exit
+        # bukan-nol semuanya tercatat sebagai "permintaan terkirim" — angka yang paling dipercaya
+        # orang di laporan justru yang paling tidak boleh dikarang.
+        r["sent"] = bool(r.get("ok"))
         return r
     body = {"type": spec.get("task_type", kind), "input": str(source)}
     r = call(cfg, spec["path"], spec["method"], body)
     r["plan"] = plan
-    r["sent"] = True
+    r["sent"] = bool(r.get("ok"))
     return r
 
 
-def cli(argv, spend=False, timeout=600):
+def cli(argv, spend=False, timeout=600, cost_confirmed=None):
     """Jalankan tripo-cli resmi (VAST), dengan pagar biaya yang sama seperti modul ini.
 
     `tripo-cli` dipasang 2026-10-15 ke `~/runtime/npm-global` (bukan $HOME, sesuai §2) dan
@@ -273,6 +281,16 @@ def cli(argv, spend=False, timeout=600):
     desktop operator saat dia tidur.
     """
     exe = os.environ.get("TRIPO_CLI", os.path.expanduser("~/runtime/npm-global/bin/tripo"))
+    # Pagar biaya juga berlaku untuk panggilan CLI LANGSUNG. Temuan audit 2026-10-15: gerbang
+    # `cost_is_known` hanya ada di submit(), padahal `tripo.py cli make ... --spend` memanggil
+    # fungsi ini tanpa lewat submit() — jalur itu mencabut --dry-run dan langsung memakai poin.
+    # Satu aturan harus hidup di satu tempat DAN tidak boleh bisa dilewati oleh pintu lain;
+    # karena itu cli() memeriksa angka yang sama, bukan mempercayai pemanggilnya.
+    if spend and argv and argv[0] in SPEND_COMMANDS and not cost_is_known(cost_confirmed):
+        return {"ok": False, "sent": False, "spent": False,
+                "why": f"DITOLAK: `tripo {argv[0]}` memakai poin dan biayanya belum terukur "
+                       f"(cost_confirmed={cost_confirmed!r}, yang boleh membayar hanya angka). "
+                       "Ukur dulu lewat `tripo.py probe` (whoami, gratis)."}
     if not Path(exe).exists():
         return {"ok": False, "why": f"tripo-cli tidak ada di {exe} — npm install -g tripo-cli"}
     args = [exe, *argv]
@@ -304,8 +322,8 @@ def selftest():
         seen.append((method, path, body))
         return {"ok": True, "status": 200, "json": {"data": {"available": 500}}}
 
-    def fake_cli(argv, spend=False):
-        cli_seen.append((list(argv), spend))
+    def fake_cli(argv, spend=False, cost=None):
+        cli_seen.append((list(argv), spend, cost))
         return {"ok": True, "exit": 0, "stdout": '{"credits": 500}', "stderr": ""}
 
     checks = []
@@ -340,10 +358,12 @@ def selftest():
           "(pagar lama dibandingkan dengan nilai yang tidak ada di tabel = pagar terbuka)",
           not s.get("ok") and s.get("sent") is False and s.get("plan", {}).get("cost_known") is False
           and not seen and len(cli_seen) == 1, str(s)[:200])
+    n_cli = len(cli_seen)
     sk = submit({**cfg}, "balance", "-", spend=True, cli_runner=fake_cli)
     check("--spend BOLEH lewat begitu biayanya angka 0 (rute balance), jadi pagar tidak menolak "
           "segalanya — yang diukur adalah bentuk biayanya, bukan ada/tidaknya pagar",
-          sk.get("sent") is True and len(cli_seen) == 2, str(sk)[:160])
+          sk.get("sent") is True and len(cli_seen) == n_cli + 1 and cli_seen[-1][2] == 0,
+          str(cli_seen[-1])[:160])
 
     st = status(cfg)
     check("status melapor panjang + sidik jari, tidak pernah menampilkan kunci",
@@ -351,10 +371,24 @@ def selftest():
           and st["key_length"] == len("TRIPO-KEY-PALSU-12345")
           and len(st["key_fingerprint"]) == 12, str(st))
 
-    nokey = probe({**DEFAULTS}, transport=fake_http, cli_runner=fake_cli)
-    check("tanpa kunci ia melapor NO_KEY lebih dulu, tanpa memanggil CLI atau HTTP",
-          not nokey["ok"] and "NO_KEY" in nokey["why"] and len(cli_seen) == 2 and not seen,
-          str(nokey)[:160])
+    # `tripo whoami` memakai SESI LOGIN vendor, bukan api_key di config. Versi pertama memeriksa
+    # kunci sebelum melihat rute, jadi jalur CLI yang tidak butuh kunci itu dilaporkan NO_KEY —
+    # dan pesannya menyuruh operator mengisi sesuatu yang tidak ada hubungannya dengan kegagalannya.
+    n_cli = len(cli_seen)
+    cli_nokey = probe({**DEFAULTS}, transport=fake_http, cli_runner=fake_cli)
+    check("rute CLI probe TIDAK menuntut api_key (whoami memakai sesi login operator), dan tidak "
+          "mengirim apa pun lewat HTTP",
+          cli_nokey["ok"] is True and cli_nokey["kind"] == "cli"
+          and len(cli_seen) == n_cli + 1 and not seen, str(cli_nokey)[:160])
+    real_spec0 = dict(ENDPOINTS["balance"])
+    ENDPOINTS["balance"]["kind"] = "http"
+    ENDPOINTS["balance"]["path"] = "/v2/account"
+    try:
+        nokey = probe({**DEFAULTS}, transport=fake_http, cli_runner=fake_cli)
+    finally:
+        ENDPOINTS["balance"] = real_spec0
+    check("rute HTTP tanpa kunci melapor NO_KEY sebelum mengirim apa pun",
+          not nokey["ok"] and "NO_KEY" in nokey["why"] and not seen, str(nokey)[:160])
 
     kind_box = {"kind": "cli"}
 
@@ -373,15 +407,22 @@ def selftest():
     bad = dict(ENDPOINTS["balance"]); bad["kind"] = "carrier-pigeon"
     real_balance = ENDPOINTS["balance"]
     ENDPOINTS["balance"] = bad
+    n_http, n_cli = len(seen), len(cli_seen)
     try:
         unk = probe(cfg, transport=fake_http, cli_runner=fake_cli)
     finally:
         ENDPOINTS["balance"] = real_balance
     check("kind yang tidak dikenal tidak boleh ditebak jadi HTTP: tidak ada panggilan, UNVERIFIED",
-          not unk["ok"] and "KIND_TIDAK_DIKENAL" in unk["why"] and len(cli_seen) == 2, str(unk)[:160])
+          not unk["ok"] and "KIND_TIDAK_DIKENAL" in unk["why"]
+          and len(seen) == n_http and len(cli_seen) == n_cli, str(unk)[:160])
 
     # Pagarnya sendiri diuji tanpa memanggil CLI: yang diukur adalah apakah --dry-run dan --no-open
     # benar-benar disisipkan, dan apakah ia TIDAK menyisipkannya saat operator memang menyuruh bayar.
+    # `_captured` DIKOSONGKAN sebelum tiap panggilan: bentuk lama membiarkannya berisi argumen dari
+    # panggilan sebelumnya, jadi ketika versi baru menolak `spend=True` tanpa biaya dan tidak
+    # menyentuh subprocess sama sekali, tes itu membaca argumen lama dan hampir menyimpulkan
+    # "panggilan berbayar terkirim". Tes yang tidak bisa membedakan "tidak ada proses" dari
+    # "proses terakhir" bukan tes pagarnya, itu tes kenangan.
     import types
     _captured = {}
 
@@ -391,15 +432,26 @@ def selftest():
     real_sub = __import__("subprocess").run
     __import__("subprocess").run = fake_run
     try:
-        cli(["make", "a rock"], spend=False)
-        dry = _captured.get("args", [])
-        cli(["make", "a rock"], spend=True)
-        paid = _captured.get("args", [])
+        _captured.clear()
+        r_dry = cli(["make", "a rock"], spend=False)
+        dry = _captured.get("args")
+        _captured.clear()
+        r_nocost = cli(["make", "a rock"], spend=True)
+        nocost = _captured.get("args")
+        _captured.clear()
+        r_paid = cli(["make", "a rock"], spend=True, cost_confirmed=40)
+        paid = _captured.get("args")
     finally:
         __import__("subprocess").run = real_sub
-    check("cli memaksa --dry-run + --no-open kecuali spend=True "
-          f"(tanpa spend: {dry[-2:]} · dengan spend: {paid[-1:]})",
-          "--dry-run" in dry and "--no-open" in dry and "--dry-run" not in paid)
+    check("cli memaksa --dry-run + --no-open pada jalur tanpa biaya",
+          dry is not None and "--dry-run" in dry and "--no-open" in dry, str(dry))
+    check("Pintu KEDUA dijaga: cli(spend=True) tanpa angka biaya DITOLAK sebelum subprocess "
+          "samasekali (audit menemukan gerbang hanya hidup di submit())",
+          nocost is None and r_nocost.get("sent") is False and "DITOLAK" in r_nocost["why"],
+          str(r_nocost)[:160])
+    check("dengan angka biaya yang terukur, --dry-run dicabut dan perintah benar-benar berangkat",
+          paid is not None and "--dry-run" not in paid and "--no-open" in paid
+          and r_paid.get("ok") is True, str(paid))
     for name, cond, detail in checks:
         print(f"[{'ok' if cond else 'GAGAL'}] tripo: {name}" + (f" — {detail}" if not cond else ""))
     n_ok = sum(1 for _n, c, _d in checks if c)

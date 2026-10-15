@@ -138,7 +138,13 @@ def muted_classes(path=None) -> set:
     except Exception:  # noqa: BLE001 — tidak ada config = tidak ada yang dibungkam
         return set()
     m = {str(x).lower() for x in (cfg.get("muted") or [])}
-    return m - {"unknown"}
+    # `urgent` ikut dibuang, dan itu temuan audit independen atas commit saya sendiri
+    # (2026-10-15): versi pertama hanya membuang `unknown`, jadi satu baris `{"muted":["urgent"]}`
+    # di config akan membungkam SEND_FAILED, ESCALATED, dan QUOTA_CLOSED diam-diam — orang yang
+    # menambang kunci API tidak pernah melihat bahwa loop-nya mati. Kelas yang membungkam alarm
+    # tidak boleh bisa ditulis dari config; untuk berhenti total ada sakelar mode dan `disarm`,
+    # dan keduanya menyebut dirinya sendiri.
+    return m - {"unknown", "urgent"}
 
 
 STATE_PATH = Path.home() / "runtime" / "notify_last.json"
@@ -147,6 +153,17 @@ STATE_PATH = Path.home() / "runtime" / "notify_last.json"
 # keadaan yang masih darurat: jendela ON yang ditutup kuota harus tetapingatkan orang sebelum
 # pagi, tapi tidak setiap lima menit.
 REPEAT_WINDOW_S = 6 * 3600
+# Jendela yang sama untuk alarm adalah pembungkaman, bukan pengulangan. Terukur dari audit
+# independen 2026-10-15 terhadap commit db7b47d: `SEND_FAILED` yang menetap karena mesin memang
+# rusak hanya akan berbunyi sekali lalu diam enam jam — operator kehilangan satu-satunya tanda
+# bahwa loop berhenti bekerja. Jadi dua angka, dua niat: denyut (progress) boleh ditahan lama,
+# keadaan darurat harus kembali mengetuk dalam setengah jam.
+REPEAT_URGENT_WINDOW_S = 30 * 60
+
+
+def repeat_window(cls) -> int:
+    """Satu tempat yang memutuskan berapa lama satu kelas boleh diam (§12)."""
+    return REPEAT_WINDOW_S if cls == "progress" else REPEAT_URGENT_WINDOW_S
 
 
 def signature(events) -> str:
@@ -166,10 +183,21 @@ def signature(events) -> str:
 
 
 def last_sent(path=None) -> dict:
+    """Riwayat {sidik: detik} — bukan satu slot.
+
+    Audit yang sama menemukan versi satu-slot: dua alarm yang muncul bergantian setiap tick
+    saling menimpa, dan pengulangan tidak tertahan sama sekali. Rambu yang harusnya tahan untuk
+    satu keadaan malah menghapus rambu keadaan lain.
+    """
     try:
-        return json.loads(Path(path or STATE_PATH).read_text(encoding="utf-8"))
+        raw = json.loads(Path(path or STATE_PATH).read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — tidak ada state = belum pernah dikirim
         return {}
+    # Bentuk lama adalah {"sig": ..., "ts": ...}; dibaca supaya tick pertama setelah perubahan ini
+    # tidak kehilangan riwayat yang sudah ada, bukan supaya kode lama boleh tetap ditulis.
+    if set(raw) == {"sig", "ts"}:
+        return {str(raw["sig"]): float(raw["ts"])}
+    return {str(k): float(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
 
 
 def is_repeat(sig, now=None, path=None, window=REPEAT_WINDOW_S) -> bool:
@@ -181,21 +209,25 @@ def is_repeat(sig, now=None, path=None, window=REPEAT_WINDOW_S) -> bool:
     membungkam alarm.
     """
     st = last_sent(path)
-    if st.get("sig") != sig:
-        return False
     try:
-        age = (time.time() if now is None else now) - float(st.get("ts"))
+        ts = float(st.get(sig))
     except (TypeError, ValueError):
         return False
+    age = (time.time() if now is None else now) - ts
     return 0 <= age < window
 
 
 def record_sent(sig, now=None, path=None) -> None:
     p = Path(path or STATE_PATH)
+    ts = time.time() if now is None else now
     try:
+        hist = last_sent(p)
+        hist[sig] = ts
+        # Yang tua dibuang: tanpa ini berkas tumbuh selamanya, dan setiap keadaan yang pernah
+        # lewat suatu saat akan membuat pembacanya mengira ia masih baru.
+        hist = {k: v for k, v in hist.items() if ts - float(v) < REPEAT_WINDOW_S * 2}
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"sig": sig, "ts": time.time() if now is None else now}),
-                     encoding="utf-8")
+        p.write_text(json.dumps(hist), encoding="utf-8")
     except Exception:  # noqa: BLE001 — gagal mencatat hanya berarti tick berikutnya tidak tertahan
         pass
 
@@ -216,7 +248,13 @@ def worth_notifying(events, mute=None) -> tuple[bool, str]:
     # `mute` bisa diserahkan: selftest harus menguji kedua sisi tanpa bergantung pada apakah
     # kebetulan ada config/notify.json di mesin yang menjalankan tes. Perilaku produksi tetap
     # membaca config pada saat dipakai, bukan mengingatnya.
-    mute = muted_classes() if mute is None else set(mute)
+    #
+    # `urgent` dibuang di SINI, bukan hanya di pembaca config. Versi pertama membuang
+    # {"unknown","urgent"} di `muted_classes()` saja, jadi jalur yang menyerahkan mute sebagai
+    # argumen — termasuk pemanggil yang suatu saat menyaring config sendiri — masih bisa
+    # membungkam seluruh alarm dengan satu kata. Aturan yang hanya hidup di satu pembaca config
+    # bukan aturan, itu default yang kebetulan aman.
+    mute = (muted_classes() if mute is None else set(mute)) - {"unknown", "urgent"}
     for a in acts:
         c = classify(a)
         if c == "progress":
@@ -381,14 +419,24 @@ def notify_tick(events, mode=None, level=None, runner=None, mute=None,
     want, reason = worth_notifying(events, mute=mute)
     if not want:
         return {"sent": False, "skipped": True, "reason": reason, "ok": True}
+    # Jendela yang dipakai adalah yang PALING KECIL di antara kelas yang hadir. Versi pertama
+    # memakai nama yang pulang dari worth_notifying — dan fungsi itu menyapu progress lebih dulu,
+    # jadi tick berisi WORK_DISPATCHED + SEND_FAILED menahan alarmnya selama jendela denyut 6 jam.
+    cls = str(reason).split(":", 1)[0]
+    names = [str((e or {}).get("action") or "?") for e in (events or []) if isinstance(e, dict)]
+    loud = {classify(a) for a in names} & {"progress", "urgent", "unknown"}
+    window = min((repeat_window(c) for c in loud), default=repeat_window(cls))
     sig = signature(events)
-    if is_repeat(sig, now=now, path=state_path):
+    if is_repeat(sig, now=now, path=state_path, window=window):
         return {"sent": False, "skipped": True, "reason": f"REPEAT:{reason}", "ok": True,
-                "sig": sig}
+                "sig": sig, "window": window}
     out = notify_events(events, mode=mode, level=level, runner=runner)
-    if out.get("ok"):
+    # Dicatat dari hasil KIRIM, bukan dari hasil ringkas: `sent` di sini sudah dibuktikan oleh
+    # daemon (id banner non-nol), jadi kegagalan kirim tidak pernah membuat tick berikutnya
+    # diam karena "sudah pernah memberi tahu" sesuatu yang sebenarnya tidak sampai.
+    if out.get("sent") and out.get("ok"):
         record_sent(sig, now=now, path=state_path)
-    return {**out, "sig": sig}
+    return {**out, "sig": sig, "window": window}
 
 
 def notify_events(events, mode=None, level=None, runner=None) -> dict:
@@ -489,10 +537,49 @@ def selftest() -> int:
           f"{len(_ok_calls)} panggilan · b={b.get('reason')}")
     check("penghitung mundur yang kedaluwarsa membangunkan banner lagi",
           is_repeat(signature([{"action": "SEND_FAILED", "why": "pane tidak bisa dibaca"}]),
-                    now=time.time() + REPEAT_WINDOW_S + 1, path=_st) is False, str(_st))
+                    now=time.time() + REPEAT_URGENT_WINDOW_S + 1, path=_st,
+                    window=repeat_window("urgent")) is False, str(_st))
     check("berkas state yang tidak terbaca TIDAK membungkam alarm (arah gagal = berbunyi)",
           is_repeat("deadbeefdeadbeef", path=_st) is False
           and last_sent(path=_st.parent / "tidak-ada.json") == {})
+    # Temuan audit atas commit saya sendiri: dua alarm yang muncul bergantian saling menimpa
+    # state satu slot, jadi TIDAK ADA pengulangan yang tertahan. Sekarang riwayat per-sidik.
+    _alt = Path(tempfile.mkdtemp()) / "notify_last.json"
+    _alt_calls = []
+    alt_runner = lambda title, body, urgent=False: (_alt_calls.append(title),
+                                                    {"ok": True, "rc": 0, "err": ""})[1]
+    ea = [{"action": "SEND_FAILED", "why": "pane tidak bisa dibaca"}]
+    eb = [{"action": "GATE_FAILED", "item": 7, "why": "gerbang shell keluar bukan-nol"}]
+    seq = [notify_tick(ea, runner=alt_runner, state_path=_alt),
+           notify_tick(eb, runner=alt_runner, state_path=_alt),
+           notify_tick(ea, runner=alt_runner, state_path=_alt),
+           notify_tick(eb, runner=alt_runner, state_path=_alt)]
+    check("dua alarm berbeda yang bergantian tidak saling menimpa: keduanya tetap tercatat dan "
+          "yang berulang-dua-kali ditahan, bukan yang pertama",
+          len(_alt_calls) == 2 and seq[0].get("sent") and seq[1].get("sent")
+          and seq[2].get("skipped") and seq[3].get("skipped"),
+          json.dumps([{k: s.get(k) for k in ("sent", "skipped")} for s in seq]))
+    check("alarm darurat berbunyi lagi dalam 30 menit, denyut ditahan 6 jam — dua niat, dua angka",
+          repeat_window("urgent") == REPEAT_URGENT_WINDOW_S == 1800
+          and repeat_window("progress") == REPEAT_WINDOW_S == 6 * 3600
+          and repeat_window("unknown") == REPEAT_URGENT_WINDOW_S,
+          f"urgent={repeat_window('urgent')} progress={repeat_window('progress')}")
+    # Tick yang mencampur progress dan urgent tidak boleh ikut tertahan jendela progress.
+    _mix = Path(tempfile.mkdtemp()) / "notify_last.json"
+    _mix_calls = []
+    mix_runner = lambda title, body, urgent=False: (_mix_calls.append(title),
+                                                    {"ok": True, "rc": 0, "err": ""})[1]
+    mixed = [{"action": "WORK_DISPATCHED", "item": 12},
+             {"action": "SEND_FAILED", "why": "pane mati"}]
+    m1 = notify_tick(mixed, runner=mix_runner, state_path=_mix, mute=set())
+    m2 = notify_tick(mixed, runner=mix_runner, state_path=_mix, mute=set())
+    check("tick yang berisi progress DAN urgent memakai jendela urgent, bukan jendela denyut",
+          m1.get("sent") and m2.get("skipped") and m2.get("window") == REPEAT_URGENT_WINDOW_S
+          and _mix_calls[0] == m1["title"], json.dumps(m2, default=str))
+    check("urgent tidak bisa dibungkam dari config — satu baris muted:['urgent'] tidak boleh "
+          "membungkam seluruh alarm",
+          worth_notifying([{"action": "SEND_FAILED", "why": "x"}], mute={"urgent", "progress"})[0]
+          is True and classify("SEND_FAILED") == "urgent")
     check("fallback bus menunjuk socket user yang nyata atau None",
           bus_address() is None or bus_address().startswith("unix:path="), str(bus_address()))
     # Bentuk argv diuji TANPA mengirim. Tiga percobaan pertama format hint `a{sv}` salah dan satu-
