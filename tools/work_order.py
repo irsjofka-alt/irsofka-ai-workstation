@@ -495,6 +495,9 @@ ORIGIN_OPERATOR = "operator"
 # Konsekuensi yang sengaja dipertahankan: `claim()` menolak SEMI untuk segala yang bukan
 # 'operator', jadi pengayaan-diri hanya mungkin di ON — mode yang memang dititipkan ke mesin.
 ORIGIN_IDLE = "idle"
+# Peringkat penawaran antrean. `work_rank()` punya alasannya sendiri; angkanya tinggal di sini supaya
+# tidak ada tempat kedua yang memutuskan "mana yang lebih dulu".
+KIND_RANK = {ORIGIN_OPERATOR: 0, ORIGIN_ROADMAP: 1, ORIGIN_LEGACY: 2, ORIGIN_IDLE: 3}
 
 # Batas sendiri untuk baris idle. `NIGHT_MAX_ITEMS` menjaga seluruh run; tanpa angka kedua ini,
 # pekerjaan pengayaan-diri akan memakan anggaran item malam dan menyisakan sedikit ruang untuk
@@ -1662,6 +1665,23 @@ def shape_warning(shape):
             "menjalankannya lagi tanpa mengubah apa pun adalah cara loop mengunyah baris yang sama")
 
 
+def work_rank(row):
+    """Seberapa cepat satu baris siap dikerjakan dibanding baris siap lainnya.
+
+    Aturan yang berlaku sebelum 2026-10-15 20:0x adalah `ORDER BY id`: siapa yang lebih dulu ditulis,
+    lebih dulu dikerjakan. Antrean itu tidak punya konsep "mana yang operator minta". Hasilnya
+    terukur dan membuat operator marah, dengan alasan: `next_ready()` menawarkan id 286 — baris
+    penajaman skill yang DIBUAT MESIN sendiri — sementara F11 (jembatan UE + kepemilikan MCP) masih
+    tujuh langkah terbuka di ROADMAP.md. Loop tidak sedang memilih pekerjaan ringan; ia hanya mengambil
+    yang nomornya kecil, dan baris mesin punya nomor terbaru sekaligus paling ringan dikerjakan.
+
+    Urutannya sekarang: perintah orang > item roadmap > baris warisan yang masih hidup > pekerjaan yang
+    dibuat mesin sendiri. Di dalam satu peringkat urutan id tetap berlaku, jadi tidak ada bintang baru
+    yang menentukan "berikutnya" selain fungsi ini — §12: satu pemilik untuk kata "berikutnya".
+    """
+    return KIND_RANK.get(str(row.get("origin") or ORIGIN_LEGACY), 2)
+
+
 def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None,
               drop_stale_legacy=False):
     """Item berikutnya yang siap: semua dependensinya COMPLETED, dan lease-nya tidak dipegang orang.
@@ -1681,6 +1701,10 @@ def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, f
     sebelumnya; `ORIGIN_OPERATOR` berarti hanya perintah yang manusia tulis sendiri ke database yang
     boleh muncul — dan itulah seluruh isi kata "semi": mesinnya tetap otomatis, tetapi yang ia
     kerjakan adalah perintah orang, bukan apa pun yang kebetulan tersedia.
+
+    Urutan penawaran bukan lagi `ORDER BY id` mentah: lihat `work_rank()`. Perintah orang dulu, lalu
+    item roadmap, lalu warisan, lalu pekerjaan yang dibuat mesin sendiri — supaya sebuah loop tidak
+    pernah lagi mengambil baris penajaman miliknya sendiri sambil meninggalkan F11 di ROADMAP.md.
     """
     return next(iter(ready_items(conn, engine, skip_blocked=skip_blocked,
                                  respect_due=respect_due, origin=origin,
@@ -1744,6 +1768,9 @@ def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None,
         if r.get("claimed_by") and int(r.get("lease_epoch") or 0) > now() and state == "WORKING":
             continue
         out.append(r)
+    # Stabil di dalam peringkat: id tetap penentu untuk baris dengan asal yang sama, jadi menambahkan
+    # peringkat tidak mengubah urutan yang sudah diyakini tes lama.
+    out.sort(key=lambda r: (work_rank(r), int(r["id"])))
     return out
 
 
@@ -2634,6 +2661,45 @@ ROADMAP_ITEMS = [
     # Gerbang yang cocok dengan prosa selalu benar, jadi bentuknya sekarang peristiwa terstruktur:
     # kind=push_verified dengan sha dan model yang meloloskan di baris yang sama. Tidak ada satu pun
     # kode yang memancarkan kind itu hari ini, dan itu memang sisanya.
+    # F11 — perintah operator 2026-10-15 15:26, dibaca balik dari `session_turns` id 458 pada
+    # 20:1x karena tidak ada satu pun baris antrean yang memuatnya: "untuk MCP saya ingin di 1 repo
+    # ini jadi memiliki 3 repo ... IRSofka Blender MCP, IRSofka Comfyui MCP, IRSofka Unreal Engine
+    # MCP". Pada saat yang sama `ready_items()` mengurutkan antrean dengan `ORDER BY id` dan
+    # `drop_stale_legacy` menahan baris kerja tanpa lease hidup, jadi satu-satunya yang bisa ditawarkan
+    # adalah id 286 — baris penajaman skill yang DIBUAT MESIN SENDIRI. Pekerjaan yang ia minta tidak
+    # pernah masuk ledger, jadi tidak ada yang bisa diambil. Tiga baris di bawah adalah pekerjaan itu,
+    # masing-masing dengan gerbang angka yang hari ini MERAH dan memang harus merah.
+    ("f11mcp_comfy", "F11/MCP-1 IRSofka ComfyUI MCP: repo berdiri sendiri sampai ke origin, gerbang "
+                     "VRAM dibuktikan dua arah, dan terpasang di KEDUA CLI", "build", None,
+     # Empat sifat, bukan keberadaan berkas. `remote get-url` hari ini gagal (repo belum punya
+     # remote — itu justru sisanya), `rev-parse origin/main` menuntut sha-nya benar-benar sampai,
+     # selftest 61/61 adalah gerbang perilakunya, dan grep konfigurasi menolak klaim "sudah terpasang"
+     # selama mesin tidak bisa memanggilnya.
+     "test -f ~/Apps/mcp/irsofka-comfyui-mcp/server.py && "
+     "timeout 300 python3 ~/Apps/mcp/irsofka-comfyui-mcp/server.py --selftest && "
+     "git -C ~/Apps/mcp/irsofka-comfyui-mcp remote get-url origin && "
+     "git -C ~/Apps/mcp/irsofka-comfyui-mcp rev-parse origin/main && "
+     "grep -q irsofka-comfyui-mcp ~/.qoder/settings.json && "
+     "grep -q irsofka-comfyui-mcp ~/.gemini/settings.json"),
+    ("f11mcp_blender", "F11/MCP-2 IRSofka Blender MCP: basis PERMISIF, dimodifikasi habis-habisan "
+                       "untuk ai-station, dan bukan turunan AGPL", "build", None,
+     # `mcp-blender` yang sekarang adalah AGPL-3.0-or-later sejak v0.4.0 dengan opsi komersialnya
+     # DICABUT (commit `8f64128`) - menurunkannya sambil melabeli hasilnya BSL adalah satu pintu ke
+     # arah yang salah, jadi gerbang ini menanyakan berkas IRSofka sendiri plus kartu lisensi
+     # permissive yang dibaca dari sumber, bukan dari nama model atau ingatan.
+     "test -f ~/Apps/mcp/irsofka-blender-mcp/server.py && "
+     "grep -qiE 'MIT|Apache' ~/Apps/mcp/irsofka-blender-mcp/LICENSE && "
+     "test ! -f ~/Apps/mcp/irsofka-blender-mcp/AGPL-NOTICE"),
+    ("f11mcp_ue", "F11/MCP-3 IRSofka Unreal Engine MCP: plugin berdiri sendiri sebagai repo, "
+                  "dengan gerbang langkah 0 (transform round-trip + capture ber-hashes) lebih dulu",
+     "build", None,
+     # Urutannya bukan selera: langkah 0 F11 mengukur bahwa `set_transform` returning SUCCESS tapi
+     # `get_transform` membaca [0,0,0], dan `spawn` melaporkan kelas `Actor` untuk StaticMeshActor.
+     # Selama itu belum benar, memisahkan plugin menjadi repo sendiri hanya membungkus sesuatu yang
+     # tidak bisa membuktikan apa pun. Gerbangnya menolak replika kode engine: ini IRSofka sendiri.
+     "test -f ~/Apps/mcp/irsofka-unreal-mcp/README.md && "
+     "git -C ~/Apps/mcp/irsofka-unreal-mcp rev-parse origin/main && "
+     "python3 tools/measure_epic_surface.py >/dev/null"),
     ("f109", "F10.9 push gate: push hanya setelah verdict verifier COMPLETED menyebut model yang "
              "meloloskan diff-nya; tanpa verdict, commit berhenti lokal dan masuk digest pagi",
      "build", ["f101", "f103"],
@@ -4537,6 +4603,36 @@ def selftest():
               and "! systemctl --user is-enabled" in (_g103[0]["c"] or "")
               and "irsofka-autopilot.timer" in (_g103[0]["c"] or ""),
               str((_g103[0]["c"] if _g103 else "")[:120]))
+
+        # --- urutan penawaran: perintah orang > roadmap > warisan > buatan mesin ------------------
+        # Kemelut nyata 2026-10-15 20:0x: operator menanyakan kenapa loop mengerjakan penajaman skill
+        # padahal task MCP-nya (session_turns id 458) belum disentuh. Jawabannya bukan "mesin memilih
+        # yang ringan": `ORDER BY id` + `drop_stale_legacy` membuat satu-satunya baris yang BISA
+        # ditawarkan adalah 286, baris yang dibuat mesin sendiri, dan tiga repo MCP yang ia minta tidak
+        # pernah punya baris sama sekali. Yang diuji di bawah karena itu: kehadiran, dan urutan.
+        _mcp = run(conn, "SQLITE",
+                   "SELECT id, title, origin, check_command FROM quest_tasks "
+                   "WHERE origin='roadmap' AND title LIKE 'F11/MCP%' ORDER BY id")
+        check("tiga repo MCP yang diminta operator ada sebagai baris antrean yang bisa diklaim",
+              len(_mcp) == 3, f"{len(_mcp)} baris: {[str(m['title'])[:28] for m in _mcp]}")
+        check("tiap baris F11/MCP punya gerbang angka, bukan judul kosong",
+              all((m.get("check_command") or "").strip() for m in _mcp),
+              [str(m.get("check_command") or "")[:40] for m in _mcp])
+        conn.execute("INSERT INTO quest_tasks (title, status, origin, cli_engine) "
+                     "VALUES ('sharpen-last','PENDING','idle','qoder')")
+        conn.execute("INSERT INTO quest_tasks (title, status, origin, cli_engine) "
+                     "VALUES ('operator-first','PENDING','operator','qoder')")
+        conn.commit()
+        _order = [str(r["origin"]) for r in ready_items(conn, "SQLITE")]
+        check("baris penajaman buatan mesin tidak pernah ditawarkan di atas item roadmap",
+              _order.index("roadmap") < _order.index("idle"), str(_order[:6]))
+        check("perintah orang tetap yang paling depan, di atas roadmap sekalipun",
+              _order.index("operator") < _order.index("roadmap"), str(_order[:6]))
+        check("next_item sungguh memakai peringkat itu, bukan hanya daftarnya",
+              (next_item(conn, "SQLITE") or {}).get("origin") == ORIGIN_OPERATOR,
+              str((next_item(conn, "SQLITE") or {}).get("origin")))
+        conn.execute("DELETE FROM quest_tasks WHERE title IN ('sharpen-last','operator-first')")
+        conn.commit()
 
         # --- gerbang F10.5: harus mengukur mimpi, bukan keberadaan berkas ------------------------
         gate105 = [i[4] for i in ROADMAP_ITEMS if i[0] == "f105"][0]

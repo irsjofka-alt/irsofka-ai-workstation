@@ -1337,6 +1337,21 @@ the upstream, the version installed, and the install command instead.
 | IRSofka Blender MCP | depends on the base | MIT base → any licence incl. BSL; **v0.4.x base → AGPL forever** | the installed 218-tool server is AGPL since v0.4.0 and its commercial offer was **withdrawn**, so building on it forecloses selling. Clean bases: `ahujasid/mcp-for-blender` (MIT, 30,872★) or RFingAdam `v0.3.0` (MIT). Decide **before** writing code; this is not reversible afterwards |
 | IRSofka ComfyUI MCP | ours — **written, 2026-10-15** (see "Shipped first…" above: no code copied; their `server.py` was read once, for tool counts, so the strict blind-implementation sense of clean-room does not apply) | free choice, no fee | ComfyUI core is **GPL-3.0** (measured at `~/ComfyUI-Installs/ComfyUI/ComfyUI/LICENSE`), but GPL bites on *linking*, not on speaking HTTP to a separate process — comfy-mcp's own `NOTICE` records exactly that distinction for GPL `comfy-cli`. So: implement against `127.0.0.1:8188` ourselves, or fork a permissive client (`artokun/comfyui-mcp` MIT, `joenorton/comfyui-mcp-server` Apache-2.0). Copying `comfy-mcp` instead means AGPL or paying Comfy Org |
 
+**Ledger state of the three repos, measured 2026-10-15 20:2x** (this section existed as prose only,
+which is why an unattended loop could not work on it — see `AUTO_PILOT.md` "TASK DAHULU, PENAJAMAN
+TERAKHIR"):
+
+| repo | on disk | remote | registered in CLI | wheel | ledger row |
+|---|---|------|---|---|
+| IRSofka ComfyUI MCP | yes, `~/Apps/mcp/irsofka-comfyui-mcp` (server.py, vram.py, LICENSE, README, pyproject) | **none** (`git remote get-url origin` fails) | **0 of 2** (`grep irsofka-comfyui-mcp` in `~/.qoder/settings.json` and `~/.gemini/settings.json`: no match) | **no `dist/`** | `F11/MCP-1` id 294, `origin='roadmap'` |
+| IRSofka Blender MCP | no such directory | n/a | n/a | n/a | `F11/MCP-2` id 295 |
+| IRSofka Unreal Engine MCP | no such directory (the plugin lives inside the engine project) | n/a | n/a | n/a | `F11/MCP-3` id 296 |
+
+Three rows, three numeric gates, all three gates **red today and meant to be red**: each is a
+`check_command` in `ROADMAP_ITEMS`, so `work_order.py seed --roadmap` re-derives them and the queue
+offers them before anything the machine writes for itself. `next_ready()` returned id 286 (a
+machine-authored skill-sharpening row) before this; it returns 294 now.
+
 **Naming is a licence term, not branding.** "Blender", "ComfyUI"/"Comfy Org" and "Unreal" are other
 parties' marks; descriptive use ("MCP for Blender") is fine, implying official status is not, and
 `mcp-blender`'s README excludes its own project name and logo from the grant, so renaming is required
