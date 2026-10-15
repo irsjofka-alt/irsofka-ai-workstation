@@ -1342,7 +1342,7 @@ which is why an unattended loop could not work on it — see `AUTO_PILOT.md` "TA
 TERAKHIR"):
 
 | repo | on disk | remote | registered in CLI | wheel | ledger row |
-|---|---|------|---|---|
+|---|---|---|---|---|---|
 | IRSofka ComfyUI MCP | yes, `~/Apps/mcp/irsofka-comfyui-mcp` (server.py, vram.py, LICENSE, README, pyproject) | **none** (`git remote get-url origin` fails) | **0 of 2** (`grep irsofka-comfyui-mcp` in `~/.qoder/settings.json` and `~/.gemini/settings.json`: no match) | **no `dist/`** | `F11/MCP-1` id 294, `origin='roadmap'` |
 | IRSofka Blender MCP | no such directory | n/a | n/a | n/a | `F11/MCP-2` id 295 |
 | IRSofka Unreal Engine MCP | no such directory (the plugin lives inside the engine project) | n/a | n/a | n/a | `F11/MCP-3` id 298 (`depends_on` 297, so not offerable until 297 is green) |

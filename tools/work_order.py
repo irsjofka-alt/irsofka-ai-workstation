@@ -676,7 +676,8 @@ def roadmap_open(conn, backend):
     tidak pernah berarti tidak ada pekerjaan.
     """
     ph = "%s" if backend == "POSTGRESQL" else "?"
-    out = {"ledger_rows": None, "open_phases": None, "unreadable": []}
+    out = {"ledger_rows": None, "open_phases": None, "unprojected": None,
+           "projectable_open": None, "unreadable": []}
     try:
         rows = run(conn, backend,
                    f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin={ph} "
@@ -686,10 +687,51 @@ def roadmap_open(conn, backend):
         out["unreadable"].append(f"ledger ({str(exc)[:40]})")
     try:
         text = (REPO / "ROADMAP.md").read_text(encoding="utf-8")
-        # Blok "## Phases" membaris tiap fase dengan tanda selesainya. ✅ = selesai; apa pun yang
-        # lain (🟡 berjalan, 🟨 sebagian, ⬜ belum) adalah pekerjaan yang masih terbuka.
-        marks = re.findall(r"^F(\d+)[^\n]*?(✅|🟡|🟨|⬜)", text, re.M)
-        out["open_phases"] = sorted({int(m[0]) for m in marks if m[1] != "✅"})
+        # Dua koreksi dari reviewer, dan keduanya mengubah jawaban:
+        #  (1) dulu seluruh berkas dicari `^F<angka> ... emoji`. Baris catatan di bagian mana pun yang
+        #      dimulai dengan "F7 ..." ikut terhitung sebagai fase. Sekarang hanya blok "## Phases"
+        #      yang dibaca, dan bloknya dibatasi pagar ``` — persis bentuk yang ditulis dokumen.
+        #  (2) dulu `[^\n]*?` mengambil emoji PERTAMA, jadi "F5 ... (sebelumnya 🟡) ✅" terbaca
+        #      terbuka padahal barisnya menyatakan selesai. Yang dipakai sekarang emoji TERAKHIR:
+        #      penanda status ditulis paling belakang di setiap baris fase.
+        # `## Phases` diikuti satu blok berpagar: judul, lalu pagar PEMBUKA, lalu isinya, lalu
+        # pagar PENUTUP. Pola pertama saya menjodohkan judul dengan pagar pertama yang ketemu — itu
+        # pagar pembuka — sehingga isinya terbaca kosong dan `open_phases` menjadi [] tanpa satu pun
+        # fase dibuka. Sebuah parser yang melaporkan "tidak ada yang terbuka" karena ia tidak
+        # menemukan bloknya adalah parser yang meloloskan penulisan baris penajaman, persis yang
+        # pagar ini ditahan. Sekarang pagar pembuka dan penutup diminta keduanya, dan blok yang
+        # tidak ditemukan melempar, bukan mengembalikan kosong.
+        block = re.search(r"^## Phases\s*$.*?^```\s*$(.*?)^```\s*$", text, re.M | re.S)
+        if not block:
+            raise ValueError("blok `## Phases` tidak ditemukan")
+        body = block.group(1)
+        open_phases = set()
+        for ln in body.splitlines():
+            m = re.match(r"^F(\d+)\b", ln.strip())
+            if not m:
+                continue
+            marks = [e for e in ("✅", "🟡", "🟨", "⬜") if e in ln]
+            if marks:
+                # emoji terakhir yang MUNCUL di baris, bukan yang terakhir di daftar konstan
+                tail = max(ln.index(e) for e in marks)
+                status = next(e for e in marks if ln.index(e) == tail)
+                if status != "✅":
+                    open_phases.add(int(m.group(1)))
+        # Dua jenis "terbuka" dan bedannya menentukan pagar, bukan hiasan: fase yang ADA di
+        # ROADMAP_ITEMS tapi barisnya belum masuk ledger memang belum dipetakan (perbaikannya
+        # `seed --roadmap`); fase yang TIDAK ada di ROADMAP_ITEMS tidak akan pernah bisa dipetakan,
+        # dan memblokir penajaman karena itu berarti mengunci loop selamanya — persis kebuntuan
+        # yang ditemukan reviewer atas versi pertama pagar ini (F6 🟡 tidak punya baris dan tidak
+        # akan pernah punya).
+        # Nomor fase dibaca dari JUDUL item, bukan dari kunci. Kuncinya "f108"/"f91"/"f84" dan
+        # angka itu adalah penomoran butir (F10.8, F9.1, F8.4), bukan fase: memetakannya apa adanya
+        # membuat {84, 108, 91, ...} dan setiap fase peta tampak "belum pernah bisa dipetakan" —
+        # pagar yang kelihatannya longgar padahal diam-diam mengunci penajaman selamanya.
+        mapped = {int(m.group(1)) for _k, title, *_ in ROADMAP_ITEMS
+                  if (m := re.match(r"^F(\d+)", str(title)))}
+        out["open_phases"] = sorted(open_phases)
+        out["unprojected"] = sorted(ph for ph in open_phases if ph not in mapped)
+        out["projectable_open"] = sorted(ph for ph in open_phases if ph in mapped)
     except Exception as exc:  # noqa: BLE001
         out["unreadable"].append(f"ROADMAP.md ({str(exc)[:40]})")
     return out
@@ -770,16 +812,18 @@ def ensure_idle_item(conn, backend, cli_engine=None, who=IDLE_HOLDER, emit=None,
     # 17:08 sementara perintah MCP-nya belum punya baris sama sekali dan enam fase peta masih
     # terbuka. Selama masih ada pekerjaan roadmap, baris yang mesin karang sendiri tidak ditulis.
     _ro = roadmap_open(conn, backend)
+    # Sama seperti di `queue_followup`: None ditanyakan lebih dulu, dan yang membeku hanya fase yang
+    # memang bisa dipetakan.
+    if _ro["ledger_rows"] is None or _ro["open_phases"] is None:
+        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro["unreadable"]))
+        return None
     if _ro["ledger_rows"]:
         emit("IDLE_HELD_BY_ROADMAP", rows=int(_ro["ledger_rows"]), open_phases=_ro["open_phases"])
         return None
-    if _ro["open_phases"]:
-        emit("IDLE_MAP_NOT_PROJECT", open_phases=_ro["open_phases"],
-             why="fase peta masih terbuka tapi tidak ada barisnya di antrean — jalankan "
+    if _ro.get("projectable_open"):
+        emit("IDLE_MAP_NOT_PROJECT", open_phases=_ro["projectable_open"],
+             why="fase ini ada di ROADMAP_ITEMS tapi barisnya tidak ada di antrean — jalankan "
                  "`python3 tools/work_order.py seed --roadmap`, jangan tulis penajaman")
-        return None
-    if _ro["ledger_rows"] is None or _ro["open_phases"] is None:
-        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro["unreadable"]))
         return None
 
     if not eng:
@@ -1350,17 +1394,21 @@ def queue_followup(conn, backend, cli_engine, emit=None):
     #   IDLE_MAP_NOT_PROJECT  : peta masih terbuka tapi ledger kosong, artinya langkah roadmap belum
     #                           pernah dipetakan (`seed --roadmap`), dan itu TEMUAN, bukan izin.
     _ro = roadmap_open(conn, backend)
+    # Urutannya bukan gaya. Versi pertama menanyakan angka SEBELUM menanyakan "bisa dibaca apa
+    # tidak", jadi kegagalan membaca ledger (None) lolos sebagai "nol baris" dan baris penajaman
+    # tetap ditulis — tepat keadaan yang pagar ini tutup. Bacaan yang gagal sekarang menutup lebih
+    # dulu, dan menutup dengan nama kejadiannya sendiri.
+    if _ro["ledger_rows"] is None or _ro["open_phases"] is None:
+        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro["unreadable"]))
+        return None
     if _ro["ledger_rows"]:
         emit("IDLE_HELD_BY_ROADMAP", rows=int(_ro["ledger_rows"]),
              open_phases=_ro["open_phases"], why="antrean roadmap belum kosong — penajaman tidak ditulis")
         return None
-    if _ro["open_phases"]:
-        emit("IDLE_MAP_NOT_PROJECT", open_phases=_ro["open_phases"],
-             why="ROADMAP.md masih punya fase terbuka tapi tidak ada barisnya di antrean — "
-                 "jalankan `python3 tools/work_order.py seed --roadmap`, jangan kerjakan penajaman")
-        return None
-    if _ro["ledger_rows"] is None or _ro["open_phases"] is None:
-        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro["unreadable"]))
+    if _ro.get("projectable_open"):
+        emit("IDLE_MAP_NOT_PROJECT", open_phases=_ro["projectable_open"],
+             why="fase ini ada di ROADMAP_ITEMS tapi barisnya tidak ada di antrean — jalankan "
+                 "`python3 tools/work_order.py seed --roadmap`, jangan kerjakan penajaman")
         return None
     if not cli_engine:
         emit("IDLE_DEBT_UNKNOWN", why="item selesai tanpa cli_engine — lanjutan tidak tahu ke mana")
@@ -1755,11 +1803,14 @@ def work_rank(row):
     sendiri. Di dalam satu peringkat urutan id tetap berlaku, jadi tidak ada bintang baru yang
     menentukan "berikutnya" selain fungsi ini — §12: satu pemilik untuk kata "berikutnya".
 
-    Yang TIDAK termasuk di dalam daftar ini, dan perlu disebut karena dokumen penajaman sempat
-    menuliskannya terbalik: baris warisan yang masih DIPEGANG orang (claimed_by terisi, lease hidup)
-    tidak ditawarkan sama sekali — `ready_items` melewatinya, dan itu benar, itu pekerjaan milik sesi
-    lain. Peringkat 20 adalah untuk baris warisan yang bisa diambil; yang lease-nya mati justru
-    turun ke 25 supaya tidak pernah menyalip pekerjaan yang benar-benar diminta.
+    Yang perlu disebut apa adanya, karena dokumen penajaman sempat menulisnya terbalik: daftar ini
+    adalah daftar PEMBUKAAN, bukan daftar izin. `ready_items` melewati baris yang sudah diklaim dan
+    lease-nya masih hidup hanya kalau statusnya `WORKING`; baris warisan berstatus `IN_PROGRESS`
+    (yang `norm()` petakan ke `CLAIMED`) dengan lease hidup TETAP ada di daftar — sengaja, karena
+    daftar yang sama dibaca laporan dan GUI, dan baris yang sedang dikerjakan orang lain harus tetap
+    terlihat, bukan lenyap. Yang melarang pekerjaannya mengambil bukan daftar ini, melainkan
+    `claim()`: ia menolak baris yang dipegang mesin lain. ditulis di sini supaya tidak ada yang
+    mengira "ditawarkan" berarti "boleh diambil".
 
     BATAS YANG DISENGAJA, ditulis karena reviewer menemukannya dan tidak bisa dibantah: peringkat ini
     buta terhadap urgensi. Sebuah baris `origin='idle'` yang isinya pemulihan kritis (disk habis,
@@ -5170,7 +5221,7 @@ def idle_selftest(check):
     # punya tesnya sendiri di bawah, dengan stub yang mengembalikan angka.
     _ro_orig = globals()["roadmap_open"]
     globals()["roadmap_open"] = lambda conn, backend: {"ledger_rows": 0, "open_phases": [],
-                                                        "unreadable": []}
+                                                        "projectable_open": [], "unreadable": []}
     try:
         ensure_schema(c, "SQLITE")
         # `ensure_schema` sudah memasang baris id=1, jadi jendela ON-nya ditulis lewat UPDATE —
@@ -5271,22 +5322,34 @@ def idle_selftest(check):
         # "antrean kosong" bisa benar di ledger dan salah di peta pada saat yang sama.
         for label, stub, event in (
             ("baris roadmap masih bisa diklaim",
-             lambda conn, backend: {"ledger_rows": 3, "open_phases": [6, 11], "unreadable": []},
+             lambda conn, backend: {"ledger_rows": 3, "open_phases": [6, 11],
+                                    "projectable_open": [11], "unreadable": []},
              "IDLE_HELD_BY_ROADMAP"),
             ("peta terbuka tapi belum dipetakan ke antrean",
-             lambda conn, backend: {"ledger_rows": 0, "open_phases": [11], "unreadable": []},
+             lambda conn, backend: {"ledger_rows": 0, "open_phases": [11],
+                                    "projectable_open": [11], "unreadable": []},
              "IDLE_MAP_NOT_PROJECT"),
             ("peta tidak terbaca",
              lambda conn, backend: {"ledger_rows": None, "open_phases": None,
+                                    "projectable_open": None,
                                     "unreadable": ["ROADMAP.md (tidak ada)"]},
-             "IDLE_DEBT_UNKNOWN")):
+             "IDLE_DEBT_UNKNOWN"),
+            # Fase terbuka yang TIDAK ada di ROADMAP_ITEMS (F6 🟡) tidak boleh mengunci penajaman
+            # selamanya: tidak ada `seed` yang akan pernah memetakannya. Yang diharapkan di sini
+            # justru pagar TIDAK menyala dan baris berikutnya jatuh ke pagar utang yang biasa
+            # (IDLE_NO_DEBT) — kebuntuan yang ditemukan reviewer atas versi pertama pagar ini.
+            ("hanya fase di luar jangkauan pemetaan",
+             lambda conn, backend: {"ledger_rows": 0, "open_phases": [6],
+                                    "projectable_open": [], "unprojected": [6], "unreadable": []},
+             "IDLE_NO_DEBT")):
             globals()["roadmap_open"] = stub
             ev.clear()
             blocked = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
-            check(f"peta yang masih terbuka ({label}) menutup penulisan baris idle",
+            check(f"peta terbuka ({label}) → {event}, dan tidak ada baris idle yang tertulis",
                   blocked is None and any(a == event for a, _ in ev) and _idle_count() == 0,
                   str([a for a, _ in ev]))
         globals()["roadmap_open"] = lambda conn, backend: {"ledger_rows": 0, "open_phases": [],
+                                                            "projectable_open": [],
                                                             "unreadable": []}
 
         # dan baris idle yang dibuat harus melewati keranjang yang sama, bukan memotong jalan

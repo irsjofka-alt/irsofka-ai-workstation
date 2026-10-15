@@ -38,7 +38,7 @@ So this ladder is not advice, and it is enforced in two places: `work_rank()` in
 |---|---|---|
 | 0 | a command the operator typed himself (`origin='operator'`) | `queue`, Human Decide answers, instructions written into SQL |
 | 1 | ROADMAP items (`origin='roadmap'`) | F11/MCP-1..3, F10.x, F9.x — anything in `ROADMAP_ITEMS` |
-| 2 | unclaimed legacy rows (`origin='legacy'`) | old work no session is holding; a row whose lease IS held belongs to that session and is never offered to you |
+| 2 | legacy rows still open (`origin='legacy'`) | old work from before this scheme; a row another session holds stays **visible** and `claim()` refuses it — being listed is not being allowed |
 | 3 | work the **machine wrote for itself** (`origin='idle'`) | skill sharpening, re-reading a decision note, `FOLLOWUP_CONTRACTS` |
 
 A stale legacy row (working status, dead lease) sits at 25 — below roadmap, above idle. It is never hidden: the flag that used to hide it was **deleted**, because a flag that any caller can set gives one row two orders, and contract 12 forbids that.

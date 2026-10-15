@@ -140,6 +140,13 @@ def next_ready(conn, engine, origin=None):
     `origin` diteruskan, tidak disaring di sini: "apa berikutnya" punya satu pemilik (`next_item`)
     dan drainer hanya meminjamnya. Menyaring di sisi drainer membuat dua definisi antrean.
 
+    Tidak ada lagi `drop_stale_legacy` di signature ini dan di `ready_items`/`next_item` sekaligus. Reviewer
+    menemukan docstring yang masih menjanjikan default False "untuk pemanggil yang butuh daftar tanpa
+    yang usang" — kalimat itu menunjuk parameter yang sudah dihapus, dan docstring yang menyebut tombol
+    yang tidak ada adalah cara termudah membuat orang berikutnya mengira tombol itu ada. Baris warisan
+    ber-lease mati sekarang selalu ada di daftar dan selalu di peringkat 25; yang menahan thrash
+    adalah `respect_due` + cooldown, bukan penyaringan.
+
     `drop_stale_legacy` default False SEJAK 2026-10-15 20:3x, dan itu pembalikan sadar atas keputusan
     45 (dijawab `qwen3.5:9b`, 03:5x). Keputusan itu lahir saat satu-satunya urutan adalah
     `ORDER BY id`: kepala antrean legacy tanpa lease menahan perintah operator di belakangnya, jadi
