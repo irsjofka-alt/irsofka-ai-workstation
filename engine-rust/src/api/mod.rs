@@ -13,6 +13,7 @@ use crate::profile::TabProfile;
 use crate::terminal::PtySession;
 
 pub(crate) mod autopilot;
+pub(crate) mod byok;
 pub(crate) mod daemon;
 pub(crate) mod desktop;
 pub(crate) mod engine;

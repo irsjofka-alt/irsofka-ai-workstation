@@ -323,6 +323,7 @@
   <div class="group">
     <h2>Team</h2>
     <button class="nav" data-view="roles"><i>◎</i> Roles &amp; verifier</button>
+    <button class="nav" data-view="byok"><i>⚿</i> Gemini BYOK</button>
     <button class="nav soon" data-soon="models"><i>◈</i> Models &amp; VRAM<em>soon</em></button>
   </div>
   <div class="group">
@@ -1912,6 +1913,86 @@
       "refreshed " + new Date().toLocaleTimeString() + " · source " + (data.generated_at || "—");
   }
 
+
+  /* Kolam BYOK. Semua yang tampil di bawah adalah byte dari /api/byok, yang sendiri hanya
+     memancarkan `byok.py station`: status slot, dan peta kapasitas yang DIUKUR. Yang tidak
+     pernah ada di halaman ini adalah isi kunci — yang tampil hanyalah panjang, bentuk, dan
+     12 karakter pertama sidik jarinya, cukup untuk mengenali slot yang sama tanpa menyalin
+     rahasianya ke DOM, ke log browser, atau ke screenshot yang dikirim ke engine lain. */
+  function loadByok() {
+    var host = document.getElementById("feed");
+    host.textContent = "";
+    host.appendChild(el("p", "empty", "memuat kolam BYOK…"));
+    fetch("/api/byok", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        host.textContent = "";
+        if (j.ok === false) { host.appendChild(el("p", "empty", "kolam tidak terbaca: " + j.why)); return; }
+        var s = j.slots || {}, cap = j.capabilities || {};
+        host.appendChild(el("h3", "", "Slot kunci Gemini (" + (s.slots || []).filter(function (x) { return x.filled; }).length + " terisi dari " + (s.slots || []).length + ")"));
+        var tbl = document.createElement("table");
+        tbl.innerHTML = "<tr><th>slot</th><th>terisi</th><th>panjang</th><th>bentuk</th><th>sidik</th><th>key baru</th></tr>";
+        (s.slots || []).forEach(function (row) {
+          var tr = document.createElement("tr");
+          tr.innerHTML = "<td>" + row.slot + "</td><td>" + (row.filled ? "ya" : "—") + "</td><td>" +
+            row.length + "</td><td>" + row.shape + "</td><td><code>" + (row.fingerprint || "—") + "</code></td>";
+          var td = document.createElement("td");
+          var inp = document.createElement("input");
+          inp.type = "password"; inp.placeholder = "AIza… (kosongkan untuk menghapus)";
+          inp.style.width = "15rem";
+          var btn = document.createElement("button");
+          btn.textContent = "simpan";
+          btn.addEventListener("click", function () { saveSlot(row.slot, inp.value, btn); });
+          td.appendChild(inp); td.appendChild(btn); tr.appendChild(td);
+          tbl.appendChild(tr);
+        });
+        host.appendChild(tbl);
+        host.appendChild(el("h3", "", "Model aktif"));
+        var mrow = document.createElement("p");
+        var minp = document.createElement("input");
+        minp.type = "text"; minp.value = s.model || ""; minp.style.width = "22rem";
+        var mbtn = document.createElement("button"); mbtn.textContent = "simpan model";
+        mbtn.addEventListener("click", function () { saveModel(minp.value, mbtn); });
+        mrow.appendChild(minp); mrow.appendChild(" "); mrow.appendChild(mbtn);
+        mrow.appendChild(" " + el("span", "sub", "slot aktif sekarang: " + s.active + " · berkas: " + s.path));
+        host.appendChild(mrow);
+        host.appendChild(el("h3", "", "Kapasitas — yang diukur, bukan yang dikira"));
+        var groups = [["text", "Teks"], ["image", "Gambar"], ["video", "Video"], ["audio", "Audio"], ["music", "Musik"]];
+        groups.forEach(function (g) {
+          var box = cap[g[0]]; if (!box) return;
+          Object.keys(box).forEach(function (name) {
+            var val = String(box[name]);
+            var line = el("p", "sub", name + " — " + val);
+            if (val.indexOf("DITOLAK") === 0) line.style.color = "#e07a5f";
+            host.appendChild(line);
+          });
+        });
+        host.appendChild(el("p", "sub", "Terukur pada " + (cap.measured_at || "?") +
+          ". Status 'ADA DI DAFTAR' berarti namanya terlihat oleh ListModels tetapi belum satu pun panggilan dilakukan — itu bukan 'sudah bisa dipakai'."));
+      })
+      .catch(function () { host.textContent = ""; host.appendChild(el("p", "empty", "daemon tidak terjangkau")); });
+  }
+
+  function saveSlot(slot, key, btn) {
+    btn.disabled = true; btn.textContent = "menulis…";
+    postJson("/api/byok", { slot: slot, key: key }).then(function (res) {
+      btn.disabled = false;
+      btn.textContent = (res && res.ok) ? "tersimpan" : "gagal";
+      if (res && !res.ok && res.why) window.alert(res.why);
+      loadByok();
+    });
+  }
+
+  function saveModel(model, btn) {
+    btn.disabled = true; btn.textContent = "menulis…";
+    postJson("/api/byok", { model: model }).then(function (res) {
+      btn.disabled = false;
+      btn.textContent = (res && res.ok) ? "tersimpan" : "gagal";
+      if (res && !res.ok && res.why) window.alert(res.why);
+      loadByok();
+    });
+  }
+
   function load() {
     fetch("/api/station?limit=80", { cache: "no-store" })
       .then(function (r) { return r.json(); })
@@ -1925,6 +2006,7 @@
         render();
         if (view === "treasury") loadTreasury();
         if (view === "decide" || view === "dashboard") loadAutopilot();
+        if (view === "byok") loadByok();
       })
       .catch(function () {
         document.getElementById("sub").textContent =

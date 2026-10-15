@@ -187,6 +187,7 @@ async fn run_server(profiles: HashMap<String, TabProfile>) {
         // Menjawab, bukan membaca: `/api/autopilot` tetap jalur keadaan sakelar, dan jawaban
         // manusia punya jalurnya sendiri supaya satu URL tidak punya dua arti.
         .route("/api/decide", post(api::autopilot::post_decide))
+        .route("/api/byok", get(api::byok::get_state).post(api::byok::post_state))
         // Dashboard F10.10: jalur tulis untuk perintah operator, proyek, dan pedoman. Bentuk
         // masukan diperiksa di sini; keputusannya ada di tools/work_order.py, satu kali.
         .route("/api/work", get(api::work::get_work).post(api::work::post_work))

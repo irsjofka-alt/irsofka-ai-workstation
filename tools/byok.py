@@ -30,6 +30,7 @@ Aturan yang mengikat implementasinya:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,36 @@ EXHAUSTED_MARKERS = ("429", "RESOURCE_EXHAUSTED", "quota", "rate limit")
 CAPACITY_MARKERS = ("503", "HIGH DEMAND", "UNAVAILABLE", "NO AVAILABLE", "OVERLOADED")
 MODEL_ORDER = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
                "gemini-3.5-flash", "gemini-3.1-flash-lite")
+
+# Peta kapasitas yang diukur, bukan diasumsikan — dibaca Station lewat `byok.py capabilities`
+# supaya layar tidak menyimpan klaimnya sendiri (§12: satu definisi). Statusnya sengaja tiga
+# tingkat: "TERUKUR" berarti ada panggilan nyata dan statusnya tercatat; "ADA DI DAFTAR" berarti
+# namanya muncul di ListModels tetapi belum satu pun panggilan dilakukan; "DITOLAK UKUR" berarti
+# sudah dicoba dan sistem menjawab tidak. Yang terakhir inilah yang harus dilihat orang sebelum
+# merancang pipeline di atas sebuah model.
+CAPABILITIES = {
+    "measured_at": "2026-10-15T10:5x+07:00",
+    "keys": {"slots": 5, "filled": 3, "identical_model_list": True, "models_visible": 63},
+    "text": {"gemini-3.8-flash": "TERUKUR: 200, dipakai mengaudit diff yang ditahan",
+             "gemini-4-argon": "DITOLAK UKUR: 429 pada KETIGA kunci termasuk PRO; -latest/-preview "
+                               "= 404, jadi nama dasarnya benar. Kuota dihitung per model."},
+    "music": {"lyra": "DITOLAK UKUR: 404 di kunci non-PRO DAN PRO. Nama lain ikut dicoba: lyra-2.0, "
+                      "lyra-2.0-realtime, gemini-lyra, lyra-realtime, gemini-music — semuanya 404, "
+                      "dan tidak ada satu pun nama berunsur lyra/music di daftar 63 model.",
+              "operator_claim": "Operator menyatakan Lyra available di sisi modelnya. Dicatat sebagai "
+                                "pernyataan, bukan sebagai jalur yang bisa dipakai modul ini."},
+    "video": {"veo-3.1-generate-preview": "ADA DI DAFTAR; endpoint-nya TERBUKTI ADA "
+                                          "(predictLongRunning menjawab 429, bukan 404) tetapi "
+                                          "generateContent TIDAK mendukungnya — jadi ask() di modul "
+                                          "ini tidak bisa memakainya. Butuh jalur predictLongRunning "
+                                          "+ polling operation.",
+              "veo-3.1-fast-generate-preview": "ADA DI DAFTAR, belum dipanggil",
+              "veo-3.1-lite-generate-preview": "ADA DI DAFTAR, belum dipanggil"},
+    "image": {"gemini-nano-banana-2.1": "ADA DI DAFTAR, belum dipanggil",
+              "nano-banana-pro-preview": "ADA DI DAFTAR, belum dipanggil"},
+    "audio": {"gemini-2.5-flash-native-audio-latest": "ADA DI DAFTAR, belum dipanggil",
+              "gemini-3.5-transcribe-live": "ADA DI DAFTAR, belum dipanggil"},
+}
 
 
 def load(path=CONFIG):
@@ -308,17 +339,86 @@ def selftest():
     return 0 if all([ok1, ok2, ok3, ok4, ok5, ok6, ok7]) else 1
 
 
+def slot_view(cfg=None):
+    """Bentuk yang aman untuk layar: sidik jari dan panjang, TIDAK pernah isi kunci."""
+    cfg = cfg if cfg is not None else load()
+    out = []
+    for i, k in enumerate(cfg.get("GeminiApiKeys") or []):
+        k = (k or "").strip()
+        out.append({"slot": i, "filled": bool(k), "length": len(k),
+                    "shape": ("AIza" if k.startswith("AIza") else "lain") if k else "-",
+                    "fingerprint": hashlib.sha256(k.encode()).hexdigest()[:12] if k else None})
+    return {"slots": out, "model": cfg.get("GeminiModel"),
+            "active": int(cfg.get("ActiveGeminiKeyIndex") or 0),
+            "path": str(CONFIG), "gitignored": True}
+
+
+def set_from_file(path):
+    """Ganti satu slot dari berkas sementara. Kunci TIDAK pernah lewat argv.
+
+    Berkas berisi JSON: {"slot": N, "key": "..."} atau {"keys": ["...", ...]} untuk menimpa
+    sekaligus. Setelah dibaca, berkasnya dihapus — meninggalkan salinan kunci di /tmp adalah
+    kebocoran yang lebih dekat daripada yang dikira orang.
+    """
+    p = Path(path)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    finally:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    cfg = load()
+    keys = list(cfg.get("GeminiApiKeys") or [])
+    while len(keys) < 5:
+        keys.append("")
+    if "keys" in data:
+        incoming = list(data["keys"])[:5]
+        for i, v in enumerate(incoming):
+            keys[i] = (v or "").strip()
+    else:
+        slot = int(data.get("slot", -1))
+        if not 0 <= slot < 5:
+            return {"ok": False, "why": f"slot {slot} di luar 0..4"}
+        keys[slot] = (data.get("key") or "").strip()
+    cfg["GeminiApiKeys"] = keys
+    if data.get("model"):
+        cfg["GeminiModel"] = str(data["model"]).strip()
+    save(cfg)
+    return {"ok": True, **slot_view(cfg)}
+
+
 def main(argv=None):
     a = argparse.ArgumentParser(prog="byok.py")
-    a.add_argument("cmd", choices=["ask", "status", "selftest"])
+    a.add_argument("cmd", choices=["ask", "status", "selftest", "slots", "set", "capabilities",
+                                   "station"])
     a.add_argument("prompt", nargs="*", default=[])
     a.add_argument("--model", default=None)
     a.add_argument("--timeout", type=int, default=120)
+    a.add_argument("--from-file", default=None)
     x = a.parse_args(argv)
     if x.cmd == "selftest":
         return selftest()
-    if x.cmd == "status":
-        print(json.dumps(status(), ensure_ascii=False))
+    if x.cmd in ("status", "slots"):
+        print(json.dumps(slot_view() if x.cmd == "slots" else status(), ensure_ascii=False))
+        return 0
+    if x.cmd == "set":
+        if not x.from_file:
+            print(json.dumps({"ok": False, "why": "set butuh --from-file <path>"},
+                             ensure_ascii=False), file=sys.stderr)
+            return 1
+        r = set_from_file(x.from_file)
+        print(json.dumps(r, ensure_ascii=False))
+        return 0 if r.get("ok") else 1
+    if x.cmd == "capabilities":
+        print(json.dumps(CAPABILITIES, ensure_ascii=False, indent=1))
+        return 0
+    if x.cmd == "station":
+        # Satu proses untuk satu layar. Rust hanya memancarkan byte ini apa adanya: begitu sisi
+        # HTTP mulai menggabungkan atau menguraikan laporan, workstation punya dua definisi
+        # "apa yang diketahui tentang kolam" (§12).
+        print(json.dumps({"slots": slot_view(), "capabilities": CAPABILITIES},
+                         ensure_ascii=False))
         return 0
     prompt = " ".join(x.prompt).strip()
     if not prompt:
