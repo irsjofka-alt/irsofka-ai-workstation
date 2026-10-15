@@ -48,7 +48,14 @@ EVIDENCE_LIMIT = 900
 # hitungan menit sementara mesin terlihat sangat sibuk.
 REPO = Path.home() / ".ai-station"
 NIGHT_MAX_FAILURES = 3
-NIGHT_MAX_ITEMS = 25
+# 100, atas perintah operator langsung 2026-10-15 05:2x: "naikan batas nya menjadi 100, kalau ada
+# batas rendah di 25 untuk apa — saya bangun kamu diam." Angka 25 sebelumnya menahan run tepat seperti
+# yang dia takutkan: loop selesai 25 item lalu berhenti dalam keadaan sehat, dan yang dibacanya adalah
+# mesin diam, bukan rem yang bekerja. Yang TIDAK berubah: jendela waktu, pemutus kegagalan 3x, dan
+# `level` yang tetap milik TTY. Batas ini plafon jumlah, bukan izin baru.
+# CATATAN untuk diri sendiri: `idle`/`night` memakai min(konstanta, kolom item_budget), jadi menaikkan
+# salah satu saja tidak menaikkan apa pun — kolomnya ikut dinaikkan lewat autopilot(budget=100).
+NIGHT_MAX_ITEMS = 100
 # Dispatch verifikasi per jendela ON. Lebih kecil daripada batas item dengan sengaja: satu item
 # yang sulit bisa memanggil verifikasi berkali-kali, dan yang mau dihentikan adalah pengeluaran
 # kuota, bukan banyaknya pekerjaan yang kelar.
