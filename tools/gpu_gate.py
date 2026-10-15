@@ -116,11 +116,20 @@ def rules(path=None) -> list:
 def _word_match(word: str) -> str:
     """Pencocokan berbatas kata, bukan substring mentah.
 
-    `_` dan alfanumerik di kiri-kanan dianggap bagian dari kata yang sama, jadi `flux` tidak lagi cocok
-    dengan `reflux`, `flux_store`, atau `test_flux` — judul item biasa yang tidak menyentuh GPU
-    sama sekali, dan menolak itu karena VRAM sedang penuh adalah gerbang yang menahan pekerjaan
+    `_` dan alfanumerik di kiri-kanan dianggap bagian dari kata yang sama, jadi `flux` tidak lagi
+    cocok dengan `reflux`, `flux_store`, atau `test_flux` — judul item biasa yang tidak menyentuh
+    GPU sama sekali, dan menolak itu karena VRAM sedang penuh adalah gerbang yang menahan pekerjaan
     yang benar. `.` sengaja TIDAK masuk daftar: nama produk nyata yang dipakai di antrean ini
     adalah `TRELLIS.2`, dan membatalkan deteksinya demi satu false positive adalah tukar yang rugi.
+
+    `-` JUGA sengaja dibiarkan sebagai batas, dan ini pilihan yang sudah diukur, bukan kelalaian.
+    Terukur 2026-10-15 oleh audit BYOK: `perbaiki bug test-flux` dan `rapikan flux-store` ikut
+    tertahan sebagai kerja difusi (DENY saat VRAM kurang). Memakai `-` sebagai bagian kata akan
+    membungkam keduanya — dan sekaligus membungkam `trellis-image` dan `flux-sdxl-hybrid`, yaitu
+    pekerjaan GPU yang SUNGGUH. Arah gagalnya beda: item non-GPU yang tertahan tetap PENDING,
+    beralasan, dan bisa dibaca operator dalam satu baris; pekerjaan GPU yang lolos saat memori
+    penuh membunuh ComfyUI dengan gejala connection-loss. Jadi false positive dibayar di sini,
+    dan harga yang dibayar ditulis supaya tidak "diperbaiki" orang yang tidak membaca paragraf ini.
     """
     w = re.escape(word.strip().lower())
     return rf"(?<![0-9a-z_]){w}(?![0-9a-z_])"
@@ -333,8 +342,11 @@ def selftest() -> int:
     # gerbang yang terbuka. Berkas config nyata dibaca, jadi kalau nomornya hilang dari repo,
     # test ini yang merah — bukan run 3D jam tiga pagi.
     prod = rules(None)
-    check_("config produksi punya setidaknya satu ambang GPU bernomor dan menyebut TRELLIS.2",
+    check_("config produksi punya ambang GPU bernomor DAN benar-benar menyebut trellis — "
+           "nama tes yang lama mengklaim 'menyebut TRELLIS.2' padahal yang diperiksa cuma angka, "
+           "sehingga menghapus kata kuncinya akan tetap hijau",
            any(isinstance(r["need_mib"], int) and r["need_mib"] >= 9000 for r in prod)
+           and any("trellis" in m for r in prod for m in r["match"])
            and len(prod) >= 2, str(prod)[:200])
     check_("ambang produksi terbaca sebagai angka, bukan kalimat",
            all(isinstance(r["need_mib"], int) for r in prod), str(prod)[:160])

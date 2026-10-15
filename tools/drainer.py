@@ -470,7 +470,12 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
                       why=vres.get("why"),
                       note="tidak ada yang diklaim dan tidak ada yang diketik — kerja GPU lain "
                            "boleh lewat, aturan ini hanya menahan yang butuh VRAM")
-    if vres.get("rule"):
+    # `VRAM_ALLOWED` hanya untuk izin yang SUNGGUH diberikan oleh pengukuran. Aturan
+    # vendor-cloud (`need_mib: 0`) dan item yang tidak cocok aturan mana pun sama-sama
+    # `NOT_GPU_WORK`: tidak ada yang diukur, jadi tidak ada yang boleh melaporkan "VRAM cukup".
+    # Memancarkan izin atas pekerjaan yang tidak diperiksa adalah cara membuat log yang membaca
+    # gerbangnya selalu hijau termasuk saat gerbangnya tidak pernah bertanya.
+    if vres.get("state") == "ALLOW":
         emit("VRAM_ALLOWED", item=int(item["id"]), rule=vres["rule"], need_mib=vres["need_mib"],
              free_mib=vres.get("free_mib"), headroom_mib=vres.get("headroom_mib"))
     target = (full.get("cli_engine") or "").strip()
