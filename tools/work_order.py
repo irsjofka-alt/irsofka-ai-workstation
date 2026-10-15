@@ -70,7 +70,6 @@ MAX_INJECT = 3
 # "sedang sibuk": semuanya akan lolos kalau pane sudah idle, jadi menahannya sampai jeda habis
 # hanya menambah latensi tanpa menambah keamanan.
 BUSY_RETRY_REASONS = ("PANE_NOT_QUIET", "ENGINE_BUSY")
-EVIDENCE_LIMIT = 900
 # Circuit breaker (temuan reviewer Gemini, 2026-10-08). Tanpa ini sebuah item yang gagal dengan
 # exit code cepat akan diklaim-lepas-gagal lagi tanpa henti, dan kuota mingguan habis dalam
 # hitungan menit sementara mesin terlihat sangat sibuk.
@@ -1324,6 +1323,14 @@ def finish(conn, engine, item_id, status, evidence=None, reason=None, followup=_
            emit=None):
     """COMPLETED menuntut bukti. Laporan tidak boleh ditulis tangan (§12).
 
+    Bukti disimpan utuh, tidak dipotong. Kolom `evidence` bertipe TEXT tanpa batas di kedua backend
+    (lihat `NEW_COLUMNS`), jadi satu-satunya batas panjang yang pernah ada adalah irisan `[:900]` di
+    fungsi ini — diukur 2026-10-15: `SELECT MAX(LENGTH(evidence))` mengembalikan tepat 900 pada baris
+    yang lebih panjang dari itu. Pemotongan diam-diam menghancurkan bukti persis saat ia paling
+    dibutuhkan: item 233 kehilangan bagian angkanya, yaitu bagian yang membuatnya bukti. Kalau suatu
+    hari panjang benar-benar jadi masalah, itu urusan tampilan, dan pemotongannya harus menyebut
+    panjang aslinya — bukan sunyi.
+
     `emit` diteruskan sampai ke `queue_followup`. Tanpa itu peristiwa "DONE -> lanjut" hilang tanpa
     suara: barisnya tetap ada, tapi tidak ada satu pun log yang mengatakan mengapa baris itu muncul
     — dan baris lanjutan yang tidak bisa dijelaskan asal-usulnya persis laporan yang tidak boleh
@@ -1338,7 +1345,7 @@ def finish(conn, engine, item_id, status, evidence=None, reason=None, followup=_
     run(conn, engine,
         f"UPDATE quest_tasks SET status={ph}, evidence={ph}, escalation_reason={ph}, "
         f"completed_at=CURRENT_TIMESTAMP WHERE id={ph}",
-        (status, (evidence or "")[:EVIDENCE_LIMIT], reason, item_id))
+        (status, evidence or "", reason, item_id))
     if status == "HUMAN" and not open_decision_for(conn, engine, item_id):
         # Item yang naik ke antrean orang tanpa pertanyaan hanyalah sebuah judul: operator membaca
         # "#33 — F10.3" dan tidak punya apa pun untuk dipilih. Pertanyaan ini ditulis oleh pemilik
@@ -3303,6 +3310,23 @@ def selftest():
         check("COMPLETED dengan bukti diterima", ok, msg)
         nxt = next_item(conn, "SQLITE")
         check("B terbuka setelah A selesai", nxt and nxt["title"] == "B", str(nxt))
+
+        # --- bukti panjang: kolomnya TEXT tanpa batas, jadi memotong adalah merusak bukti ---
+        # Yang diuji adalah EKOR, bukan hanya panjang: potongan diam-diam selalu membuang bagian
+        # terakhir, dan bagian terakhir inilah yang biasanya berisi angka penutup sebuah pekerjaan.
+        long_ev = "selftest panjang: " + ("r" * 1200) + " | ANGKA-TAIL-9001"
+        conn.execute("INSERT INTO quest_tasks (title, status, cli_engine) "
+                     "VALUES ('bukti-panjang','WORKING','qoder')")
+        conn.commit()
+        lg_id = int(run(conn, "SQLITE",
+                        "SELECT id FROM quest_tasks WHERE title='bukti-panjang'")[0]["id"])
+        ok, msg = finish(conn, "SQLITE", lg_id, "COMPLETED", evidence=long_ev, followup=False)
+        stored = (get_item(conn, "SQLITE", lg_id) or {}).get("evidence") or ""
+        check("bukti lebih panjang dari 900 karakter disimpan utuh, tidak dipotong",
+              ok and len(stored) == len(long_ev),
+              f"tersimpan {len(stored)} dari {len(long_ev)} | {msg}")
+        check("ekor bukti tidak hilang di tengah jalan",
+              stored.endswith("ANGKA-TAIL-9001"), stored[-40:])
 
         ok, msg = finish(conn, "SQLITE", ids["B"], "HUMAN", reason="ambang: disk < 10G")
         check("eskalasi menyimpan alasan", ok and get_item(conn, "SQLITE", ids["B"])["escalation_reason"])
