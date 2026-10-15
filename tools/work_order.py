@@ -70,6 +70,11 @@ MAX_INJECT = 3
 # "sedang sibuk": semuanya akan lolos kalau pane sudah idle, jadi menahannya sampai jeda habis
 # hanya menambah latensi tanpa menambah keamanan.
 BUSY_RETRY_REASONS = ("PANE_NOT_QUIET", "ENGINE_BUSY")
+# Batas blob opsi. Dulu dipakai sebagai `json.dumps(...)[:4000]` — lihat `pack_options`: memotong
+# serialisasi JSON menghasilkan string yang tidak bisa di-read kembali, jadi potongannya sekarang
+# terjadi pada SATUAN opsi, bukan pada karakter.
+OPTION_BLOB_LIMIT = 4000
+REVISION_KEPT = 10
 # Circuit breaker (temuan reviewer Gemini, 2026-10-08). Tanpa ini sebuah item yang gagal dengan
 # exit code cepat akan diklaim-lepas-gagal lagi tanpa henti, dan kuota mingguan habis dalam
 # hitungan menit sementara mesin terlihat sangat sibuk.
@@ -462,6 +467,7 @@ NEW_COLUMNS = [
     # membangunkan apa pun, dan jawaban tanpa `answered_by` tidak bisa dibedakan dari jawaban mesin.
     ("decisions", "item_id", "BIGINT", "INTEGER"),
     ("decisions", "answered_by", "VARCHAR(60)", "TEXT"),
+    ("decisions", "revised_from", "TEXT", "TEXT"),
     # `origin` menjawab "siapa yang menulis baris antrean ini" dan hanya punya empat isi yang
     # bisa dibuktikan: 'roadmap' (ditulis `seed` dari ROADMAP_ITEMS), 'operator' (ditulis `queue`
     # dari Dashboard), 'idle' (ditulis drainer sendiri ketika ON tidak menemukan apa pun dan
@@ -1804,7 +1810,37 @@ def answer_decision(conn, engine, decision_id, answer, by="operator", note=None)
     return True, f"decision {decision_id} ANSWERED oleh {who}", fresh
 
 
-def revise_decision(conn, engine, decision_id, question, options=None):
+KEEP_PREVIOUS = object()
+
+
+def pack_options(opts, cap=OPTION_BLOB_LIMIT):
+    """Serialkan daftar opsi menjadi JSON yang SELALU bisa di-read kembali.
+
+    Bentuk lama di sini adalah `json.dumps(...)[:4000]`. Ia tidak memotong teks — ia menghancurkan
+    JSON: string hasil potongan tidak lolos `json.loads`, jadi pembaca berikutnya (`decision_prompt`,
+    tab Station, resolver yang menanyakan opsi) gagal pada baris yang terlihat tersimpan rapi. Ini
+    penyakit yang sama persis dengan `evidence[:900]` yang baru ditutup malam ini, hanya di kolom lain.
+
+    Yang dibuang sekarang adalah OPSI utuh dari belakang, dan jumlah yang dibuang ikut ditulis sebagai
+    satu baris penanda yang menyebut angkanya. Pemotongan boleh terjadi; diamnya tidak.
+    """
+    kept = list(opts)
+    dropped = 0
+    while True:
+        marker = ([{"label": f"(tidak ada opsi yang muat di batas {cap} karakter)",
+                    "evidence": "ukur sendiri sebelum mengirim", "cost": "—"}]
+                  if not kept else
+                  [{"label": f"({dropped} opsi dibuang supaya JSON tidak dipotong di tengah)",
+                    "evidence": "batas penyimpanan opsi", "cost": "—"}]
+                  if dropped else [])
+        blob = json.dumps(kept + marker, ensure_ascii=False)
+        if len(blob) <= cap or not kept:
+            return blob, dropped
+        kept.pop()
+        dropped += 1
+
+
+def revise_decision(conn, engine, decision_id, question, options=KEEP_PREVIOUS, why=None):
     """Perbaiki PERTANYAAN yang belum dijawab, id-nya tetap sama.
 
     Ada karena satu baris lahir cacat dan terbukti: teksnya dibangun dari argumen shell yang memuat
@@ -1816,6 +1852,15 @@ def revise_decision(conn, engine, decision_id, question, options=None):
     Id TETAP sama, bukan pertanyaan baru: tautan `item_id` dan posisi di tab Human Decide adalah
     setengah dari kegunaan baris ini. Pertanyaan baru akan meninggalkan yang cacat di samping yang
     benar, dan dua pertanyaan untuk satu item adalah dua angka yang beredar bersamaan.
+
+    `options=KEEP_PREVIOUS` berarti "caller tidak menyebutkan opsi": mengirimkan [] akan MENGHAPUS
+    pilihan yang sudah ada, dan itu justru membalik maksud perbaikan — menambal teks tapi memusnahkan
+    isi yang orang harus pilih.
+
+    Teks lama TIDAK dibuang: tiap revisi menyimpan versinya ke kolom `revised_from` (maksimal
+    REVISION_KEPT terakhir, beserta `why`). §3 menyatakan tindakan yang tidak tercatat seolah tidak
+    pernah terjadi; sebuah suntingan atas pertanyaan yang belum dijawab tetap suntingan, dan seseorang
+    nanti berhak bertanya apa yang berubah.
 
     Yang ditolak: baris ber-state ANSWERED/RESOLVED. Jawabannya menunjuk teks lama; mengganti teks di
     bawahnya berarti memalsukan apa yang disetujui seseorang. Untuk perubahan pikiran jalurnya tetap
@@ -1830,10 +1875,24 @@ def revise_decision(conn, engine, decision_id, question, options=None):
         who = row.get("answered_by") or row.get("model_id") or "tidak tercatat"
         return False, (f"decision {decision_id} sudah {row['state']} oleh {who}; revisi ditolak — "
                        "jawabannya menunjuk teks yang lama"), row
+    if options is KEEP_PREVIOUS:
+        blob = str(row.get("options") or "[]")
+    else:
+        blob, _dropped = pack_options(normalise_options(options))
+    try:
+        prior = json.loads(row.get("revised_from") or "[]")
+        if not isinstance(prior, list):
+            prior = []
+    except (TypeError, ValueError):
+        prior = []      # kolom yang rusak bukan alasan untuk kehilangan teks lama yang masih terbaca
+    history = prior + [{"question": str(row.get("question") or ""),
+                        "options": str(row.get("options") or "[]"),
+                        "state": str(row.get("state") or ""),
+                        "epoch": now(), "why": (why or "")[:200]}][-REVISION_KEPT:]
     ph = "%s" if engine == "POSTGRESQL" else "?"
     run(conn, engine,
-        f"UPDATE decisions SET question={ph}, options={ph} WHERE id={ph}",
-        (question.strip()[:2000], json.dumps(normalise_options(options))[:4000], decision_id))
+        f"UPDATE decisions SET question={ph}, options={ph}, revised_from={ph} WHERE id={ph}",
+        (question.strip()[:2000], blob, json.dumps(history, ensure_ascii=False), decision_id))
     fresh = _decision_row(conn, engine, decision_id)
     return True, f"decision {decision_id} diperbaiki, id dan tautan item tetap", fresh
 
@@ -2193,11 +2252,12 @@ def decide(conn, engine, question, options=None, weight="heavy", item_id=None):
     """
     ph = "%s" if engine == "POSTGRESQL" else "?"
     state = "ESCALATED" if weight == "irreversible" else "OPEN"
+    blob, _dropped = pack_options(normalise_options(options))
     run(conn, engine,
         f"INSERT INTO decisions (question, options, weight, state, rung_used, note, created_epoch, "
         f"item_id) "
         f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
-        (question, json.dumps(normalise_options(options))[:4000], weight, state,
+        (question, blob, weight, state,
          "human-only" if state == "ESCALATED" else None,
          "invarian 3: pilihan yang tidak bisa dibatalkan tidak didelegasikan ke mesin mana pun"
          if state == "ESCALATED" else None,
@@ -4038,6 +4098,43 @@ def selftest():
               not revise_decision(conn, "SQLITE", q_c, "   ")[0]
               and str(_decision_row(conn, "SQLITE", q_c)["question"])
               .startswith("Pertanyaan yang sudah diperbaiki"))
+        # Tiga temuan reviewer atas revisi pertama, diuji satu-satu karena ketiganya tidak berbunyi.
+        before_opts = str(_decision_row(conn, "SQLITE", q_c)["options"])
+
+        def _hist(did):
+            try:
+                h = json.loads(str(_decision_row(conn, "SQLITE", did).get("revised_from") or "[]"))
+            except (TypeError, ValueError):
+                return []
+            return h if isinstance(h, list) else []
+
+        _n0 = len(_hist(q_c))
+        ok_k, _mk, row_k = revise_decision(conn, "SQLITE", q_c, "hanya teks yang dibetulkan")
+        check("caller yang TIDAK menyebut opsi tidak menghapus pilihan yang sudah ada",
+              ok_k and str(row_k["options"]) == before_opts,
+              f"sebelum {len(json.loads(before_opts or '[]'))} opsi, sesudah "
+              f"{len(json.loads(str(row_k['options']) or '[]'))} opsi")
+        check("teks lama disimpan, bukan ditimpa tanpa jejak (§3: yang tak tercatat dianggap tak terjadi)",
+              len(_hist(q_c)) == _n0 + 1
+              and _hist(q_c)[-1]["question"].startswith("Pertanyaan yang sudah diperbaiki"),
+              f"{_n0} -> {len(_hist(q_c))} entri; terakhir {str(_hist(q_c)[-1:])[:110]}")
+        _n1 = len(_hist(q_c))
+        ok_w, _mw, row_w = revise_decision(conn, "SQLITE", q_c, "revisi kedua",
+                                           [{"label": "P"}], "backtick memakan teks pertama")
+        check("revisi berikutnya menambah riwayat dan menyimpan alasannya",
+              ok_w and len(_hist(q_c)) == _n1 + 1 and _hist(q_c)[-1].get("why")
+              == "backtick memakan teks pertama",
+              f"{_n1} -> {len(_hist(q_c))}; why={[h.get('why') for h in _hist(q_c)]}")
+        check("riwayat disimpan bersama teks yang digantikannya, bukan hanya jumlah versinya",
+              len(json.loads(str(row_w["options"]) or "[]")) == 1, str(row_w["options"])[:120])
+        _big = [{"label": f"opsi {i}", "evidence": "x" * 200, "cost": "y" * 100} for i in range(60)]
+        _blob, _dropped = pack_options(normalise_options(_big))
+        check("opsi yang melebihi batas disimpan sebagai JSON yang masih bisa dibaca, "
+              "dengan angka yang menyebut berapa yang dibuang",
+              json.loads(_blob) and _dropped > 0
+              and "dibuang" in json.loads(_blob)[-1]["label"]
+              and str(_dropped) in json.loads(_blob)[-1]["label"],
+              f"{len(_blob)} karakter, {_dropped} dari 60 dibuang")
         check("jawaban dapat dibaca balik dari itemnya",
               any(d["id"] == q_b and d["state"] == "ANSWERED" for d in
                   decisions_for_item(conn, "SQLITE", host)),
@@ -5659,6 +5756,8 @@ def main(argv=None):
     p.add_argument("--replace", type=int, default=None, metavar="ID",
                    help="perbaiki pertanyaan yang belum dijawab alih-alih membuat yang baru; id lama "
                         "dan tautan itemnya tetap")
+    p.add_argument("--why", default=None,
+                   help="alasan revisi; disimpan di kolom revised_from bersama teks yang digantikan")
     p.add_argument("--timeout", type=int, default=240)
     p = sub.add_parser("answer"); p.add_argument("id", type=int)
     p.add_argument("--choice", required=True, help="isi jawaban; label pilihan, kalimat bebas, apa pun yang operator tulis")
@@ -5787,8 +5886,8 @@ def main(argv=None):
         print(json.dumps(drain_level(conn, engine), default=str, indent=2))
     elif a.cmd == "decide":
         if a.replace:
-            ok, msg, row = revise_decision(conn, engine, a.replace, a.question,
-                                           parse_options_arg(a.options))
+            opts = parse_options_arg(a.options) if (a.options or "").strip() else KEEP_PREVIOUS
+            ok, msg, row = revise_decision(conn, engine, a.replace, a.question, opts, a.why)
             print(json.dumps({"ok": ok, "message": msg, "decision": row}, default=str, indent=2))
             return 0 if ok else 1
         rows = decide(conn, engine, a.question, parse_options_arg(a.options), a.weight, a.item)
