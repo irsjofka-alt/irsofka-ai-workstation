@@ -7,7 +7,7 @@ This is the server `ROADMAP.md` F11's three-repo plan calls **IRSofka ComfyUI MC
 step 1 (that step is the comparison against Epic's own MCP tool surface); it is F11 step 4's VRAM work
 brought forward to the boundary where it could actually be finished. It was written against ComfyUI's
 documented HTTP API after `comfy-mcp` was ruled out as a base, because it is AGPL-3.0-or-later (or a paid
-commercial licence) and AGPL forbids exactly the restriction BSL adds. **No substantive line of theirs is in our tree** — measured, and the measurement contradicts the
+commercial licence) and AGPL forbids exactly the restriction BSL adds. **No substantive line of theirs is in `server.py`** — measured, and the measurement contradicts the
 stronger wording I put above it a moment ago, so the weaker one is what stands: against the installed
 `comfy_mcp` package (6 888 significant lines), our 654 significant lines share **7 normalised lines**.
 Seven is not zero, and they are `from __future__ import annotations`, `except Exception as exc:`,
@@ -32,7 +32,7 @@ megabytes free and the names of the processes holding it — and nothing is sent
 | live `comfy_status` | `comfyui_version 0.39.2`, VRAM 7149/11889 MiB by ComfyUI's own pool, 7498/12288 MiB whole-card, holders `UnrealEditor 2118MiB`, `python 1624MiB` |
 | live gate decision on a 3D submit | `DENY`, rule `3d-trellis`, need 9966 MiB, free 7498 MiB, **shortfall 2468 MiB**, holders named |
 | queue after that refusal | running 0, pending 0 — the refusal really blocked the wire |
-| `POST /prompt` with an unknown class | `400 missing_node_type`, nothing queued (measured; the same call with a valid graph would have run) |
+| `POST /prompt` with an unknown class | `400 missing_node_type`, and `/queue` re-read after it: nothing queued |
 | `GET /object_info/<unknown>` | **200 with `{}`** — the status code is not the verdict, and the server treats the empty body as missing |
 | whole `GET /object_info` | 1 951 939 bytes across 976 node classes — never handed to a caller; `action=names` returns a page of names |
 | live `comfy_job status` on a past prompt_id | `success`, completed, output `zimage_00001_.png` |

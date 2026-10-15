@@ -43,5 +43,22 @@ Two rules follow from that table and are enforced here rather than remembered:
    `comfy-mcp` itself handles `comfy-cli` — its `NOTICE` records that it invokes the GPL binary as
    a separate process and never imports or links it.
 
+## From which source each block of a BSL `LICENSE` came
+
+Written because the rule this repository states below — transcribe from the license-list entry or a real
+adopter's file, never from a rendered web page — has one exception here, and an exception nobody writes
+down becomes a contradiction the next reader has to rediscover.
+
+| block | source | covered by the positional diff? |
+|---|---|---|
+| title, copyright, trademark lines | SPDX `BUSL-1.1.txt` | no — the measured span starts at `Terms` |
+| `Parameters` | ours to fill; the five keys are what BSL asks a licensor to complete | no — not part of SPDX's text |
+| `Terms` through covenant 4 | SPDX `BUSL-1.1.txt`, taken whole | **yes**: 66 lines against 66, ratio 1.00000, 0 differing blocks |
+| `Notice` | the [mariadb.com/bsl11/ page](https://mariadb.com/bsl11/) — MariaDB publishes that paragraph there and the SPDX entry does not carry it | no, and that is stated instead of left to be found |
+
+The page is the only place that paragraph is published, so the exception cannot be avoided; what could
+have been avoided is not naming it. It is not where the covenants came from, and that was the first
+mistake.
+
 Tool counts are measured, not quoted; see each README, because the naive counting method is wrong
 by a factor of 3.6 on one of them.

@@ -1014,8 +1014,8 @@ availability, whichever comes first**: a longer date is permitted and simply los
 
 | demand | how BSL answers it |
 |---|---|
-| "jangan ada yang copy-paste lalu mengklaim hak" | copyright never transfers; notices must be retained; anyone re-releasing it as their own is infringing on text, not on interpretation. It is also public evidence of first publication date per release |
-| "saya ingin pamer sebagai showcase" | source is readable from day one; the Additional Use Grant can explicitly allow personal, evaluation, and non-production use so a visitor can actually run it |
+| "jangan ada yang copy-paste lalu mengklaim hak" | copyright never transfers; notices must be retained; anyone re-releasing it as their own is infringing on text, not on interpretation. and each version carries its own stated Change Date, so the conversion clock is published rather than argued later |
+| "saya ingin pamer sebagai showcase" | source is readable from day one, and the first Terms paragraph already grants copy, modify, derivative works and **non-production** use — a visitor reads and runs it without asking. The Additional Use Grant is the lever for the opposite case: admitting limited **production** use for free, which is the pattern NVIDIA's `nsfc-comfy-ui` grant uses. Leaving it at `None` is our current answer, and it is a choice, not an omission |
 | "kalau ada yang mau beli, silakan" | Production Use *requires* a license from the licensor — that is the product being sold, with no renegotiation of terms later |
 | the escape hatch | Change Date (4 years, per version) converts it to the MIT License, so the asset still becomes open even if the business never sells a licence |
 | admissibility of the Change License | covenant 1 accepts GPL-v2 **or any later version, or a licence compatible with either**. MIT qualifies under both readings; **Apache-2.0 qualifies too** (compatible with GPL-3.0), so it was never disqualifying — made and retracted on the **same day**, 2026-10-15. Commit `157aa74`'s
@@ -1134,10 +1134,12 @@ lines) finds **7 identical normalised lines out of our 654** — every one gener
 of our private identifiers (`tool_*`, `graph_text`, `GATE_TEXT_CAP`, …) present in their source.
 107 of our 202 long identifiers do overlap theirs; that is HTTP/JSON vocabulary and proves nothing
 either way. The wording above it was wrong and my own number refuted it: seven shared lines means **no
-substantive line of theirs is in the tree**, not **no line** — the shared ones are
+substantive line of theirs is in `server.py`**, not **no line** — the shared ones are
 `from __future__ import annotations`, `except Exception as exc:` and `if __name__ == "__main__":`,
-which every Python file of this shape contains. Exposure happened; derivation was looked for and is
-not there. Anyone weighing the AGPL
+which every Python file of this shape contains. Exposure happened; derivation was looked for **by this
+    method and this method did not find it** — which is not the same sentence as "there is no
+    derivation", and the difference is the limit of the tool rather than a hedge
+found. Anyone weighing the AGPL
 question should read it as exactly that and no more — including the limit of the method, which a
 line-level comparison cannot see a translation that kept the structure and renamed everything.
 
