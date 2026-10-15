@@ -50,10 +50,67 @@ from local_llm import gpu_holders, vram_free_mib  # noqa: E402
 # sama sekali — fail-closed yang separuh masih fail-open.
 FALLBACK_RULES = [
     {"label": "3d-trellis", "need_mib": 9966,
-     "match": ["trellis", "pixal3d", "image-to-3d", "image_to_3d", "3d_pipeline"]},
+     "match": ["trellis", "pixal3d", "image-to-3d", "image_to_3d", "3d_pipeline", "voxel remesh"]},
     {"label": "image-diffusion", "need_mib": 5919,
      "match": ["z-image", "flux", "sdxl", "txt2img", "juggernaut"]},
 ]
+
+
+def _keywords(r) -> list:
+    """Daftar kata kunci sebuah aturan, dibaca tanpa bisa menjatuhkan scheduler.
+
+    `{"match": 123}` itu valid sebagai JSON dan membuat list comprehension meledak dengan
+    `TypeError: 'int' object is not iterable` — di ronde kedua audit inilah satu-satunya jalan
+    tersisa untuk membuat detak autopilot mati karena sebuah berkas config. Yang benar: bentuk
+    match yang tidak bisa dibaca berarti aturan yang tidak bisa dipakai, dan aturan tak terpakai
+    adalah UNKNOWN (menolak), bukan "tidak ada yang cocok" (mengizinkan).
+    """
+    m = r.get("match")
+    if isinstance(m, (list, tuple)):
+        return [str(x).lower() for x in m]
+    return []
+
+
+def _rule_is_usable(r) -> bool:
+    m = r.get("match")
+    return isinstance(m, (list, tuple)) and len(m) > 0
+
+
+def rules(path=None) -> list:
+    """Daftar aturan dari config, dibaca pada saat dipakai.
+
+    Berkas hilang/rusak TIDAK menghasilkan "tidak ada aturan": yang menghasilkan daftar cadangan,
+    dan keputusan berikutnya menandai dirinya `degraded` supaya pembaca tahu ambang mana yang
+    sebenarnya dipakai malam itu. Seluruh pembacaan — termasuk loop yang menyusun aturan — ada di
+    dalam pagar yang sama: versi kedua memisahkannya, dan satu field `match` bertipe int cukup untuk
+    melempar TypeError ke luar fungsi, membuat detak mati alih-alih memakai cadangan.
+    """
+    try:
+        cfg = json.loads(Path(path or CONFIG).read_text(encoding="utf-8"))
+        raw = cfg.get("rules")
+        assert isinstance(raw, list) and raw, "rules kosong"
+        # Elemen yang bukan dict membuat seluruh config tidak dipercaya, bukan dilewati: kita tidak
+        # tahu kata kunci apa yang hilang bersamanya, dan "tidak tahu" tidak boleh berarti "boleh".
+        assert all(isinstance(r, dict) for r in raw), "anggota rules bukan objek"
+        # Aturan tanpa kata kunci tidak bisa "tidak cocok dengan apa pun" — itu persis bentuk
+        # gerbang yang terbuka. Ia membuat seluruh config tidak dipercaya, sama seperti anggota
+        # yang bukan objek: yang tidak bisa dibaca bukan yang diabaikan.
+        assert all(_rule_is_usable(r) for r in raw), "ada aturan tanpa kata kunci yang bisa dipakai"
+        out = []
+        for r in raw:
+            need = r.get("need_mib")
+            if not isinstance(need, int) or isinstance(need, bool) or need < 0:
+                # Ambang yang tidak bisa dibaca BUKAN nol. Aturan tetap dipakai, dengan need None,
+                # dan `check(None)` menjawab UNKNOWN — menolak. Versi pertama melewati aturan
+                # begitu saja, sehingga item yang cocok dengannya jatuh ke need 0 dan jalan.
+                out.append({"label": str(r.get("label") or "?"), "need_mib": None,
+                            "match": _keywords(r), "bad_threshold": True})
+                continue
+            out.append({"label": str(r.get("label") or "?"), "need_mib": int(need),
+                        "match": _keywords(r)})
+        return out
+    except Exception:  # noqa: BLE001 — apa pun yang tidak bisa dibaca = pakai cadangan, bukan buka
+        return [dict(r, degraded=True) for r in FALLBACK_RULES]
 
 
 def _word_match(word: str) -> str:
@@ -67,39 +124,6 @@ def _word_match(word: str) -> str:
     """
     w = re.escape(word.strip().lower())
     return rf"(?<![0-9a-z_]){w}(?![0-9a-z_])"
-
-
-def rules(path=None) -> list:
-    """Daftar aturan dari config, dibaca pada saat dipakai.
-
-    Berkas hilang/rusak TIDAK menghasilkan "tidak ada aturan": yang menghasilkan daftar cadangan,
-    dan keputusan berikutnya menandai dirinya `degraded` supaya pembaca tahu ambang mana yang
-    sebenarnya dipakai malam itu.
-    """
-    try:
-        cfg = json.loads(Path(path or CONFIG).read_text(encoding="utf-8"))
-        raw = cfg.get("rules")
-        assert isinstance(raw, list) and raw, "rules kosong"
-        # Elemen yang bukan dict membuat seluruh config tidak dipercaya, bukan dilewati: kita tidak
-        # tahu kata kunci apa yang hilang bersamanya, dan "tidak tahu" tidak boleh berarti "boleh".
-        assert all(isinstance(r, dict) for r in raw), "anggota rules bukan objek"
-    except Exception:  # noqa: BLE001 — tidak ada config bukan berarti GPU aman
-        return [dict(r, degraded=True) for r in FALLBACK_RULES]
-    out = []
-    for r in raw:
-        need = r.get("need_mib")
-        if not isinstance(need, int) or isinstance(need, bool) or need < 0:
-            # Ambang yang tidak bisa dibaca BUKAN nol. Aturan tetap dipakai, dengan need None,
-            # dan `check(None)` menjawab UNKNOWN — menolak. Versi pertama melewati aturan begitu
-            # saja, sehingga item yang cocok dengannya jatuh ke need 0 dan jalan: rusak = terbuka.
-            out.append({"label": str(r.get("label") or "?"), "need_mib": None,
-                        "match": [str(m).lower() for m in (r.get("match") or [])],
-                        "bad_threshold": True})
-            continue
-            continue
-        out.append({"label": str(r.get("label") or "?"), "need_mib": int(need),
-                    "match": [str(m).lower() for m in (r.get("match") or [])]})
-    return out
 
 
 def classify(text, path=None) -> dict:
@@ -261,6 +285,31 @@ def selftest() -> int:
           all(r.get("degraded") for r in rules(junk))
           and gate("flux job", sampler=lambda: 1, config_path=junk)["state"] == "DENY",
           str(rules(junk))[:180])
+    # `{"match": 123}` adalah JSON yang sah. Loop penyusun aturan dulu hidup DI LUAR pagar
+    # try/except, jadi satu field bertipe int cukup untuk melempar TypeError keluar `rules()` dan
+    # menghentikan detak — kegagalan yang jauh lebih mahal daripada memakai cadangan.
+    weird = Path(tempfile.mkdtemp()) / "gpu_budget.json"
+    weird.write_text(json.dumps({"rules": [{"label": "w", "match": 123, "need_mib": 5000}]}),
+                     encoding="utf-8")
+    check_("field `match` bertipe int tidak menjatuhkan rules() — config tidak dipercaya, cadangan "
+           "dipakai, dan TypeError tidak pernah keluar ke scheduler",
+          all(r.get("degraded") for r in rules(weird))
+          and gate("flux job", sampler=lambda: 1, config_path=weird)["state"] == "DENY",
+          str(rules(weird))[:180])
+    empty = Path(tempfile.mkdtemp()) / "gpu_budget.json"
+    empty.write_text(json.dumps({"rules": [{"label": "e", "match": [], "need_mib": 5000}]}),
+                     encoding="utf-8")
+    check_("aturan tanpa kata kunci membuat SELURUH config tidak dipercaya — 'tidak cocok dengan "
+           "apa pun' adalah bentuk gerbang terbuka yang paling mudah tidak terlihat",
+          all(r.get("degraded") for r in rules(empty))
+          and gate("flux job", sampler=lambda: 1, config_path=empty)["state"] == "DENY",
+          str(rules(empty))[:180])
+    check_("cadangan juga mengenal istilah `voxel remesh` — audit ronde ketiga menemukan ia hanya "
+           "ada di config, jadi tanpa config pekerjaan 3D berlubang lolos sebagai bukan-kerja-GPU",
+          gate("rapikan voxel remesh stage", sampler=lambda: 1,
+               config_path=bad.parent / "tiada.json")["state"] == "DENY"
+          and gate("rapikan voxel remesh stage", sampler=lambda: 1,
+                   config_path=bad.parent / "tiada.json")["rule"] == "3d-trellis")
     check_("batas kata menghormati underscore: flux_store, test_flux dan reflux bukan kerja GPU, "
            "tapi TRELLIS.2 tetap terdeteksi (nama produk nyata di antrean ini)",
           gate("rapikan flux_store helpers", sampler=lambda: 1)["state"] == "NOT_GPU_WORK"
