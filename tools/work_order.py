@@ -2818,6 +2818,7 @@ def seed(conn, engine, items, refresh_gates=None):
             if exists:
                 keymap[key] = int(exists[0]["id"])
                 status = norm(exists[0].get("status"))
+                acted = False
                 if str(exists[0].get("title") or "") != title:
                     # Judul boleh KOREKSI selama barisnya belum mulai; vonis membekukannya.
                     # Alasannya bukan keramahan pada teks lama: baris COMPLETED/FAILED/PARKED adalah
@@ -2832,6 +2833,7 @@ def seed(conn, engine, items, refresh_gates=None):
                     run(conn, engine,
                         f"UPDATE quest_tasks SET title={ph} WHERE id={ph}", (title, keymap[key]))
                     made.append((keymap[key], "judul diselaraskan", title))
+                    acted = True
                     # TANPA `continue` di sini. Versi pertama berhenti setelah menyelaraskan judul,
                     # sehingga baris yang judul DAN gerbangnya sama-sama berubah butuh DUA panggilan
                     # seed untuk sampai ke keadaan yang benar — dan panggilan pertama melaporkan
@@ -2857,7 +2859,12 @@ def seed(conn, engine, items, refresh_gates=None):
                             (check, keymap[key]))
                         made.append((keymap[key], "gerbang diperbarui", title))
                         continue
-                made.append((keymap[key], "ada", title))
+                # "ada" adalah laporan NEGARA, bukan laporan kedua. Kalau iterasi ini sudah menulis
+                # sesuatu untuk baris ini (judul diselaraskan), menambahkan "ada" membuat satu baris
+                # appear dua kali di output `seed --roadmap` dan pembaca tidak bisa tahu mana yang
+                # berubah. Ditemukan verifier 2026-10-15 sebagai temuan non-blocking.
+                if not acted:
+                    made.append((keymap[key], "ada", title))
                 continue
             run(conn, engine,
                 f"INSERT INTO quest_tasks (title, status, phase, check_command, summary, origin, "
@@ -5070,6 +5077,15 @@ def selftest():
               and any(s == "judul diselaraskan" for _i, s, _t in _r_both)
               and any(s == "gerbang diperbarui" for _i, s, _t in _r_both),
               f"{_both_row[:1]} report={_r_both}")
+        # Temuan non-blocking verifier: baris yang hanya berganti judul (gerbang sama) dilaporkan
+        # dua kali — "judul diselaraskan" lalu "ada". Satu baris, dua laporan, pembaca tidak tahu
+        # mana yang berubah. Sekarang satu laporan per baris per lintasan.
+        _solo = int([_i for _i, _s, _t in seed(conn, "SQLITE",
+                     [("kSolo", "Judul Lama Solo", "build", None, "gerbang-tetap")])][0])
+        _r_solo = seed(conn, "SQLITE", [("kSolo", "Judul Baru Solo", "build", None, "gerbang-tetap")])
+        _solo_lines = [s for _i, s, _t in _r_solo if _i == _solo]
+        check("baris yang hanya berganti judul dilaporkan SATU kali, bukan judul+ada",
+              _solo_lines == ["judul diselaraskan"], f"{_solo_lines} row={_solo}")
         finish(conn, "SQLITE", _gate, "COMPLETED", evidence="9/9", followup=False)
         seed(conn, "SQLITE", [("kGate", "Gerbang Default", "build", None, "setelah vonis")])
         _post = run(conn, "SQLITE", "SELECT check_command AS c FROM quest_tasks WHERE id=?",
