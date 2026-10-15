@@ -1133,7 +1133,11 @@ lines) finds **7 identical normalised lines out of our 654** — every one gener
 `if not isinstance(data, dict):`) — with a **longest run of consecutive shared lines of 1**, and **none**
 of our private identifiers (`tool_*`, `graph_text`, `GATE_TEXT_CAP`, …) present in their source.
 107 of our 202 long identifiers do overlap theirs; that is HTTP/JSON vocabulary and proves nothing
-either way. Exposure happened; derivation was looked for and is not there. Anyone weighing the AGPL
+either way. The wording above it was wrong and my own number refuted it: seven shared lines means **no
+substantive line of theirs is in the tree**, not **no line** — the shared ones are
+`from __future__ import annotations`, `except Exception as exc:` and `if __name__ == "__main__":`,
+which every Python file of this shape contains. Exposure happened; derivation was looked for and is
+not there. Anyone weighing the AGPL
 question should read it as exactly that and no more — including the limit of the method, which a
 line-level comparison cannot see a translation that kept the structure and renamed everything.
 

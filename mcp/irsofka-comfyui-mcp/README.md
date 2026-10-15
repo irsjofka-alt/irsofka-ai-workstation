@@ -7,9 +7,15 @@ This is the server `ROADMAP.md` F11's three-repo plan calls **IRSofka ComfyUI MC
 step 1 (that step is the comparison against Epic's own MCP tool surface); it is F11 step 4's VRAM work
 brought forward to the boundary where it could actually be finished. It was written against ComfyUI's
 documented HTTP API after `comfy-mcp` was ruled out as a base, because it is AGPL-3.0-or-later (or a paid
-commercial licence) and AGPL forbids exactly the restriction BSL adds. **No line of theirs is in our tree** — measured, not asserted: against the installed `comfy_mcp`
-package (6 888 significant lines), our 654 share **7 normalised lines, all generic boilerplate, longest
-consecutive run 1, no shared private identifier**. Their `server.py` was still read once, to count tool
+commercial licence) and AGPL forbids exactly the restriction BSL adds. **No substantive line of theirs is in our tree** — measured, and the measurement contradicts the
+stronger wording I put above it a moment ago, so the weaker one is what stands: against the installed
+`comfy_mcp` package (6 888 significant lines), our 654 significant lines share **7 normalised lines**.
+Seven is not zero, and they are `from __future__ import annotations`, `except Exception as exc:`,
+`if __name__ == "__main__":`, `if not isinstance(data, dict):` and `if action == "list":` — Python
+anyone writes the same way. Longest consecutive run **1**, no shared private identifier. The claim is
+about derivation, and a derived file shares structure and runs of lines; this one shares no run longer
+than a single idiomatic line. Scope note: only `server.py` was compared, not `pyproject.toml` or the
+selftest blocks. Their `server.py` was still read once, to count tool
 definitions for `mcp/README.md`, so "nobody here ever looked at it" remains not a claim this file makes. What is shared with a ComfyUI is the wire.
 
 What it does on every submit: **`tools/gpu_gate.py` is consulted before `POST /prompt`.** Whether the
