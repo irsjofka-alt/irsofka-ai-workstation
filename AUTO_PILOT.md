@@ -68,15 +68,20 @@ F11 — MCP ownership and what may be published. The operator opened it on 2026-
 decision has landed: **BSL 1.1 for the whole published family** (turn 461: "jadikan BSL saja semua"),
 with the licensor entity `PT IRSofka Data Teknologi` (turn 462). What is chased now, in gate order:
 
-1. `F11/MCP-1` — IRSofka ComfyUI MCP as far as `origin`, VRAM gate proven in both directions, and
-   installed in **both** CLIs. Measured today: the repo exists, **0 remote, 0 registrations, 0 wheel**.
-2. `F11/MCP-2` — IRSofka Blender MCP from a **permissive base**. The one installed now (`mcp-blender`)
-   has been AGPL-3.0-or-later since v0.4.0 with its commercial option **withdrawn** (commit
-   `8f64128`): deriving from it and labelling the result BSL is a one-way door, so the gate asks for
-   the IRSofka repo's own permissive `LICENSE`, not for the directory to exist.
-3. `F11/MCP-3` — IRSofka Unreal Engine MCP as its own repo, **after** F11 step 0 is correct:
+1. `F11/MCP-1` (id 294) — IRSofka ComfyUI MCP as far as `origin`, VRAM gate proven in both
+   directions, and installed in **both** CLIs. Measured today: the repo exists, **0 remote, 0
+   registrations, 0 wheel**.
+2. `F11/MCP-2` (id 295) — IRSofka Blender MCP from a **permissive base**. The one installed now
+   (`mcp-blender`) has been AGPL-3.0-or-later since v0.4.0 with its commercial option **withdrawn**
+   (commit `8f64128`): deriving from it and labelling the result BSL is a one-way door, so the gate
+   asks for the IRSofka repo's own permissive `LICENSE`, not for the directory to exist.
+3. `F11/STEP-0` (id 297) — write the round-trip probe `tools/ue_bridge_probe.py`, then fix the bridge:
    `set_transform` must return what `get_transform` reads, and `spawn` must prove the class it made.
-   Until then, splitting the repo only packages something that cannot prove anything.
+   The probe does not exist and its socket framing is **not** in the skill documentation, so writing it
+   from memory would be guessing with an instrument. Read `FIRSofkaSocketServer` first.
+4. `F11/MCP-3` (id 298, `depends_on` 297) — IRSofka Unreal Engine MCP as its own repo to `origin`, and
+   only after step 0 is green: splitting a repo that cannot prove an actor's position just packages the
+   lie in a tidier structure.
 
 ## What does not change
 

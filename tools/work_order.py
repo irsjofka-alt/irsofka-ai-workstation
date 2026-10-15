@@ -1678,6 +1678,14 @@ def work_rank(row):
     Urutannya sekarang: perintah orang > item roadmap > baris warisan yang masih hidup > pekerjaan yang
     dibuat mesin sendiri. Di dalam satu peringkat urutan id tetap berlaku, jadi tidak ada bintang baru
     yang menentukan "berikutnya" selain fungsi ini — §12: satu pemilik untuk kata "berikutnya".
+
+    BATAS YANG DISENGAJA, ditulis karena reviewer menemukannya dan tidak bisa dibantah: peringkat ini
+    buta terhadap urgensi. Sebuah baris `origin='idle'` yang isinya pemulihan kritis (disk habis,
+    integritas basis data, lease menggantung) akan berdiri di peringkat 3 dan bisa kelaparan di belakang
+    puluhan item roadmap yang santai. Itunya bukan "nanti ada flag mendesak" — ia aturan penulisan:
+    pekerjaan yang harus dikerjakan dulu ditulis sebagai perintah operator (`queue`) atau sebagai item
+    roadmap (`seed --roadmap`), bukan sebagai penajaman. Peringkat 3 adalah peringkat untuk hal yang
+    memang boleh menunggu.
     """
     return KIND_RANK.get(str(row.get("origin") or ORIGIN_LEGACY), 2)
 
@@ -1750,7 +1758,17 @@ def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None,
         if (drop_stale_legacy and state in ("WORKING", "CLAIMED")
                 and (r.get("origin") or ORIGIN_LEGACY) == ORIGIN_LEGACY
                 and int(r.get("lease_epoch") or 0) <= now()):
-            continue
+            # Dulu `continue`: barisnya HILANG dari penawaran. Itu benar saat satu-satunya urutan
+            # adalah `ORDER BY id`, karena kepala antrean yang mustahil selesai menahan perintah
+            # operator di belakangnya (keputusan 45). Dengan peringkat, alasan itu tidak ada lagi:
+            # baris usang sudah otomatis di bawah operator dan roadmap. Yang tersisa dari membuang
+            # hanyalah biaya yang sekarang dilihat operator sebagai "task-ku di-skip": pekerjaan
+            # nyata yang belum selesai (235 IP cleanup, 236 plafon VRAM, 244 F10.9) jadi tidak
+            # pernah ditawarkan lagi selamanya. Jadi ia TURUN, bukan hilang: rank 2.5, di belakang
+            # legacy yang leasesnya masih hidup, dan tetap kena cooldown lewat due_epoch kalau
+            # memang ditolak gerbang.
+            r = dict(r)
+            r["_rank"] = KIND_RANK[ORIGIN_LEGACY] + 0.5
         if origin is not None and (r.get("origin") or ORIGIN_LEGACY) != origin:
             continue
         # `for_engine` ada di sini karena pemicu yang hidup DI DALAM satu sesi tidak boleh mengambil
@@ -1770,7 +1788,8 @@ def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None,
         out.append(r)
     # Stabil di dalam peringkat: id tetap penentu untuk baris dengan asal yang sama, jadi menambahkan
     # peringkat tidak mengubah urutan yang sudah diyakini tes lama.
-    out.sort(key=lambda r: (work_rank(r), int(r["id"])))
+    out.sort(key=lambda r: (r.get("_rank") if r.get("_rank") is not None else work_rank(r),
+                            int(r["id"])))
     return out
 
 
@@ -2690,16 +2709,25 @@ ROADMAP_ITEMS = [
      "test -f ~/Apps/mcp/irsofka-blender-mcp/server.py && "
      "grep -qiE 'MIT|Apache' ~/Apps/mcp/irsofka-blender-mcp/LICENSE && "
      "test ! -f ~/Apps/mcp/irsofka-blender-mcp/AGPL-NOTICE"),
-    ("f11mcp_ue", "F11/MCP-3 IRSofka Unreal Engine MCP: plugin berdiri sendiri sebagai repo, "
-                  "dengan gerbang langkah 0 (transform round-trip + capture ber-hashes) lebih dulu",
-     "build", None,
-     # Urutannya bukan selera: langkah 0 F11 mengukur bahwa `set_transform` returning SUCCESS tapi
-     # `get_transform` membaca [0,0,0], dan `spawn` melaporkan kelas `Actor` untuk StaticMeshActor.
-     # Selama itu belum benar, memisahkan plugin menjadi repo sendiri hanya membungkus sesuatu yang
-     # tidak bisa membuktikan apa pun. Gerbangnya menolak replika kode engine: ini IRSofka sendiri.
+    ("f11step0", "F11/STEP-0 Jembatan UE: tulis probe round-trip (tools/ue_bridge_probe.py) lalu "
+                 "perbaiki `set_transform`/`get_transform` dan bukti kelas `spawn`", "build", None,
+     # Ini gerbang yang PEKERJAANNYA DULU HARUS ADA, dan itu ditulis di judul, bukan disembunyikan di
+     # dalam angka: reviewer menemukan versi pertama baris MCP-3 mengklaim "gerbang mengukur
+     # round-trip" padahal perintahnya cuma `test -f README.md && git rev-parse` — gerbang yang lolos
+     # dengan repo kosong berisi satu README. Bentuk sekarang menolak klaim itu: ia menuntut
+     # alat ukurnya benar-benar ada dan benar-benar keluar nol. Probe itu belum ditulis, dan protocol
+     # socket-nya TIDAK ada di dokumentasi skill (saya memanggilnya lewat MCP, bukan lewat mentah),
+     # jadi menulisnya tanpa membaca `FIRSofkaSocketServer` adalah menebak — dan alat ukur yang
+     # ditebak lebih buruk dari tidak ada alat ukur. Editor tutup = probe tidak bisa lolos: benar.
+     "test -f tools/ue_bridge_probe.py && timeout 120 python3 tools/ue_bridge_probe.py"),
+    ("f11mcp_ue", "F11/MCP-3 IRSofka Unreal Engine MCP: plugin berdiri sendiri sebagai repo sampai "
+                  "ke origin (setelah F11/STEP-0 hijau, bukan sebelum)", "build", ["f11step0"],
+     # Yang dijamin gerbang ini hanya dua hal yang memang bisa dilihat dari berkas: repositori IRSofka
+     # sendiri dan sha-nya benar-benar sampai ke remote. Klaim "jembatan sudah benar" dipindah ke
+     # F11/STEP-0 di atas, dan `depends_on` menahannya di sana — memisahkan repo yang belum bisa
+     # membuktikan posisi actor hanya membungkus kebohongan dengan struktur yang lebih rapi.
      "test -f ~/Apps/mcp/irsofka-unreal-mcp/README.md && "
-     "git -C ~/Apps/mcp/irsofka-unreal-mcp rev-parse origin/main && "
-     "python3 tools/measure_epic_surface.py >/dev/null"),
+     "git -C ~/Apps/mcp/irsofka-unreal-mcp rev-parse origin/main"),
     ("f109", "F10.9 push gate: push hanya setelah verdict verifier COMPLETED menyebut model yang "
              "meloloskan diff-nya; tanpa verdict, commit berhenti lokal dan masuk digest pagi",
      "build", ["f101", "f103"],
@@ -4010,7 +4038,7 @@ def selftest():
         check("huruf di luar daftar tetap ditolak dengan nama, tidak diam-diam jadi pilihan",
               idx_oob is None and "di luar" in (why_oob or ""), str(why_oob))
 
-        # --- keputusan 45: kepala antrean legacy tidak boleh ditawarkan --------------------------
+        # --- keputusan 45 DICABUT sebagian: kepala antrean legacy tidak lagi disembunyikan --------
         # Versi pertama filter ini hanya menyebut "WORKING" dan karena itu TIDAK melakukan apa
         # pun: `norm()` memetakan IN_PROGRESS warisan ke CLAIMED, jadi `next_ready()` tetap
         # mengembalikan baris yang sama dan perbaikannya hanya tampak di diff. Yang diuji di
@@ -4022,14 +4050,25 @@ def selftest():
                      (now() + 600,))
         conn.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin) "
                      "VALUES ('legacy-pending','PENDING','qoder','legacy')")
+        conn.execute("INSERT INTO quest_tasks (title,status,cli_engine,origin,phase) "
+                     "VALUES ('roadmap-umpan-f11','PENDING','qoder','roadmap','build')")
         conn.commit()
+        # Keputusan 45 (dijawab `qwen3.5:9b` pada 03:5x) dulu MENYEMBUNYIKAN baris legacy tanpa lease
+        # hidup dari penawaran. Premisnya sudah mati: waktu itu satu-satunya urutan adalah
+        # `ORDER BY id`, jadi kepala antrean yang mustahil selesai menahan perintah orang di
+        # belakangnya. Dengan `work_rank()` legacy otomatis berada di bawah operator dan roadmap,
+        # sehingga satu-satunya sisa efek penyembunyian itu adalah pekerjaan nyata yang hilang dari
+        # penawaran selamanya — dan itulah keluhan operator 20:11 ("task MCP kenapa di-skip",
+        # "ROADMAP.MD masih JAUH"). Jadi perilakunya dibalik secara sadar, dengan nama yang diubah:
+        # TURUN PERINGKAT, bukan hilang.
         keep = {r["title"] for r in ready_items(conn, "SQLITE", drop_stale_legacy=True)}
-        offer = {r["title"] for r in ready_items(conn, "SQLITE")}
-        check("legacy IN_PROGRESS tanpa lease hidup DIBUANG dari penawaran, tapi legacy PENDING "
-              "dan legacy yang sedang dikerjakan orang TETAP ada — dan laporan tanpa flag masih "
-              "melihat yang dibuang",
-              "legacy-stale" not in keep and "legacy-pending" in keep and "legacy-dikerjakan" in keep
-              and "legacy-stale" in offer, f"keep={sorted(keep)}")
+        offer = [r["title"] for r in ready_items(conn, "SQLITE", drop_stale_legacy=True)]
+        check("legacy tanpa lease hidup tidak lagi disembunyikan — ia TURUN; legacy PENDING dan yang "
+              "sedang dikerjakan orang tetap ada, dan laporan tetap melihat keduanya",
+              "legacy-stale" in keep and "legacy-pending" in keep and "legacy-dikerjakan" in keep
+              and offer.index("legacy-stale")
+              > offer.index("roadmap-umpan-f11"),
+              f"keep={sorted(keep)} urutan={offer[:5]}")
         one_opt = decide(conn, "SQLITE", "Satu pilihan?", ["cuma ini"], weight="heavy")
         one_id = one_opt[2] if len(one_opt) > 2 else None
         if one_id:
@@ -4620,6 +4659,8 @@ def selftest():
               [str(m.get("check_command") or "")[:40] for m in _mcp])
         conn.execute("INSERT INTO quest_tasks (title, status, origin, cli_engine) "
                      "VALUES ('sharpen-last','PENDING','idle','qoder')")
+        conn.execute("INSERT INTO quest_tasks (title, status, origin, cli_engine, phase) "
+                     "VALUES ('roadmap-f11-umpan','PENDING','roadmap','qoder','build')")
         conn.execute("INSERT INTO quest_tasks (title, status, origin, cli_engine) "
                      "VALUES ('operator-first','PENDING','operator','qoder')")
         conn.commit()
@@ -4631,7 +4672,26 @@ def selftest():
         check("next_item sungguh memakai peringkat itu, bukan hanya daftarnya",
               (next_item(conn, "SQLITE") or {}).get("origin") == ORIGIN_OPERATOR,
               str((next_item(conn, "SQLITE") or {}).get("origin")))
-        conn.execute("DELETE FROM quest_tasks WHERE title IN ('sharpen-last','operator-first')")
+        # Keputusan 45 dulu menyembunyikan baris legacy tanpa lease hidup dari penawaran. Dengan
+        # peringkat, penyembunyian itu tidak lagi melindungi apa pun dan justru membuat pekerjaan
+        # nyata hilang dari mata loop — persis "task-ku di-skip" yang operator keluhkan. Jadi yang
+        # diuji: ia TETAP ditawarkan, dan tetap di bawah roadmap.
+        conn.execute("INSERT INTO quest_tasks (title, status, origin, cli_engine, lease_epoch) "
+                     "VALUES ('stale-legacy','WORKING','legacy','qoder',1)")
+        conn.commit()
+        _offer = [(int(r["id"]), str(r["title"])) for r in
+                  ready_items(conn, "SQLITE", drop_stale_legacy=True)]
+        _titles = [x[1] for x in _offer]
+        check("baris legacy dengan lease mati TETAP ditawarkan, hanya turun ke belakang",
+              "stale-legacy" in _titles, str(_titles[:8]))
+        check("dan ia tidak pernah mendahului item roadmap yang bisa dikerjakan",
+              _titles.index("stale-legacy") > _titles.index("roadmap-f11-umpan"),
+              str(_titles[:6]))
+        conn.execute("DELETE FROM quest_tasks WHERE title IN ('stale-legacy','legacy-stale',"
+                     "'legacy-dikerjakan','legacy-pending','roadmap-umpan-f11')")
+        conn.commit()
+        conn.execute("DELETE FROM quest_tasks WHERE title IN "
+                     "('sharpen-last','operator-first','roadmap-f11-umpan')")
         conn.commit()
 
         # --- gerbang F10.5: harus mengukur mimpi, bukan keberadaan berkas ------------------------
