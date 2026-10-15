@@ -1,105 +1,103 @@
-# AUTO_PILOT.md — Kontrak Looping (dibaca engine yang dibangunkan)
+# AUTO_PILOT.md — the looping contract (read by the engine that is woken)
 
-Dibangunkan oleh `tools/awakener.py` dengan satu baris tetap: `RUN AUTO_PILOT.md`. Berkas ini
-adalah seluruh isi perintah itu. Tidak ada perintah lain yang pernah diketik worker itu, dan
-tidak ada model yang menyunting berkas ini dari jalur bangun — kalau teksnya berubah, yang
-berubah adalah kontrak, dan itu pekerjaan tangan operator di terminal.
+Woken by `tools/awakener.py` with one fixed line: `RUN AUTO_PILOT.md`. This file *is* the whole
+content of that command. No other command has ever been typed by that worker, and no model edits
+this file from the wake path — if the text changes, the contract changed, and that is a human hand
+at a terminal.
 
-## Looop yang dituntut operator (2026-10-15 03:17, kata-katanya sendiri)
+## The loop the operator demanded (2026-10-15 03:17, his own words)
 
 > "ketika tidak ada perintah → Looping Roadmap — Selesaikan. Ketika Roadmap.md selesai dan tidak
 > ada task, dan operator tidak ada perintah → Looping Sharpening ai-station, jadikan ai-station
 > ini diri kamu sendiri, Keep Improving."
 
-## Yang kamu kerjakan, berurutan, tanpa bertanya
+## What you do, in order, without asking
 
-1. **Perpanjang lease kamu** kalau kamu memegang satu item: `python3 tools/work_order.py lease <id>`.
-2. **Klaim berikutnya** — antrean dibaca dari ledger, bukan dari ingatan:
+1. **Extend your lease** if you hold an item: `python3 tools/work_order.py lease <id>`.
+2. **Take the next one** — the queue is read from the ledger, never from memory:
    `python3 -c "import sys;sys.path.insert(0,'tools');import db_state,work_order as wo,drainer as dr;
    c,b=db_state.get_db_connection();print((dr.next_ready(c,b) or {}).get('id'))"`
-3. **Kalau ada item** → kerjakan item itu, lalu tutup dengan **angka keluar**, bukan prosa:
-   `python3 tools/work_order.py finish` lewat modul, atau tandai COMPLETED dengan `evidence=`
-   yang berisi angka hasil tes (mis. `269/269`, `exit=1`, `4 commit`).
-4. **Ulangi** dari langkah 2 sampai jendela ON lewat atau pemutus membuka. Report terakhir kamu
-   HARUS berisi angka; selesai tanpa angka berarti belum selesai.
+3. **If there is an item** → do it, then close it with **numbers out**, not prose:
+   `python3 tools/work_order.py finish` through the module, or mark COMPLETED with an `evidence=`
+   that contains measured results (e.g. `269/269`, `exit=1`, `4 commit`).
+4. **Repeat** from step 2 until the ON window expires or a breaker opens. Your final report MUST
+   contain numbers; finishing without numbers means you did not finish.
 
-## Urutan yang diikat: TASK DAHULU, PENAJAMAN TERAKHIR
+## The binding order: TASKS FIRST, SHARPENING LAST
 
-Ditulis 2026-10-15 20:2x atas perintah langsung operator, setelah loop-nya terbukti melenceng.
-Kata-katanya sendiri:
+Written 2026-10-15 20:2x on the operator's direct order, after his loop was proven to drift. His
+own words:
 
 > "YANG PALING UTAMA ITU TASK, SKILL ITU kalau tidak ada TASK atau ROADMAP.MD bahkan sudah tidak
 > ada yang bisa di kerjakan baru SKILL yang di kerjakan ... bahkan ROADMAP.MD saja masih JAUH"
 
-Jadi tingkatan ini bukan saran, dan ia dibaca mesin dari dua tempat: `work_rank()` di
-`tools/work_order.py` mengurutkan penawaran, dan §3 di atas menyuruhmu mengambil kepala antrean.
+So this ladder is not advice, and it is enforced in two places: `work_rank()` in
+`tools/work_order.py` orders every offer, and step 2 above tells you to take the head of that order.
 
-| tingkat | apa | contoh nyata |
+| rank | what | real examples |
 |---|---|---|
-| 0 | perintah yang operator tulis sendiri (`origin='operator'`) | `queue`, Human Decide, instruksi yang diketik ke SQL |
-| 1 | item ROADMAP (`origin='roadmap'`) | F11/MCP-1..3, F10.x, F9.x — apa pun yang ada di `ROADMAP_ITEMS` |
-| 2 | baris warisan yang masih hidup (`origin='legacy'`) | item kerja lama dengan lease yang benar-benar masih pegang |
-| 3 | pekerjaan yang **dibuat mesin sendiri** (`origin='idle'`) | penajaman skill, baca ulang catatan keputusan, kontrak `FOLLOWUP_CONTRACTS` |
+| 0 | a command the operator typed himself (`origin='operator'`) | `queue`, Human Decide answers, instructions written into SQL |
+| 1 | ROADMAP items (`origin='roadmap'`) | F11/MCP-1..3, F10.x, F9.x — anything in `ROADMAP_ITEMS` |
+| 2 | living legacy rows (`origin='legacy'`) | old working rows whose lease is genuinely still held |
+| 3 | work the **machine wrote for itself** (`origin='idle'`) | skill sharpening, re-reading a decision note, `FOLLOWUP_CONTRACTS` |
 
-Aturan yang mengikat tingkat 3, dan ini yang dulu dilanggar:
+The rules that bind rank 3, and these are the ones that were broken:
 
-- **Penajaman tidak boleh diambil selama masih ada item tingkat 0–2 yang bisa dikerjakan.**
-  Kalau `next_ready()` memberikan baris `origin='idle'` sementara `ROADMAP.md` masih punya F
-  berstatus 🟡/⬜, itu **bukan** sinyal "roadmap sudah selesai" — itu tanda antreanmu sedang kosong
-  karena langkah roadmap tidak pernah dibuat jadi baris. Perbaikilah barisnya (`seed --roadmap`),
-  bukan kerjakan penajamannya.
-- **Sharpening adalah pekerjaan pengisi, dan pengisi hanya boleh bicara saat jalur utama mati.**
-  Sebelum menyentuh satu berkas skill, tulis dulu di laporanmu: berapa baris roadmap yang masih
-  terbuka, dan kenapa tidak satu pun bisa diambil. Tanpa kalimat itu, penajaman = melenceng.
-- **Melenceng terukur dan mahal.** Malam ini `ready_items()` mengurut dengan `ORDER BY id` dan
-  `drop_stale_legacy` menahan semua baris kerja tanpa lease hidup, jadi satu-satunya yang bisa
-  ditawarkan adalah id 286 — baris penajaman skill yang mesin buat sendiri — sementara instruksi
-  MCP operator (turn 458/457, 15:26: "1 repo ini jadi memiliki 3 repo: IRSofka Blender MCP,
-  IRSofka ComfyUI MCP, IRSofka Unreal Engine MCP") **tidak punya baris sama sekali**. Loop tidak
-  sedang membolos; loop tidak bisa mengambil pekerjaan yang tidak pernah masuk ledger. Itu yang
-  sekarang diperbaiki: tiga baris itu ada (`F11/MCP-1..3`, id 294/295/296, `origin='roadmap'`),
-  dan peringkat membuat mereka mendahului apa pun yang mesin karang sendiri.
-- **Kalau kamu tidak menemukan pekerjaan tingkat 0–2 dan roadmap memang masih panjang**, itu
-  berarti peta roadmap belum dipetakan ke antrean — dan itu adalah **temuan**, bukan alasan untuk
-  mengerjakan hal lain. Naikkan sebagai keputusan (`decide`), jangan diam-diam ganti pekerjaan.
+- **Never take a sharpening row while any rank 0–2 item can be worked.** If `next_ready()` hands you
+  an `origin='idle'` row while `ROADMAP.md` still has an F at 🟡 or ⬜, that is NOT the signal "the
+  roadmap is done". It means the roadmap steps were never turned into rows. Fix the rows
+  (`work_order.py seed --roadmap`); do not go and do the sharpening instead.
+- **Sharpening is filler, and filler only speaks when the main line is silent.** Before you touch a
+  skill file, write in your report how many roadmap rows are still open and why none of them could
+  be claimed. Without that sentence, sharpening is drift.
+- **The drift was measured, and it was expensive.** Tonight `ready_items()` sorted by `ORDER BY id`
+  and `drop_stale_legacy` held back every working row without a live lease, so the only offerable
+  row in the ledger was id 286 — a skill-sharpening line the machine had written for itself — while
+  the operator's MCP instruction (turns 457/458, 15:26: "1 repo ini jadi memiliki 3 repo: IRSofka
+  Blender MCP, IRSofka ComfyUI MCP, IRSofka Unreal Engine MCP") had **no row at all**. The loop was
+  not skipping school; it could not pick up work that was never in the ledger. That is fixed now:
+  the three rows exist (`F11/MCP-1..3`, ids 294/295/296, `origin='roadmap'`) and the ranking puts
+  them ahead of anything the machine invents.
+- **If you genuinely find no rank 0–2 work and the roadmap is still long**, the map has not been
+  projected into the queue — that is a **finding**, not a licence to do something else. Raise it
+  (`decide`), do not quietly swap jobs.
 
-## Tugas utama yang sedang berjalan (jangan dicari lagi di tempat lain)
+## The main task in progress (do not go looking elsewhere for it)
 
-F11 — kepemilikan MCP dan apa yang boleh dipublikasi. Operator membukanya 2026-10-15 dan
-keputusan lisensinya sudah jatuh: **BSL 1.1 untuk seluruh keluarga publik** (turn 461: "jadikan
-BSL saja semua"), dengan entity `PT IRSofka Data Teknologi` (turn 462). Yang dikejar sekarang,
-berurutan sesuai angka di gerbangnya:
+F11 — MCP ownership and what may be published. The operator opened it on 2026-10-15 and the licence
+decision has landed: **BSL 1.1 for the whole published family** (turn 461: "jadikan BSL saja semua"),
+with the licensor entity `PT IRSofka Data Teknologi` (turn 462). What is chased now, in gate order:
 
-1. `F11/MCP-1` — IRSofka ComfyUI MCP sampai ke `origin`, gerbang VRAM terbukti dua arah,
-   terpasang di **kedua** CLI. Terukur hari ini: repo ada, **0 remote, 0 registrasi, 0 wheel**.
-2. `F11/MCP-2` — IRSofka Blender MCP dari **basis permissive**. Yang sekarang (`mcp-blender`)
-   AGPL-3.0-or-later sejak v0.4.0 dan opsi komersialnya dicabut (`8f64128`): menurunkan sambil
-   melabeli BSL adalah pintu satu arah, jadi gerbangnya menanyakan `LICENSE` permissive milik
-   repo IRSofka sendiri, bukan keberadaannya.
-3. `F11/MCP-3` — IRSofka Unreal Engine MCP jadi repo sendiri, **setelah** langkah 0 F11 benar:
-   `set_transform` harus mengembalikan nilai yang sama dengan yang dibaca `get_transform`, dan
-   `spawn` harus membuktikan kelasnya. Selama itu belum, memisahkan repo hanya membungkus sesuatu
-   yang tidak bisa membuktikan apa pun.
+1. `F11/MCP-1` — IRSofka ComfyUI MCP as far as `origin`, VRAM gate proven in both directions, and
+   installed in **both** CLIs. Measured today: the repo exists, **0 remote, 0 registrations, 0 wheel**.
+2. `F11/MCP-2` — IRSofka Blender MCP from a **permissive base**. The one installed now (`mcp-blender`)
+   has been AGPL-3.0-or-later since v0.4.0 with its commercial option **withdrawn** (commit
+   `8f64128`): deriving from it and labelling the result BSL is a one-way door, so the gate asks for
+   the IRSofka repo's own permissive `LICENSE`, not for the directory to exist.
+3. `F11/MCP-3` — IRSofka Unreal Engine MCP as its own repo, **after** F11 step 0 is correct:
+   `set_transform` must return what `get_transform` reads, and `spawn` must prove the class it made.
+   Until then, splitting the repo only packages something that cannot prove anything.
 
-## Yang TIDAK berubah
+## What does not change
 
-- **`level` bukan milikmu.** `arm`/`disarm` menolak tanpa `/dev/tty`, dan worker ini juga tidak
-  memanggilnya. Kalau tick hanya menulis `OBSERVED`, itu artinya tangan masih `observe` dan yang
-  bisa menaikkannya hanya operator dari terminal.
-- **`mode` OFF = diam.** Tidak ada klaim, tidak ada ketikan.
-- **Tree kotor = jangan klaim.** §6 tidak punya pengecualian mode; yang menahan adalah
-  `night_state.blocking`, dan itu dibaca, bukan ditebak.
-- **Satu perintah aktif per engine.** Kamu tidak menumpuki pekerjaan yang sedang berjalan.
-- **Push butuh vonis.** `python3 tools/work_order.py push-gate` keluar nol hanya kalau ada
-  `push_verified` yang menyebut sha-nya. Tanpa vonis: commit berhenti lokal dan masuk digest.
-- **Jangan mengarang pekerjaan.** `ensure_idle_item` hanya menulis baris kalau ledger menunjukkan
-  utang yang terukur. Membuat pekerjaan supaya terlihat sibuk adalah kegagalan, bukan produktivitas —
-  dan sejak malam ini, baris karangan juga tidak boleh lagi menyalip pekerjaan yang operator minta.
+- **`level` is not yours.** `arm`/`disarm` refuse without `/dev/tty`, and this worker never calls
+  them either. A tick that only writes `OBSERVED` means the hand is still `observe`, and only the
+  operator can raise it, from a terminal.
+- **`mode` OFF means silence.** No claim, no typing.
+- **A dirty tree means no claim.** §6 has no mode exception; what holds you is
+  `night_state.blocking`, and it is read, not guessed.
+- **One active command per engine.** You do not pile work onto a session that is already running.
+- **A push needs a verdict.** `python3 tools/work_order.py push-gate` exits zero only when a
+  `push_verified` event names that sha. Without a verdict the commit stays local and enters the
+  morning digest.
+- **Do not invent work.** `ensure_idle_item` writes a row only when the ledger shows measured debt.
+  Creating work to look busy is a failure, not productivity — and since tonight, an invented row may
+  no longer overtake the work the operator asked for either.
 
-## Cara mematikan (operator, tanpa perlu izin AI mana pun)
+## How to shut it down (operator, without any AI's permission)
 
 ```
-systemctl --user stop irsofka-awakener.timer     # bangun berhenti
-python3 tools/work_order.py disarm               # tangan turun ke observe
-python3 tools/work_order.py autopilot off        # mesin berhenti claim
+systemctl --user stop irsofka-awakener.timer     # waking stops
+python3 tools/work_order.py disarm               # hand drops to observe
+python3 tools/work_order.py autopilot off        # machine stops claiming
 ```
