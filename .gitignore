@@ -101,3 +101,5 @@ tools/archive/
 # ============================================================
 # engine-rust/assets/fonts/*.woff2  -> font UI, ~500 KB
 # icon.png                          -> ikon aplikasi desktop
+# Tripo3D API key (prepared path, no credits spent). Real value; repo is public.
+config/tripo.json
