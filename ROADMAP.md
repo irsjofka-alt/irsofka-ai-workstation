@@ -154,6 +154,27 @@ pertama kalinya. Yang ✅ ini klaim adalah: **integrasi terpasang dan menghasilk
 Angka wajah di baris terakhir itu sendiri adalah pelajaran: laporan node menulis 5.406.248, berkasnya
 berisi 99.810. Yang dipercaya adalah hitungan ulang, bukan teks node.
 
+### Gemini BYOK as a collaboration surface — measured, not assumed
+
+The operator's own Google AI Studio pool (5 slots, 3 real keys, PRO accounts) is now a first-class
+engine in the workstation rather than a file only an agent edits. `tools/byok.py` owns the key file,
+`/api/byok` serves it, and Station renders a **Gemini BYOK** view showing each slot's length, shape
+and 12-character fingerprint — never the key itself. Keys do not pass through process arguments
+(`ps` would show them to every user on the machine): a POST writes the body to a `0600` file and
+hands the child only its path, which the child deletes on read.
+
+Rotation follows the rule the Unreal plugin already implements: **429 rotates the key, a capacity
+signal (503) escalates the model on the same key** — because Google meters quota per model, not per
+key. Measured on this pool:
+
+| Capability | Result |
+|---|---|
+| `gemini-3.8-flash` | ✅ works — used to audit the held diff |
+| `gemini-4-argon` | ❌ 429 on **all three keys** including PRO, even after the plan was renewed; `-latest`/`-preview` are 404, so the base name is right |
+| `veo-3.1` (+fast/+lite) | ⚠️ route exists — `predictLongRunning` answers 429, not 404 — but this pool's `generateContent` path cannot call it. Video needs its own operation-polling client. |
+| `nano-banana-2.1`, `nano-banana-pro`, native-audio | ➖ visible in `ListModels` (63 models), never called |
+| **music / Lyra** | ❌ 404 on every name tried, on non-PRO **and** PRO keys, and no `lyra`/`music` entry in the model list. The operator states it is available on the model side; that is recorded as a statement, not as a route this workstation can use. |
+
 Original plan: ComfyUI HTTP API (`:8188`) integration via a `comfy_workflow` MCP tool sharing the same
 VRAM gate, to prevent resource contention with local LLMs and graphical viewports.
 

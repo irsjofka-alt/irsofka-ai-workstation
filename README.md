@@ -172,6 +172,17 @@ Local LLMs operate under strict constraints:
 ollama ps        # must be empty following verification
 ```
 
+## Gemini BYOK — the operator's own model pool
+
+Three of the workstation's roles can be served by the operator's Google AI Studio keys instead of
+the CLI subscriptions: an independent verifier that does not draw on the same quota as the engine
+writing the code, a resolver rung for decisions that would otherwise wake a human, and the design
+surface for image/video/audio work. It is configured from **Station → Gemini BYOK**, not by an
+agent editing files, and the screen shows fingerprints rather than secrets. What the pool can
+call today is measured in `ROADMAP.md` under
+*Gemini BYOK as a collaboration surface* — including the two things it cannot: `gemini-4-argon`
+(quota refused on every key) and music generation (no route through this API at all).
+
 ## MCP Servers — the workstation's hands
 
 Four MCP servers are registered in **both** CLIs (verified: `engines/qoder/settings.json` and
