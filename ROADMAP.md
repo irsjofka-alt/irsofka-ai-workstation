@@ -1378,11 +1378,44 @@ the upstream, the version installed, and the install command instead.
 which is why an unattended loop could not work on it — see `AUTO_PILOT.md` "TASK DAHULU, PENAJAMAN
 TERAKHIR"):
 
-| repo | on disk | remote | registered in CLI | wheel | ledger row |
+**Ledger state of the three repos, re-measured 2026-10-15 23:5x** (the table below this one is the
+20:2x snapshot; it is kept because it is the state that made the loop drift, not because it is
+current):
+
+| repo | on disk | remote | registered in CLI | gate result | ledger row |
 |---|---|---|---|---|---|
-| IRSofka ComfyUI MCP | yes, `~/Apps/mcp/irsofka-comfyui-mcp` (server.py, vram.py, LICENSE, README, pyproject) | **none** (`git remote get-url origin` fails) | **0 of 2** (`grep irsofka-comfyui-mcp` in `~/.qoder/settings.json` and `~/.gemini/settings.json`: no match) | **no `dist/`** | `F11/MCP-1` id 294, `origin='roadmap'` |
-| IRSofka Blender MCP | no such directory | n/a | n/a | n/a | `F11/MCP-2` id 295 |
-| IRSofka Unreal Engine MCP | no such directory (the plugin lives inside the engine project) | n/a | n/a | n/a | `F11/MCP-3` id 298 (`depends_on` 297, so not offerable until 297 is green) |
+| IRSofka ComfyUI MCP | yes, `~/Apps/mcp/irsofka-comfyui-mcp` | private, `irsofka-comfy-mcp`, `main` at pushed sha | **2 of 2** engines | `61/61` selftest | `F11/MCP-1` id 294 — **COMPLETED** |
+| IRSofka Blender MCP | yes, `~/Apps/mcp/irsofka-blender-mcp` (server.py, bridge.py, vram.py, LICENSE, UPSTREAM, README, pyproject) | local only, first commit `bc4eae3`, no remote yet | **2 of 2** engines | `28/28` selftest; live round-trip against Blender 5.2.2 measured | `F11/MCP-2` id 295 — **COMPLETED** |
+| IRSofka Workstation MCP | `~/Apps/mcp/irsofka-workstation-mcp` (server.py, in build) | none yet | not yet | `--selftest` in progress | `F11/MCP-3` id 298 — WORKING, unblocked once 297 went green |
+
+**Scope line that must be read literally.** `F11/STEP-0` (id 297) is titled "write the round-trip
+probe, then fix `set_transform`/`get_transform` and prove the spawn class". What 297 delivered is
+the probe, the measurement, and the proof of the spawn class; the C++ change did **not** land in
+297, because it needs either a module rebuild with the editor closed or Live Coding keystrokes in
+the operator's live session, and an unattended run may not do either. The fix is carried by
+`F11/STEP-0b` (id 301), whose gate `tools/ue_bridge_probe.py --allow-mutation --strict` is red by
+design until the plugin changes, and whose status is **HUMAN** with decision 55 (escalated: an
+irreversible choice is not delegated to any engine). A reviewer correctly called the closure of 297
+an overstatement against its title; the record stands as written rather than being quietly edited,
+and this paragraph is the correction.
+
+What the probe measures, and what it found (all of it reproducible with one command):
+
+- framing read from `IRSofkaDispatcher/Private/IRSofkaSocketServer.cpp`: newline-terminated JSON on
+  `127.0.0.1:9877`, one connection per command, handlers executed synchronously on the GameThread.
+- `spawn /Script/Engine.StaticMeshActor` → `class=StaticMeshActor`; written location
+  `[-45.5, 67.25, -8.125]`, rotation `[10,20,30]`, scale `[2,1.5,0.5]` all read back identical,
+  10–15 ms per command.
+- defect 1: a bare class name makes `LoadClass` return null and the handler fall back to
+  `AActor::StaticClass()`, which has no RootComponent — every later transform is a silent no-op
+  while all three calls answer SUCCESS, and the spawn reply echoes the *requested* location.
+- defect 2: `ActionSetTransform` returns only `{"status":"SUCCESS"}` and never calls `Modify()` or
+  a transaction, so a write cannot be audited from its reply and the level may not be marked dirty.
+- the station-side answer, already built in `irsofka-workstation-mcp`: resolve short class names to
+  `/Script/Engine.*` before sending, refuse to send one that cannot be resolved, and read the
+  transform back — reporting `changed` from the editor's own numbers and `DEGRADED` when SUCCESS
+  did not actually move anything.
+
 
 Four rows (294, 295, 297, 298); three offerable now, 298 gated behind 297; all gates **red today and meant to be red**; the first seed of MCP-3 was parked as id 296 rather than deleted, because its gate claimed to measure the bridge while it only proved a README exists. Each gate is a
 `check_command` in `ROADMAP_ITEMS`, so `work_order.py seed --roadmap` re-derives them and the queue

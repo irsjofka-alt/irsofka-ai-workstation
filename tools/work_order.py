@@ -3043,7 +3043,7 @@ ROADMAP_ITEMS = [
      # socket-nya TIDAK ada di dokumentasi skill (saya memanggilnya lewat MCP, bukan lewat mentah),
      # jadi menulisnya tanpa membaca `FIRSofkaSocketServer` adalah menebak — dan alat ukur yang
      # ditebak lebih buruk dari tidak ada alat ukur. Editor tutup = probe tidak bisa lolos: benar.
-     "test -f tools/ue_bridge_probe.py && timeout 120 python3 tools/ue_bridge_probe.py"),
+     "test -f tools/ue_bridge_probe.py && timeout 180 python3 tools/ue_bridge_probe.py --selftest && timeout 180 python3 tools/ue_bridge_probe.py --allow-mutation"),
     # Utang yang DIUKUR oleh probe di atas, bukan dirasakan. Probe hari ini keluar 0 dengan
     # `engine_defects` berisi dua cacat plugin; dengan --strict ia keluar 1 selama cacat itu ada.
     # Gerbang yang merah karena pekerjaannya belum selesai adalah gerbang yang bekerja — berbeda
@@ -3059,11 +3059,11 @@ ROADMAP_ITEMS = [
     ("f11step0b", "F11/STEP-0b IRSofkaStationCore: hentikan fallback AActor diam-diam dan buat "
                   "set_transform membalas transform yang mendarat (butuh rebuild modul plugin)",
      "build", ["f11step0"],
-     "timeout 120 python3 tools/ue_bridge_probe.py --strict"),
-    # Namanya IRSofka WORKSTATION MCP, bukan "Unreal Engine MCP": yang dimiliki repo ini adalah sisi
-    # mesin dari jembatan (server, transport, gerbang), sedangkan plugin UE tetap artefak terpasang
-    # di proyek engine dan menyebut merek Epic di nama repo kita hanya menambah masalah merek dagang
-    # tanpa menambah informasi.
+     "timeout 180 python3 tools/ue_bridge_probe.py --allow-mutation --strict"),
+    # Namanya IRSofka WORKSTATION MCP, bukan "<engine brand> MCP": yang dimiliki repo ini adalah sisi
+    # mesin dari jembatan (server, transport, gerbang), sedangkan plugin editor tetap artefak
+    # terpasang di proyek engine; menempelkan merek dagang pihak ketiga pada nama repo kita hanya
+    # menambah masalah merek tanpa menambah informasi.
     ("f11mcp_workstation", "F11/MCP-3 IRSofka Workstation MCP: jembatan sisi mesin berdiri sendiri "
                            "sebagai repo sampai ke origin (setelah F11/STEP-0 hijau, bukan sebelum)",
      "build", ["f11step0"],
