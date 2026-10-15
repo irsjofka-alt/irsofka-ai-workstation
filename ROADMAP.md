@@ -1231,6 +1231,27 @@ open: rename one module, or retire the installed plugin and deploy the rebrand i
 what the operator's live editor has loaded (pid 532402 holds the port-9877 binary), so neither is an
 engine's call.
 
+Measured further on 2026-10-15, and the collision turned out to be worse than "cannot load
+together" — and asymmetric, which matters for choosing:
+
+| build | result |
+|---|---|
+| `RunUAT BuildPlugin` on the **rebrand** (26 modules) | **fails in 3.86 s, 0 compile actions**, six errors of the form `Module 'IRSofkaBlueprint' (Marketplace) should not reference module 'IRSofkaCore' (Plugin). Hierarchy is Plugin -> Project -> Marketplace -> …` |
+| `RunUAT BuildPlugin` on the **installed** plugin, same moment, same machine | `BUILD SUCCESSFUL`, 46.39 s |
+
+So the two trees do not merely refuse to load side by side: while both are present, **the rebrand
+cannot be built at all**, because UBT resolves the installed Marketplace modules' `IRSofkaCore`
+reference onto the staging Plugin-tier module and the hierarchy rule forbids Marketplace → Plugin.
+The installed plugin is unaffected. Any "rename one module" answer to #51 therefore has to say
+*which* side gets renamed, because the pain is not symmetrical.
+
+The rebrand is also not the smaller project: its `IRSofkaBpToCpp` is 783 lines across 8 files with a
+154-line type-mapper self-test that its history records as passing **23/23 in a deployed Linux build**
+on 2026-10-10 — evidence that a build of it succeeded at some point, on some layout, which is not the
+layout on this machine today. Against that, the exporter written here (626 lines) is compile-verified
+only, with no runtime test. Choosing between them is a real comparison, not a default to the newest
+file.
+
 A second finding belongs to the same decision and must not ride along silently: the rebrand's
 `IRSofkaCore::StartupModule` calls `AutoEnableCompanionPlugins()`, which force-enables **17** companion
 plugins through `IProjectManager::SetPluginEnabled` in *whatever project loads the plugin* (the 17 names
