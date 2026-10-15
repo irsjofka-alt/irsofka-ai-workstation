@@ -13,7 +13,7 @@ F3 Telemetry & SQL State          ✅ Completed
 F4 Native Rust Window GUI         ✅ Completed
 F5 Memory & Session Integrity     ✅ Completed (Oct 6)
 F6 Cross-Verification Ecosystem   🟡 In Progress
-F7 Creative Studio (ComfyUI/UE5)  🟡 In Progress (weights on disk; first real run produced a file)
+F7 Creative Studio (ComfyUI/UE5)  ✅ Completed (scope: studio wired + producing; see the scope note — UE handoff is not in it)
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
@@ -138,7 +138,21 @@ Pending:
   test fail, restore. Removing the success sweep leaves one grandchild alive in the Rust test and one
   in the Python selftest. `cargo test` is now 3 tests and is a deploy gate.
 
-## F7 — Creative Studio 🟡
+## F7 — Creative Studio ✅
+
+**Catatan cakupan (kenapa ✅ ini bukan berarti "selesai segalanya").** Ditutup atas keputusan operator
+2026-10-15 10:4x, setelah core ComfyUI mencapai v0.40.0 dan studio menghasilkan berkas nyata untuk
+pertama kalinya. Yang ✅ ini klaim adalah: **integrasi terpasang dan menghasilkan**.
+
+| Masuk cakupan ✅ (terukur) | TIDAK masuk cakupan ✅ |
+|---|---|
+| ComfyUI core v0.40.0, `outdated: false`; comfy-cli 1.22.0; pack Trellis2 1.0.27, Manager 3.42, BiRefNet | Satu objek pun yang **masuk Unreal Engine** — rantai UE belum pernah dijalankan |
+| Bobot nyata di disk: 3 diffusion + 2 text encoder + 3 VAE, satu root bersama CLI dan Desktop | Retopologi/UV yang **di-review secara visual** dan dinyatakan layak game |
+| Gambar pertama: `17d7b8e8_000.png` 1.468.916 B, PNG 832×1216, Z-Image-Turbo int8, 8 langkah cfg 1, nol kredit | Gerbang VRAM yang **ditegakkan penjadwal** — masih aturan yang harus dibaca engine (`free_memory` melepas 7.627 MiB sebelum run 3D) |
+| Model pertama: `9c23b91f_008.glb` 23.136.068 B, glTF 2.0, 99.810 wajah (diukur ulang di Blender headless) | Jalur video/audio/musik (Veo 3.1, Nano Banana 2.1, native-audio, Lyra) — **belum satu pun dipanggil**; lihat `brain/memory/reference-byok-design-capabilities.md` |
+
+Angka wajah di baris terakhir itu sendiri adalah pelajaran: laporan node menulis 5.406.248, berkasnya
+berisi 99.810. Yang dipercaya adalah hitungan ulang, bukan teks node.
 
 Original plan: ComfyUI HTTP API (`:8188`) integration via a `comfy_workflow` MCP tool sharing the same
 VRAM gate, to prevent resource contention with local LLMs and graphical viewports.
