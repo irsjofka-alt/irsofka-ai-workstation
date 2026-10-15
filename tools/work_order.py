@@ -2906,8 +2906,14 @@ ROADMAP_ITEMS = [
      "timeout 300 python3 ~/Apps/mcp/irsofka-comfyui-mcp/server.py --selftest && "
      "git -C ~/Apps/mcp/irsofka-comfyui-mcp remote get-url origin && "
      "git -C ~/Apps/mcp/irsofka-comfyui-mcp rev-parse origin/main && "
-     "grep -q irsofka-comfyui-mcp ~/.qoder/settings.json && "
-     "grep -q irsofka-comfyui-mcp ~/.gemini/settings.json"),
+     # Path registri dibaca dari tempat yang benar, bukan dari nama shim. Gerbang versi pertama
+     # menanyakan `~/.gemini/settings.json`, dan berkas itu TIDAK ADA: `~/.gemini` hanya berisi tiga
+     # symlink (antigravity, antigravity-cli, config), dan yang dibaca Antigravity CLI adalah
+     # `engines/antigravity-cli/settings.json`. Sebuah gerbang yang menunjuk berkas yang tidak ada
+     # tidak gagal keras — ia hanya tidak akan pernah lolos, dan itu terlihat seperti pekerjaan yang
+     # belum selesai padahal sudah.
+     "grep -q irsofka-comfyui-mcp ~/.ai-station/engines/qoder/settings.json && "
+     "grep -q irsofka-comfyui-mcp ~/.ai-station/engines/antigravity-cli/settings.json"),
     ("f11mcp_blender", "F11/MCP-2 IRSofka Blender MCP: turunan dari basis PERMISIF, dilabeli BSL atas "
                        "keputusan operator, dan bukan turunan AGPL", "build", None,
      # VERSI PERTAMA GERBANG INI SALAH ARAH dan reviewer menemukannya: ia menuntut kata
