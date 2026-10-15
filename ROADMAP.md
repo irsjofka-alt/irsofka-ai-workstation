@@ -17,7 +17,7 @@ F7 Creative Studio (ComfyUI/UE5)  ✅ Completed (scope: studio wired + producing
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
-F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP written independently — no code copied: 61/61 selftest + live DENY and live ALLOW**; UE plugin path bug fixed pending rebuild; license chosen: BSL 1.1)
+F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP written independently — no code copied: 61/61 selftest + live DENY and live ALLOW**; UE plugin: BYOK path fix + new Blueprint->C++ exporter **compile verified** via RunUAT BuildPlugin (runtime still unverified; deploy blocked on IRSofkaCore module-name collision); license chosen: BSL 1.1)
 ```
 
 ## F1–F4 — Foundation (Completed & Re-verified Oct 6)
@@ -1183,6 +1183,35 @@ ALLOW-path test above got real node wiring without guessing a single input name.
 changes what the other engine sees), and `python -m build` — this system Python has no `setuptools` and
 `python3 -m venv` cannot seed one offline, so the wheel is unverified and the README says so. The
 `mcp/irsofka-comfyui-mcp/README.md` pointer carries the same numbers.
+
+### The build command that lies: `Build.sh` reports Succeeded while compiling zero plugin files
+
+Measured 2026-10-15, and it invalidated a claim I had already made in this document. Three commands
+(`Build.sh IRSofkaEngineEditor … -Project=…`, `Build.sh UnrealEditor …`, and the same with
+`-ForPlugin=…`) all return `Result: Succeeded` while performing **no compile action on the plugin at
+all**. Not a stale-cache illusion: touching an existing plugin source and rebuilding still yields
+nothing, and the target receipts settle it — 3186 build products in `IRSofkaEngineEditor.target`,
+7345 in `UnrealEditor.target`, and not one is an IRSofka module. The plugin is simply not in either
+graph.
+
+The route that does build it is `RunUAT.sh BuildPlugin` run **from the repo** (and note it lives in
+`BatchFiles/`, not `BatchFiles/Linux/`; piping UAT through `| tail` hides a missing-file failure
+behind `tail`'s exit code 0). First run here: `BUILD SUCCESSFUL`, `UAT_EXIT=0`, 29 compile actions,
+45.29 s, seven module `.so`, and `nm -DC` finds 8 `FIRSofkaCppExporter` symbols in
+`libUnrealEditor-IRSofkaBlueprint.so` — present in the binary, not merely accepted by a compiler.
+
+What that first real compile found is the reason this section exists. Five APIs in new exporter code
+were wrong for 5.8 (`CPF_EditAnywhere`/`CPF_EditInstanceOnly`/`CPF_BlueprintReadWrite` do not exist;
+`UEdGraphPin::PinDisplayName` is `PinFriendlyName`; `UBlueprint::EventGraph` is an `EventGraphs` array;
+`FText` has no `IsNone()`), and **three were in the BYOK path fix recorded above as "fixed pending
+rebuild"** — `GetEnvVariable`/`HomeDir` are `FPlatformMisc::GetEnvironmentVariable`/`UserHomeDir()`,
+and the include I wrote as `HAL/PlatformFilemanager.h` has the wrong capitalisation, meaning nothing
+had ever compiled that file. The fix was real but unverified; "pending rebuild" was doing a lot of
+work in that sentence, and the rebuild disagreed with it.
+
+Also caught by reading rather than building: my first `EditAnywhere`/`EditInstanceOnly` condition was
+inverted, and it compiled happily. A build proves a file parses; it does not prove the flags mean what
+the code says.
 
 ### Ordered work, each with a numeric gate
 
