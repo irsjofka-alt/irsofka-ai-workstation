@@ -17,7 +17,7 @@ F7 Creative Studio (ComfyUI/UE5)  ✅ Completed (scope: studio wired + producing
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
-F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP built clean-room: 61/61 selftest + live DENY and live ALLOW**; UE plugin path bug fixed pending rebuild; license chosen: BSL 1.1)
+F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP written independently — no code copied: 61/61 selftest + live DENY and live ALLOW**; UE plugin path bug fixed pending rebuild; license chosen: BSL 1.1)
 ```
 
 ## F1–F4 — Foundation (Completed & Re-verified Oct 6)
@@ -1002,9 +1002,11 @@ below are recorded here so a later session does not re-derive them or quietly re
 Chosen over PolyForm Noncommercial, Apache-2.0 and a private EULA, because it is the only one that
 satisfies all three of the operator's demands at once. Verified terms:
 [Business Source License 1.1](https://mariadb.com/bsl11/) restricts **Production Use** by default,
-the Licensor may add an **Additional Use Grant**, and on the **Change Date** — which in 1.1 must be
-within four years and whose **Change License must be GPL-compatible** — the work converts to an open
-license ([fossa overview](https://fossa.com/blog/business-source-license-requirements-provisions-history/),
+the Licensor may add an **Additional Use Grant**, and on the **Change Date** the work converts to an
+open license whose admissibility is set by covenant 1 (GPL-v2-or-later compatible). The four years is
+**not** a covenant — covenant 3 only says "To specify a Change Date." The figure comes from the second
+Terms paragraph, which converts the work on the Change Date **or its fourth anniversary of public
+availability, whichever comes first**: a longer date is permitted and simply loses that race ([fossa overview](https://fossa.com/blog/business-source-license-requirements-provisions-history/),
 [Wikipedia](https://en.wikipedia.org/wiki/Business_Source_License)).
 
 | demand | how BSL answers it |
@@ -1013,7 +1015,7 @@ license ([fossa overview](https://fossa.com/blog/business-source-license-require
 | "saya ingin pamer sebagai showcase" | source is readable from day one; the Additional Use Grant can explicitly allow personal, evaluation, and non-production use so a visitor can actually run it |
 | "kalau ada yang mau beli, silakan" | Production Use *requires* a license from the licensor — that is the product being sold, with no renegotiation of terms later |
 | the escape hatch | Change Date (4 years, per version) converts it to the MIT License, so the asset still becomes open even if the business never sells a licence |
-| GPL compatibility of the Change License | MIT is compatible with GPL-v2, so it satisfies covenant 1; **Apache-2.0 would not** — that is why the Change License is MIT and not Apache |
+| admissibility of the Change License | covenant 1 accepts GPL-v2 **or any later version, or a licence compatible with either**. MIT qualifies under both readings; **Apache-2.0 qualifies too** (compatible with GPL-3.0), so it was never disqualifying — a claim I made and retracted inside one week |
 
 #### Correction: the licence text I shipped was a scraped page, and the page is flattened
 
@@ -1054,11 +1056,16 @@ repos. Nothing is left on PolyForm Noncommercial; `README.md`, `INSTALL.md` and
 `THIRD_PARTY_NOTICES.md` were changed with it, and each release still carries its own Change Date, so
 new work never "un-converts" old work.
 
-**Change License is MIT, not Apache-2.0 — and that is a correction, not a preference.** BSL 1.1's
-Covenants of Licensor require the Change License to be GPL-v2-compatible, and Apache-2.0 is expressly
-*not* compatible with GPLv2, so the Apache option I first recommended would have made our own licence
-non-compliant with the terms it borrows. MIT satisfies the covenant and gives the same practical end
-state the operator wanted: fully free code after four years. A separate repository is still required
+**Change License: MIT — and the reason I first gave for it was wrong, so both steps are recorded.**
+The push audit was right that Apache-2.0 is not GPL-v2-compatible; it was wrong, and so was I, that
+this disqualifies it as a Change License. Covenant 1 admits the GPL "Version 2.0 **or any later
+version**, or a license that is compatible with GPL Version 2.0 **or a later version**", and
+Apache-2.0 is compatible with GPL-3.0. So Apache-2.0 was always admissible, and "the Apache option
+would have made our own licence non-compliant" is a sentence I should not have written. MIT is still
+what we ship, for the honest reason: it is compatible with GPL-v2 *and* v3, so it satisfies covenant 1
+under either reading, and it gives the same end state the operator asked for — fully free code after
+four years. Choosing among admissible Change Licenses is a business call for the operator, never an
+engine's. A separate repository is still required
 for anything AGPL-derived, because AGPL forbids exactly the additional restriction BSL imposes.
 
 ### "Make the architecture complicated so it cannot be rebuilt" — recorded as rejected
@@ -1102,15 +1109,23 @@ One codebase, three states, and the plugin must never assume ai-station exists:
 
 ### Shipped first because it was the only part with no unknowns: the ComfyUI repo
 
-Built 2026-10-15 at `~/Apps/mcp/irsofka-comfyui-mcp` (own repo, BSL 1.1, two commits). Written
-clean-room against ComfyUI's HTTP API on `127.0.0.1:8188` — no upstream MCP code read, standard library
-only, and that promise is *checked* by an AST scan inside the selftest rather than asserted in prose,
-because a third-party import would quietly put a licence in the mouth of a server that claims to have
-none. Forking `artokun`/`joenorton` was the other route and is now moot for this one: writing ~900 lines
-against a documented API was cheaper than auditing someone else's, and it produced the one feature none
-of them have.
+Built 2026-10-15 at `~/Apps/mcp/irsofka-comfyui-mcp` (own repo, BSL 1.1). Written against ComfyUI's own
+HTTP API on `127.0.0.1:8188`, standard library only — and that last promise is *checked* by an AST scan
+inside the selftest rather than asserted in prose, because a third-party import would quietly put a
+licence in the mouth of a server that claims to have none.
 
-**The feature is that a submit is gated, not queued first and apologised to later.** `comfy_queue` calls
+**What "clean room" does and does not mean here, stated because the first version of this section
+overclaimed it.** No code was copied, translated or adapted. But `comfy-mcp`'s `server.py` was read
+earlier in the same session — to count its `@mcp.tool` definitions for the tool-count correction in
+`mcp/README.md` — and its `LICENSE` and `NOTICE` were read too. So "no upstream MCP code read" is
+false, and the strict sense of clean room (implementers never see the original) is not what happened.
+What is true is the weaker, useful claim: the implementation was written from ComfyUI's documented HTTP
+behaviour, measured against a live server, and no line of theirs is in the tree. Exposure happened;
+derivation did not. Anyone weighing the AGPL question should read it as exactly that and no more.
+
+**What this server does is gate a submit before it is sent, instead of queueing first and apologising
+later.** No comparison of other servers' submit paths was performed, so that is a description of this tree
+and not a claim about theirs. `comfy_queue` calls
 `tools/gpu_gate.py` before `POST /prompt`, so F11 step 4's VRAM discipline is enforced at the second
 boundary the operator actually crosses — the MCP call — and not only at the scheduler.
 
@@ -1174,7 +1189,7 @@ the upstream, the version installed, and the install command instead.
 |---|---|---|---|
 | IRSofka Unreal Engine MCP | entirely ours | **BSL 1.1**, no strings attached | it links UE headers: ship no Epic content, "Unreal Engine" is Epic's mark. **Fab/marketplace terms not read on this machine** — do not assume they fit a source-available licence |
 | IRSofka Blender MCP | depends on the base | MIT base → any licence incl. BSL; **v0.4.x base → AGPL forever** | the installed 218-tool server is AGPL since v0.4.0 and its commercial offer was **withdrawn**, so building on it forecloses selling. Clean bases: `ahujasid/mcp-for-blender` (MIT, 30,872★) or RFingAdam `v0.3.0` (MIT). Decide **before** writing code; this is not reversible afterwards |
-| IRSofka ComfyUI MCP | ours, if written clean-room | free choice, no fee | ComfyUI core is **GPL-3.0** (measured at `~/ComfyUI-Installs/ComfyUI/ComfyUI/LICENSE`), but GPL bites on *linking*, not on speaking HTTP to a separate process — comfy-mcp's own `NOTICE` records exactly that distinction for GPL `comfy-cli`. So: implement against `127.0.0.1:8188` ourselves, or fork a permissive client (`artokun/comfyui-mcp` MIT, `joenorton/comfyui-mcp-server` Apache-2.0). Copying `comfy-mcp` instead means AGPL or paying Comfy Org |
+| IRSofka ComfyUI MCP | ours — **written, 2026-10-15** (see "Shipped first…" above: no code copied; their `server.py` was read once, for tool counts, so the strict blind-implementation sense of clean-room does not apply) | free choice, no fee | ComfyUI core is **GPL-3.0** (measured at `~/ComfyUI-Installs/ComfyUI/ComfyUI/LICENSE`), but GPL bites on *linking*, not on speaking HTTP to a separate process — comfy-mcp's own `NOTICE` records exactly that distinction for GPL `comfy-cli`. So: implement against `127.0.0.1:8188` ourselves, or fork a permissive client (`artokun/comfyui-mcp` MIT, `joenorton/comfyui-mcp-server` Apache-2.0). Copying `comfy-mcp` instead means AGPL or paying Comfy Org |
 
 **Naming is a licence term, not branding.** "Blender", "ComfyUI"/"Comfy Org" and "Unreal" are other
 parties' marks; descriptive use ("MCP for Blender") is fine, implying official status is not, and

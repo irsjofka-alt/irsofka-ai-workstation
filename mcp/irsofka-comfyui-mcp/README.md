@@ -3,10 +3,12 @@
 Code lives in `~/Apps/mcp/irsofka-comfyui-mcp` (own repository, BSL 1.1, not merged into this one).
 Registered nowhere yet: `python3 server.py` runs it over stdio today.
 
-This is the server `ROADMAP.md` F11 step 1 asked for — written clean-room against ComfyUI's
-documented HTTP API after `comfy-mcp` was ruled out as a base, because it is AGPL-3.0-or-later (or a
-paid commercial licence) and AGPL forbids exactly the restriction BSL adds. Nothing of theirs was read
-into our tree; the only thing shared with a ComfyUI is the wire.
+This is the server `ROADMAP.md` F11's three-repo plan calls **IRSofka ComfyUI MCP**. It is *not* F11
+step 1 (that step is the comparison against Epic's own MCP tool surface); it is F11 step 4's VRAM work
+brought forward to the boundary where it could actually be finished. It was written against ComfyUI's
+documented HTTP API after `comfy-mcp` was ruled out as a base, because it is AGPL-3.0-or-later (or a paid
+commercial licence) and AGPL forbids exactly the restriction BSL adds. **No line of theirs is in our tree** — but their `server.py` was read once, to count tool definitions for `mcp/README.md`, so "nobody
+here ever looked at it" is not a claim this file makes. What is shared with a ComfyUI is the wire.
 
 What it does that the installed one does not: **`tools/gpu_gate.py` is consulted before `POST /prompt`.**
 A job the card cannot pay for is refused with the rule that matched, the megabytes needed, the
