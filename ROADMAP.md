@@ -1085,6 +1085,40 @@ One codebase, three states, and the plugin must never assume ai-station exists:
    and states on that page that it runs LLM-generated code "without any guards in place to protect your
    data" — which is the sandbox and transaction work above, expressed as their gap.
 
+### Target shape: one workstation repo, three MCP repos — and each has a different licence route
+
+Decided with the operator on 2026-10-15. Splitting the repos breaks nothing: MCP registration is
+already per-machine and untracked, so `ai-station` keeps its own tree and simply points at three
+independent servers. **No git submodules** for code that is about to be rewritten heavily — a submodule
+pins a commit, and the pin becomes the bug when the child repo moves. Each `mcp/*/README.md` records
+the upstream, the version installed, and the install command instead.
+
+| repo | whose code | licence route | the trap |
+|---|---|---|---|
+| IRSofka Unreal Engine MCP | entirely ours | **BSL 1.1**, no strings attached | it links UE headers: ship no Epic content, "Unreal Engine" is Epic's mark. **Fab/marketplace terms not read on this machine** — do not assume they fit a source-available licence |
+| IRSofka Blender MCP | depends on the base | MIT base → any licence incl. BSL; **v0.4.x base → AGPL forever** | the installed 218-tool server is AGPL since v0.4.0 and its commercial offer was **withdrawn**, so building on it forecloses selling. Clean bases: `ahujasid/mcp-for-blender` (MIT, 30,872★) or RFingAdam `v0.3.0` (MIT). Decide **before** writing code; this is not reversible afterwards |
+| IRSofka ComfyUI MCP | ours, if written clean-room | free choice, no fee | ComfyUI core is **GPL-3.0** (measured at `~/ComfyUI-Installs/ComfyUI/ComfyUI/LICENSE`), but GPL bites on *linking*, not on speaking HTTP to a separate process — comfy-mcp's own `NOTICE` records exactly that distinction for GPL `comfy-cli`. So: implement against `127.0.0.1:8188` ourselves, or fork a permissive client (`artokun/comfyui-mcp` MIT, `joenorton/comfyui-mcp-server` Apache-2.0). Copying `comfy-mcp` instead means AGPL or paying Comfy Org |
+
+**Naming is a licence term, not branding.** "Blender", "ComfyUI"/"Comfy Org" and "Unreal" are other
+parties' marks; descriptive use ("MCP for Blender") is fine, implying official status is not, and
+`mcp-blender`'s README excludes its own project name and logo from the grant, so renaming is required
+anyway. Pattern to follow: `ahujasid/mcp-for-blender` states "Not affiliated with the official Blender
+Foundation" — product name first ("IRSofka MCP for Blender"), non-affiliation disclaimer in the README,
+none of their logos.
+
+### What BSL actually costs us, stated so it is not discovered later
+
+- It does not prevent copying; it makes copying a breach. Enforcement is ours to initiate.
+- External contributions mostly stop: nobody sends PRs to code they cannot use in production. If
+  contributions ever arrive, a **CLA is required**, otherwise contributors hold copyright inside our
+  own repository.
+- Competitors may re-implement from the public source. Licence law protects the expression, not the
+  function — and no amount of deliberate unreadability changes that either.
+- Administration: a Change Date and Change License must be set per version (1.1 requires a
+  GPL-compatible Change License, default the fourth anniversary of first publication).
+- Rejected trade honestly: if broad adoption or ecosystem acceptance ever matters more than the
+  sale, the answer is Apache-2.0, and that is a business decision for the operator, never an engine's.
+
 ### Facts measured here, so nobody re-derives them
 
 | subject | value | method |
@@ -1097,6 +1131,9 @@ One codebase, three states, and the plugin must never assume ai-station exists:
 | plugin socket | `127.0.0.1:9877`, **no authentication** | grep of `Source` |
 | plugin ↔ database | **none** (`postgres`/`sqlite`/`libpq` = 0 hits) — correct, ledger stays ai-station's | grep of `Source` |
 | VRAM/GC inside plugin | **none** (`CollectGarbage`/`VRAM`/`RenderResource` = 0 hits) | grep of `Source` |
+| ComfyUI core licence | **GPL-3.0** (`GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007`) | first lines of `~/ComfyUI-Installs/ComfyUI/ComfyUI/LICENSE` |
+| ComfyUI reachable | yes, `127.0.0.1:8188`, python pid 166974 | `ss -tlnp` |
+| permissive alternatives | blender: `ahujasid/mcp-for-blender` **MIT** 30,872★ pushed 2026-10-06 · comfy: `artokun/comfyui-mcp` **MIT** 825★ pushed 2026-10-14, `joenorton/comfyui-mcp-server` **Apache-2.0** 409★ | GitHub API (`license.spdx_id`, `stargazers_count`, `pushed_at`) |
 | live editor state today | bridge `UNAVAILABLE` when the editor is closed | `ue_world.get_all_actors` |
 
 ## Known Boundaries & Constraints
