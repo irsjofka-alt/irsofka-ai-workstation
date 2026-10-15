@@ -1186,9 +1186,36 @@ changes what the other engine sees), and `python -m build` — this system Pytho
 
 ### Ordered work, each with a numeric gate
 
-1. **Measure before claiming** — compare the tool surface of Epic's experimental
-   `ModelContextProtocol` / `MCPClientToolset` against the six domains. Gate: both counts. Until then
-   "ours is more powerful" is not written anywhere as a fact.
+0. **Measured defects in the live bridge — found by calling it, not by reading it (2026-10-15).**
+   `brain/skills/ue5-station/07-live-bridge-measurements.md` carries the repro; the two that block
+   everything else are: **transform does not round-trip** (`spawn` echoes the requested `[0,0,200]`,
+   `get_transform` reads `[0,0,0]` after two separate `set_transform` calls that each returned
+   `SUCCESS`, scale included), and **`spawn` cannot prove the class it made** (`StaticMeshActor`
+   reported as `"class":"Actor"`). Until the first is fixed, no placement this bridge performs is
+   verifiable, which makes every "I moved the actor" report from any engine on this workstation a
+   claim rather than a measurement. `ue_vision capture` also returns **246 504 base64 characters
+   (~61 600 tokens) for one 1800x746 frame**, over the MCP client's 25 000-token cap, and `frame`
+   reports no camera position — so the visual loop costs a file round-trip and cannot be used to
+   cross-check a transform either. Gate to close: the repro above run again with `get_transform`
+   returning the values that were set, and `capture` offering a `save_to` + sha256 instead of inline
+   base64. Owner: whoever rebuilds the plugin — the editor holds the binary, so this needs the
+   operator's editor closed.
+
+1. **Measure before claiming** — **DONE 2026-10-15, both counts.** Epic's `Experimental/ModelContextProtocol`
+   (186 files) is a transport and registry host, not a toolbox: of the **14** classes deriving from
+   `UToolsetDefinition` in this engine build, **11 sit under `Private/Tests/` or `Mocks/`**
+   (`UFakeToolset*`, `UMockToolsetDefinition`, `UToolCallAsyncResultReturnPropertyTest`). Only two are
+   shipped and neither touches a level: `UAIAssistantToolset` with **2** `UFUNCTION`s
+   (`GetProjectContext`, `GetDockedContext` — read-only context getters) and `UAgentSkillToolset` with
+   **5**. That is **7 callable functions, none of which edits an asset.** Ours: **6 tools, 38 named
+   actions**, counted out of `SKILL.md`'s own table — `ue_world` 16, `ue_blueprint` 8, `ue_material` 6,
+   `ue_media` 6, `ue_vision` 2, and `ue_pipeline` which names none because it takes an array of those
+   actions as its input — and they do move, spawn, delete, compile and capture a live editor. So "ours
+   is more powerful" stops being an assertion, with the honest half attached: Epic ships a *framework*
+   whose toolsets other people will write, so what was compared is "what exists today on this machine",
+   not "what the architecture allows". Until this line was written the claim appeared nowhere as a
+   fact, and it should not have.
+
 2. **Test `ResolvePinFuzzy` on PCG Graph and GAS** — it exists (`IRSofkaBlueprintSubsystem.h:29`) and
    is proven on Blueprint graphs only. Gate: fuzzy-hit rate before/after on a fixed pin-name corpus.
 3. **Wire rollback to a `DISPUTED` verdict** plus asset hashes before/after an operation. Gate: one
