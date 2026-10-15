@@ -1000,8 +1000,11 @@ below are recorded here so a later session does not re-derive them or quietly re
 ### License decision: BSL 1.1 for the plugin and any irsofka-owned MCP server
 
 Chosen over PolyForm Noncommercial, Apache-2.0 and a private EULA, because it is the only one that
-satisfies all three of the operator's demands at once. Verified terms:
-[Business Source License 1.1](https://mariadb.com/bsl11/) restricts **Production Use** by default,
+satisfies all three of the operator's demands at once. Terms as read from the
+[SPDX BUSL-1.1 text](https://github.com/spdx/license-list-data/blob/main/text/BUSL-1.1.txt) — the
+[mariadb.com/bsl11/ page](https://mariadb.com/bsl11/) is the licence's home but renders its covenants
+flattened (see the correction below), so it is background here and not the transcription source. BSL 1.1
+restricts **Production Use** by default,
 the Licensor may add an **Additional Use Grant**, and on the **Change Date** the work converts to an
 open license whose admissibility is set by covenant 1 (GPL-v2-or-later compatible). The four years is
 **not** a covenant — covenant 3 only says "To specify a Change Date." The figure comes from the second
@@ -1110,7 +1113,7 @@ One codebase, three states, and the plugin must never assume ai-station exists:
 3. **ai-station without the plugin** — headless only: cook, commandlets, build/UBT, config edits.
    It must refuse to *claim* live Blueprint editing; an unavailable engine reports `UNAVAILABLE`.
 
-### Shipped first because it was the only part with no unknowns: the ComfyUI repo
+### Shipped first because it was the only part that could be finished in one sitting: the ComfyUI repo
 
 Built 2026-10-15 at `~/Apps/mcp/irsofka-comfyui-mcp` (own repo, BSL 1.1). Written against ComfyUI's own
 HTTP API on `127.0.0.1:8188`, standard library only — and that last promise is *checked* by an AST scan
@@ -1143,8 +1146,11 @@ line. A positional `SequenceMatcher` over the SPDX span now reports, for **both*
 **What this server does is gate a submit before it is sent, instead of queueing first and apologising
 later.** No comparison of other servers' submit paths was performed, so that is a description of this tree
 and not a claim about theirs. `comfy_queue` calls
-`tools/gpu_gate.py` before `POST /prompt`, so F11 step 4's VRAM discipline is enforced at the second
-boundary the operator actually crosses — the MCP call — and not only at the scheduler.
+`tools/gpu_gate.py` before `POST /prompt`, so the same discipline F11 step 4 asks of the plugin is
+enforced at the boundary the operator actually crosses — the MCP call — and not only at the scheduler.
+**This is not step 4 complete and must not be read as such:** step 4's own gate is one TRELLIS.2 run that
+finishes without OOM, and every TRELLIS submit here has been refused (9966 MiB wanted against 7498 free),
+so that gate has never been reached, let alone passed.
 
 | gate | measured this machine |
 |---|---|
@@ -1159,7 +1165,9 @@ Three traps were found by measuring instead of assuming, and are encoded as test
 - The whole catalog is **1 951 939 bytes across 976 classes** — one careless call costs more context
   than an agent has, so the tool returns a *page of names* or a named node, never the catalog.
 - A UI-export workflow (`nodes`/`links`) is not the API form `POST /prompt` wants. It is refused here
-  with its own error name; posted, it produces a 400 that names neither format.
+  with its own error name; posted, it produces **500 "Server got itself in trouble"** (measured on this
+  machine 2026-10-15 with an empty UI export, which queued nothing) — an error that names neither the
+  format it got nor the format it wanted, which is the whole reason the refusal happens locally.
 
 One fact worth keeping so nobody re-derives it: a valid API graph does not have to be hand-written.
 `GET /history` returns the graph that produced each finished run inside `prompt[2]`, which is how the

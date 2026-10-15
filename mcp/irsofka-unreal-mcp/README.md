@@ -41,7 +41,8 @@ this change is inert until UBT recompiles `IRSofkaCore` — deliberately not tri
 
 ## License: decided 2026-10-15 — BSL 1.1
 
-Chosen in `ROADMAP.md` F11 because it is the only instrument that satisfies all three of the
+Chosen in `ROADMAP.md` F11 because, of the three routes compared there (BSL, PolyForm Noncommercial,
+private EULA), it is the only one that satisfies all three of the
 operator's demands at once: source readable as a showcase, copyright never transfers (so nobody can
 re-claim it), and Production Use requires a license purchased from him — with a Change Date that
 converts it to an open license if he later prefers adoption over selling. It is **not** OSI-approved

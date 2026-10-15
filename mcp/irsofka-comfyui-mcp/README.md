@@ -42,7 +42,8 @@ transport passing a mock.
 
 ## What is still owed before this is a release
 
-1. Register it in `config/…` for both CLIs — a per-machine act, deliberately not done here, because
+1. Register it in both CLIs' own MCP files — `engines/qoder/settings.json` (`mcpServers`) and
+   `engines/gemini_config/mcp_config.json` (`mcpServers`) — a per-machine act, deliberately not done here, because
    loading a new MCP server changes what the other engine sees.
 2. Build the wheel, or delete `pyproject.toml` and say the server runs from source.
 3. Decide the Blender twin. The operator's question — a powerful OSS base whose rights he can claim —
