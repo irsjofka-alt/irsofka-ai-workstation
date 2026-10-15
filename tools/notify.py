@@ -263,23 +263,21 @@ def worth_notifying(events, mute=None) -> tuple[bool, str]:
             return True, a
     for a in acts:
         c = classify(a)
+        # Tidak ada pemeriksaan `"urgent" in mute` di sini, dan itu disengaja. Baris itu pernah
+        # ada dan menjadi dead code sejak mute dibersihkan di atas — audit putaran keempat
+        # menemukannya. Bahayanya bukan baris mati, tapi apa yang ia yakinkan ke pembaca
+        # berikutnya: bahwa urgent bisa dibungkam, karena ada kode yang LOOKS like it tries.
         if c in ("urgent", "unknown"):
-            if c == "urgent" and "urgent" in mute:
-                continue
             return True, a
     # Alasan diam harus menyebut penyebab yang sebenarnya. Bentuk sebelumnya selalu menulis
     # `MUTED:<kelas>` selama ada config mute apa pun, jadi tick yang isinya hanya `note`
     # (CLOSED_NIGHT, OBSERVED) tercatat sebagai "dibungkam progress" padahal tidak ada satu pun
     # peristiwa berkelas progress di situ. Operator membaca baris ini untuk memutuskan apakah
     # mesin diam karena disuruh atau karena rusak — label yang salah menjawab pertanyaan itu.
-    dropped = []
-    for a in acts:
-        c = classify(a)
-        if (c == "progress" and "progress" in mute) or (c == "urgent" and "urgent" in mute):
-            dropped.append(f"{a}:{c}")
+    dropped = [a for a in acts if classify(a) == "progress" and "progress" in mute]
     base = ",".join(acts) or "tanpa peristiwa"
     if dropped:
-        return False, "MUTED:" + ",".join(sorted({d.split(":")[1] for d in dropped})) + ":" + base
+        return False, "MUTED:progress:" + base
     return False, "NOTHING_WORTHY:" + base
 
 

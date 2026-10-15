@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import sys
@@ -116,15 +117,25 @@ def key_of(cfg=None):
 
 
 def call(cfg, path, method="GET", body=None, timeout=60):
-    """Satu panggilan HTTP. Kunci hanya lewat header; tidak pernah ke URL maupun argv."""
+    """Satu panggilan HTTP. Kunci hanya lewat header; tidak pernah ke URL maupun argv.
+
+    Dua kata yang berbeda dan tidak boleh ditukar, karena harga ulangannya berbeda:
+    `attempted` = satu permintaan benar-benar ditulis ke jaringan; `ok` = server menerimanya.
+    Sebuah 4xx/5xx itu attempted TANPA ok. Memakai `ok` untuk melaporkan "sent" akan membuat
+    4xx terlihat seperti "belum pernah dikirim", dan kesimpulan berikutnya dari pembaca yang
+    waras adalah mengulanginya — pada layanan yang menagih per tugas, itu cara termudah membayar
+    hal yang sama dua kali.
+    """
     k = key_of(cfg)
     if not k:
-        return {"ok": False, "why": "NO_KEY — isi config/tripo.json atau env TRIPO_API_KEY"}
+        return {"ok": False, "attempted": False,
+                "why": "NO_KEY — isi config/tripo.json atau env TRIPO_API_KEY"}
     if not str(path).startswith("/"):
         # Penjaga kedua, di tempat URL dibentuk. `balance` bukan path REST tapi perintah CLI, dan
         # satu-satunya cara salah pakai fungsi ini adalah menyambungnya ke base_url lalu membaca
         # 404 sebagai bukti sesuatu tentang API-nya.
-        return {"ok": False, "why": f"PATH_TIDAK_VALID {path!r} — bukan path REST; routes ber-kind "
+        return {"ok": False, "attempted": False,
+                "why": f"PATH_TIDAK_VALID {path!r} — bukan path REST; routes ber-kind "
                                     "'cli' harus lewat cli(), bukan call()"}
     url = cfg["base_url"].rstrip("/") + path
     data = json.dumps(body).encode() if body is not None else None
@@ -135,14 +146,15 @@ def call(cfg, path, method="GET", body=None, timeout=60):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read().decode("utf-8", "replace")
         try:
-            return {"ok": True, "status": r.status, "json": json.loads(raw)}
+            return {"ok": True, "attempted": True, "status": r.status, "json": json.loads(raw)}
         except json.JSONDecodeError:
-            return {"ok": True, "status": r.status, "text": raw[:400]}
+            return {"ok": True, "attempted": True, "status": r.status, "text": raw[:400]}
     except urllib.error.HTTPError as e:
-        return {"ok": False, "status": e.code,
+        # Permintaannya sudah berangkat. Server menolaknya, bukan kita belum mengirimnya.
+        return {"ok": False, "attempted": True, "status": e.code,
                 "why": (e.read() or b"").decode("utf-8", "replace")[:300].replace(k, "[KEY]")}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "why": f"TRANSPORT {str(e)[:160]}"}
+        return {"ok": False, "attempted": False, "why": f"TRANSPORT {str(e)[:160]}"}
 
 
 def probe(cfg=None, transport=None, cli_runner=None):
@@ -265,16 +277,16 @@ def submit(cfg, kind, source, spend=False, cli_runner=None):
         run = cli_runner or (lambda argv, cost=None: cli(argv, spend=True, cost_confirmed=cost))
         r = run([spec["path"], "--json"], cost=spec["biaya_poin"])
         r["plan"] = plan
-        # `sent` adalah fakta bahwa sesuatu BERANGKAT, bukan niat pemanggil. Versi pertama menulis
-        # True di bawah tanpa peduli hasil, jadi NO_KEY, PATH_TIDAK_VALID, HTTP 4xx dan CLI exit
-        # bukan-nol semuanya tercatat sebagai "permintaan terkirim" — angka yang paling dipercaya
-        # orang di laporan justru yang paling tidak boleh dikarang.
-        r["sent"] = bool(r.get("ok"))
+        # `sent` = ada permintaan yang benar-benar berangkat. Di jalur CLI itu berarti prosesnya
+        # berjalan (exit berapa pun), BUKAN bahwa hasilnya sukses; `ok` tetap jawaban prosesnya.
+        # Membingkungkan keduanya adalah cara membuat laporan "tidak terkirim" untuk sesuatu yang
+        # sudah memakai poin.
+        r["sent"] = bool(r.get("ran", r.get("exit") is not None))
         return r
     body = {"type": spec.get("task_type", kind), "input": str(source)}
     r = call(cfg, spec["path"], spec["method"], body)
     r["plan"] = plan
-    r["sent"] = bool(r.get("ok"))
+    r["sent"] = bool(r.get("attempted"))
     return r
 
 
@@ -296,11 +308,16 @@ def cli(argv, spend=False, timeout=600, cost_confirmed=None):
     # Pagar biaya juga berlaku untuk panggilan CLI LANGSUNG. Temuan audit 2026-10-15: gerbang
     # `cost_is_known` hanya ada di submit(), padahal `tripo.py cli make ... --spend` memanggil
     # fungsi ini tanpa lewat submit() — jalur itu mencabut --dry-run dan langsung memakai poin.
-    # Satu aturan harus hidup di satu tempat DAN tidak boleh bisa dilewati oleh pintu lain;
-    # karena itu cli() memeriksa angka yang sama, bukan mempercayai pemanggilnya.
-    if spend and argv and argv[0] in SPEND_COMMANDS and not cost_is_known(cost_confirmed):
+    #
+    # Yang diperiksa adalah SETIAP token, bukan `argv[0]` saja. Audit putaran keempat menemukan
+    # bentuk keduanya: `cli(["--format","fbx","make","rock"], spend=True)` membuat argv[0] bukan
+    # subcommand, jadi pagar terlewat, --dry-run dicabut, dan poin terpakai tanpa satu pun angka.
+    # Gerbang yang posisinya menentukan keaktifannya bukan gerbang — flag global vendor boleh
+    # ditulis di mana saja pada baris perintah.
+    verb = next((t for t in argv if t in SPEND_COMMANDS), None)
+    if spend and verb is not None and not cost_is_known(cost_confirmed):
         return {"ok": False, "sent": False, "spent": False,
-                "why": f"DITOLAK: `tripo {argv[0]}` memakai poin dan biayanya belum terukur "
+                "why": f"DITOLAK: `tripo {verb}` memakai poin dan biayanya belum terukur "
                        f"(cost_confirmed={cost_confirmed!r}, yang boleh membayar hanya angka). "
                        "Ukur dulu lewat `tripo.py probe` (whoami, gratis)."}
     if not Path(exe).exists():
@@ -309,7 +326,11 @@ def cli(argv, spend=False, timeout=600, cost_confirmed=None):
     # Hanya perintah yang bisa memakai poin yang dipaksa --dry-run. Versi pertama menyisipkannya ke
     # SEMUA perintah, dan `tripo whoami --dry-run` langsung mati: "error: unknown option '--dry-run'"
     # — pagar yang menolak perintah baca gratis justru membuat orang menggugurkan pagarnya.
-    if not spend and argv and argv[0] in SPEND_COMMANDS and "--dry-run" not in args:
+    # Verba dibaca dari `verb` di atas, bukan `argv[0]`, dan ini arah yang LEBIH BAHAYA dari
+    # pagar biaya: dengan `cli(["--format","fbx","make",...], spend=False)` versi lama tidak
+    # menemukan verba di argv[0], tidak menyisipkan --dry-run, dan perintah berbayar berangkat
+    # sungguhan padahal tidak ada yang menyuruh membayar.
+    if not spend and verb is not None and "--dry-run" not in args:
         args.append("--dry-run")
     if "--no-open" not in args:
         args.append("--no-open")
@@ -318,7 +339,8 @@ def cli(argv, spend=False, timeout=600, cost_confirmed=None):
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "why": f"TRANSPORT {str(e)[:160]}"}
-    out = {"ok": r.returncode == 0, "exit": r.returncode, "spent": bool(spend),
+    out = {"ok": r.returncode == 0, "ran": True, "attempted": True, "exit": r.returncode,
+           "spent": bool(spend),
            "argv_safe": [a if not a.startswith("AIza") else "[KEY]" for a in args],
            "stdout": (r.stdout or "")[:1200], "stderr": (r.stderr or "")[:400]}
     return out
@@ -356,6 +378,26 @@ def selftest():
           call(cfg, "whoami", "GET", None).get("ok") is False
           and "PATH_TIDAK_VALID" in call(cfg, "whoami", "GET", None)["why"],
           str(call(cfg, "whoami", "GET", None)))
+    # `attempted` dan `ok` harus beda: 4xx berarti permintaan NYATA berangkat, dan laporan
+    # "belum dikirim" atas sesuatu yang sudah ditagih adalah ajakan untuk mengirimnya lagi.
+    pre = call(cfg, "whoami", "GET", None)
+    nokey = call({**DEFAULTS}, "/v3/generation/text-to-model", "POST", {})
+    check("penolakan SEBELUM jaringan (NO_KEY, PATH_TIDAK_VALID) melaporkan attempted False",
+          pre.get("attempted") is False and nokey.get("attempted") is False, str(pre)[:80])
+    import urllib.error as _ue
+    real_urlopen = __import__("urllib.request").request.urlopen
+
+    def boom(*a, **kw):
+        raise _ue.HTTPError("https://api.tripo3d.ai/v3/x", 402, "Payment Required", {},
+                            io.BytesIO(b"task rejected"))
+    __import__("urllib.request").request.urlopen = boom
+    try:
+        paid4xx = call(cfg, "/v3/generation/text-to-model", "POST", {"a": 1})
+    finally:
+        __import__("urllib.request").request.urlopen = real_urlopen
+    check("HTTP 402 dilaporkan attempted True + ok False — permintaan berangkat, titik bisa terpakai",
+          paid4xx.get("attempted") is True and paid4xx.get("ok") is False
+          and paid4xx.get("status") == 402, str(paid4xx)[:140])
 
     d = submit(cfg, "text_to_model", "a mossy rock", cli_runner=fake_cli)
     check("submit TANPA --spend tidak mengirim apa pun — HTTP maupun CLI diam",
@@ -446,7 +488,6 @@ def selftest():
     # binari `tripo` asli. Tidak ada poin yang terpakai di sini hanya karena kebetulan mesin ini
     # belum punya kredensial (`tripo whoami` menjawab "no API key configured") — sebuah tes yang
     # selamat karena keadaan lain bukan tes.
-    import io
     real_stdout = sys.stdout
     real_sub = __import__("subprocess").run
     __import__("subprocess").run = fake_run
@@ -480,6 +521,15 @@ def selftest():
             rc_badcost = main(["cli", "make", "a rock", "--spend", "--cost"])
         finally:
             sys.stdout = real_stdout
+        bad_args = _captured.get("args")
+        _loop = []
+        for _a in (["--format", "fbx", "make", "a rock"], ["--json", "redo", "@last"]):
+            _captured.clear()
+            rp = cli(_a, spend=True)
+            _loop.append((_a, rp, _captured.get("args")))
+            _captured.clear()
+            cli(_a, spend=False)
+            _loop.append((_a, None, _captured.get("args")))
     finally:
         __import__("subprocess").run = real_sub
     check("cli memaksa --dry-run + --no-open pada jalur tanpa biaya",
@@ -502,7 +552,20 @@ def selftest():
           rc_cost == 0 and paid2 is not None and "--dry-run" not in paid2
           and "40" not in paid2 and "--cost" not in paid2, str(paid2))
     check("--cost tanpa angka ditolak, tidak diteruskan sebagai token mentah ke vendor CLI",
-          rc_badcost == 1 and _captured.get("args") is None, str(_captured.get("args")))
+          rc_badcost == 1 and bad_args is None, str(bad_args))
+    # Bug bayar yang ditemukan audit putaran keempat: pagar membaca `argv[0]`, dan flag global
+    # vendor boleh ditulis SEBELUM subcommand. Bentuk argv-nya nyata, dan pemanggilannya sudah
+    # dilakukan di dalam blok subprocess yang dipalsukan — di sini hanya dibacakan hasilnya.
+    for i in range(0, len(_loop), 2):
+        a, paid, _ = _loop[i][0], _loop[i][1], _loop[i][2]
+        dry = _loop[i + 1][2]
+        check(f"flag sebelum subcommand tidak meloloskan biaya: cli({a}, spend=True) DITOLAK "
+              f"sebelum subprocess",
+              _loop[i][2] is None and paid.get("sent") is False and "DITOLAK" in paid["why"],
+              str(paid)[:140])
+        check(f"dan jalur tanpa bayar TETAP menyisipkan --dry-run walau verba bukan argv[0] "
+              f"(versi lama membiarkannya berangkat sungguhan)",
+              dry is not None and "--dry-run" in dry, str(dry))
     for name, cond, detail in checks:
         print(f"[{'ok' if cond else 'GAGAL'}] tripo: {name}" + (f" — {detail}" if not cond else ""))
     n_ok = sum(1 for _n, c, _d in checks if c)
