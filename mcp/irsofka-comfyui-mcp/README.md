@@ -7,10 +7,14 @@ This is the server `ROADMAP.md` F11's three-repo plan calls **IRSofka ComfyUI MC
 step 1 (that step is the comparison against Epic's own MCP tool surface); it is F11 step 4's VRAM work
 brought forward to the boundary where it could actually be finished. It was written against ComfyUI's
 documented HTTP API after `comfy-mcp` was ruled out as a base, because it is AGPL-3.0-or-later (or a paid
-commercial licence) and AGPL forbids exactly the restriction BSL adds. **No line of theirs is in our tree** — but their `server.py` was read once, to count tool definitions for `mcp/README.md`, so "nobody
-here ever looked at it" is not a claim this file makes. What is shared with a ComfyUI is the wire.
+commercial licence) and AGPL forbids exactly the restriction BSL adds. **No line of theirs is in our tree** — measured, not asserted: against the installed `comfy_mcp`
+package (6 888 significant lines), our 654 share **7 normalised lines, all generic boilerplate, longest
+consecutive run 1, no shared private identifier**. Their `server.py` was still read once, to count tool
+definitions for `mcp/README.md`, so "nobody here ever looked at it" remains not a claim this file makes. What is shared with a ComfyUI is the wire.
 
-What it does that the installed one does not: **`tools/gpu_gate.py` is consulted before `POST /prompt`.**
+What it does on every submit: **`tools/gpu_gate.py` is consulted before `POST /prompt`.** Whether the
+installed `comfy-mcp` refuses on that path was **not measured** — its submit route was never exercised —
+so this line describes this server and stops.
 A job the card cannot pay for is refused with the rule that matched, the megabytes needed, the
 megabytes free and the names of the processes holding it — and nothing is sent. `UNKNOWN` refuses too.
 

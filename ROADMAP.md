@@ -1015,7 +1015,8 @@ availability, whichever comes first**: a longer date is permitted and simply los
 | "saya ingin pamer sebagai showcase" | source is readable from day one; the Additional Use Grant can explicitly allow personal, evaluation, and non-production use so a visitor can actually run it |
 | "kalau ada yang mau beli, silakan" | Production Use *requires* a license from the licensor — that is the product being sold, with no renegotiation of terms later |
 | the escape hatch | Change Date (4 years, per version) converts it to the MIT License, so the asset still becomes open even if the business never sells a licence |
-| admissibility of the Change License | covenant 1 accepts GPL-v2 **or any later version, or a licence compatible with either**. MIT qualifies under both readings; **Apache-2.0 qualifies too** (compatible with GPL-3.0), so it was never disqualifying — a claim I made and retracted inside one week |
+| admissibility of the Change License | covenant 1 accepts GPL-v2 **or any later version, or a licence compatible with either**. MIT qualifies under both readings; **Apache-2.0 qualifies too** (compatible with GPL-3.0), so it was never disqualifying — made and retracted on the **same day**, 2026-10-15. Commit `157aa74`'s
+title says "a week ago", which is wrong; it is left as written and corrected here |
 
 #### Correction: the licence text I shipped was a scraped page, and the page is flattened
 
@@ -1057,8 +1058,9 @@ repos. Nothing is left on PolyForm Noncommercial; `README.md`, `INSTALL.md` and
 new work never "un-converts" old work.
 
 **Change License: MIT — and the reason I first gave for it was wrong, so both steps are recorded.**
-The push audit was right that Apache-2.0 is not GPL-v2-compatible; it was wrong, and so was I, that
-this disqualifies it as a Change License. Covenant 1 admits the GPL "Version 2.0 **or any later
+Apache-2.0 is indeed not compatible with GPL-v2 — that part is true, and it was **my own** sentence in
+commit `62d443c`, not somebody else's. What round two of the audit corrected was the inference I drew
+from it: that non-compatibility with v2 disqualifies it as a Change License. Covenant 1 admits the GPL "Version 2.0 **or any later
 version**, or a license that is compatible with GPL Version 2.0 **or a later version**", and
 Apache-2.0 is compatible with GPL-3.0. So Apache-2.0 was always admissible, and "the Apache option
 would have made our own licence non-compliant" is a sentence I should not have written. MIT is still
@@ -1092,9 +1094,10 @@ work**:
   mesh" and "weld by position before judging topology".
 - The asymmetry is the moat: the plugin without the loop is a good editor bridge; the loop without
   the plugin cannot touch a live graph at all, because `GEditor`, `ResetLoaders`, `UPackage` and
-  `UEdGraphNode` are only reachable in-process on the game thread. **No architecture removes that
-  constraint, including Epic's own** — the experimental `ModelContextProtocol` plugin in this engine is
-  also an in-editor process.
+  `UEdGraphNode` are only reachable in-process on the game thread. **No architecture measured on this
+  machine removes that constraint, Epic's own included** — the experimental `ModelContextProtocol`
+  plugin in this engine is also an in-editor process. That is an observation about what is installed
+  here, not a proof about every design nobody has looked at; step 1 exists to widen it.
 
 ### Capability negotiation (the operator's item 5), as an acceptance test
 
@@ -1119,9 +1122,23 @@ overclaimed it.** No code was copied, translated or adapted. But `comfy-mcp`'s `
 earlier in the same session — to count its `@mcp.tool` definitions for the tool-count correction in
 `mcp/README.md` — and its `LICENSE` and `NOTICE` were read too. So "no upstream MCP code read" is
 false, and the strict sense of clean room (implementers never see the original) is not what happened.
-What is true is the weaker, useful claim: the implementation was written from ComfyUI's documented HTTP
-behaviour, measured against a live server, and no line of theirs is in the tree. Exposure happened;
-derivation did not. Anyone weighing the AGPL question should read it as exactly that and no more.
+What is true is the weaker claim, and it is now **measured** rather than asserted: the implementation
+was written from ComfyUI's documented HTTP behaviour against a live server, and a line-level
+comparison of our `server.py` against the installed `comfy_mcp` package (11 files, 6 888 significant
+lines) finds **7 identical normalised lines out of our 654** — every one generic Python boilerplate
+(`from __future__ import annotations`, `except Exception as exc:`, `if __name__ == "__main__":`,
+`if not isinstance(data, dict):`) — with a **longest run of consecutive shared lines of 1**, and **none**
+of our private identifiers (`tool_*`, `graph_text`, `GATE_TEXT_CAP`, …) present in their source.
+107 of our 202 long identifiers do overlap theirs; that is HTTP/JSON vocabulary and proves nothing
+either way. Exposure happened; derivation was looked for and is not there. Anyone weighing the AGPL
+question should read it as exactly that and no more — including the limit of the method, which a
+line-level comparison cannot see a translation that kept the structure and renamed everything.
+
+The licence files were held to the same rule, and my first check had to be replaced to satisfy it: the
+written rule says the transcription must be **diffed** against the source, but what I actually ran was a
+line-*set* membership test ("0 canonical lines missing"), which cannot see a reordering or a duplicated
+line. A positional `SequenceMatcher` over the SPDX span now reports, for **both** repositories: canonical
+66 lines, ours 66 lines, **ratio 1.00000, 0 differing blocks**.
 
 **What this server does is gate a submit before it is sent, instead of queueing first and apologising
 later.** No comparison of other servers' submit paths was performed, so that is a description of this tree

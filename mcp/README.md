@@ -28,8 +28,8 @@ the machine it runs on, not about the code.
 | [`comfy-mcp/`](comfy-mcp/README.md) | `comfy-mcp` | `~/Apps/mcp/comfy-mcp/.venv` (wheel only) | Comfy Org | **AGPL-3.0-or-later OR commercial** |
 
 One count in the history is wrong and is named rather than quietly fixed: commit `5ec86cc`'s message says
-"four servers … and three of them are not ours". Its own table shows two of four belonging to us, and that
-was the truth then as now. The commit message stays as written, because rewriting an unpushed history to
+"four servers … and three of them are not ours". Its own table shows **two of four** belonging to us, which was the truth then;
+this table now lists **five servers, three of them ours**. The commit message stays as written, because rewriting an unpushed history to
 erase a mistake is worse than recording the correction where the reader actually looks.
 
 Two rules follow from that table and are enforced here rather than remembered:
