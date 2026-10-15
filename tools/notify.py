@@ -30,6 +30,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 APP_ID = "AI Workstation Core"
+# Akar workstation, dihitung ulang dari berkas ini — bukan di-hardcode, supaya pindah mesin
+# tidak membuat config terbaca dari tempat yang salah.
+REPO = Path(__file__).resolve().parent.parent
 SEND_TIMEOUT = 2.0
 EXPIRE_MS = 8000
 MAX_ACTIONS_SHOWN = 4
@@ -103,7 +106,30 @@ NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD"
 # yang bisa di-emit, bukan hanya yang terlintas saat seseorang menulis daftarnya.
 
 
-def worth_notifying(events) -> tuple[bool, str]:
+def muted_classes(path=None) -> set:
+    """Kelas banner yang operator bungkam, dibaca dari config pada saat dipakai (§12).
+
+    Permintaannya langsung, 2026-10-15 11:2x: "notif autopilot/semi ini dari ai-workstation tolong
+    di disable aja, agak sedikit mengganggu ketika daily hampir 10/30 menit sekali keluar terus."
+    Yang keluar sesering itu adalah kelas `progress` (WORK_DISPATCHED, CLAIMED, GATE_PASSED) —
+    bukan pertanyaan dan bukan kegagalan. Jadi yang dibungkam adalah denyut, dan `urgent` tetap
+    berbunyi: orang yang mematikan semua banner tidak akan pernah tahu bahwa loop berhenti
+    bekerja.
+
+    `unknown` TIDAK pernah bisa dibungkam, dan itu bukan untuk ditawar: peristiwa baru yang lupa
+    diklasifikasikan akan jatuh ke `unknown`, dan kalau `unknown` bisa dimute, cara tercepat untuk
+    membungkam sebuah loop selamanya hanyalah lupa mengklasifikasikannya.
+    """
+    p = Path(path or (REPO / "config" / "notify.json"))
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — tidak ada config = tidak ada yang dibungkam
+        return set()
+    m = {str(x).lower() for x in (cfg.get("muted") or [])}
+    return m - {"unknown"}
+
+
+def worth_notifying(events, mute=None) -> tuple[bool, str]:
     """Hanya tick yang BERGERAK, BERTANYA, atau GAGAL yang boleh menyentuh desktop.
 
     Aturan ini bukan kenyamanan: operator menyetujui notifikasi per kejadian justru supaya
@@ -111,12 +137,24 @@ def worth_notifying(events) -> tuple[bool, str]:
     keadaan normal mesin yang sehat dan harus tetap berada di log malam saja.
     """
     acts = [str((e or {}).get("action") or "?") for e in (events or []) if isinstance(e, dict)]
+    # `mute` bisa diserahkan: selftest harus menguji kedua sisi tanpa bergantung pada apakah
+    # kebetulan ada config/notify.json di mesin yang menjalankan tes. Perilaku produksi tetap
+    # membaca config pada saat dipakai, bukan mengingatnya.
+    mute = muted_classes() if mute is None else set(mute)
     for a in acts:
-        if classify(a) == "progress":
+        c = classify(a)
+        if c == "progress":
+            if "progress" in mute:
+                continue
             return True, a
     for a in acts:
-        if classify(a) in ("urgent", "unknown"):
+        c = classify(a)
+        if c in ("urgent", "unknown"):
+            if c == "urgent" and "urgent" in mute:
+                continue
             return True, a
+    if mute:
+        return False, f"MUTED:{','.join(sorted(mute))}:" + (",".join(acts) or "tanpa peristiwa")
     return False, ",".join(acts) or "tanpa peristiwa"
 
 
@@ -250,9 +288,9 @@ def send(title: str, body: str, urgent: bool = False, timeout: float = SEND_TIME
         return {"ok": False, "rc": None, "err": f"{type(exc).__name__}: {exc}"}
 
 
-def notify_tick(events, mode=None, level=None, runner=None) -> dict:
+def notify_tick(events, mode=None, level=None, runner=None, mute=None) -> dict:
     """Jalur yang dipakai tick: hanya kejadian yang layak yang menyentuh desktop."""
-    want, reason = worth_notifying(events)
+    want, reason = worth_notifying(events, mute=mute)
     if not want:
         return {"sent": False, "skipped": True, "reason": reason, "ok": True}
     return notify_events(events, mode=mode, level=level, runner=runner)
@@ -370,9 +408,21 @@ def selftest() -> int:
     check("tick yang hanya melihat (OBSERVED) tidak menyentuh desktop",
           not calls and skipped["sent"] is False and skipped["skipped"] is True, str(skipped))
     moved = notify_tick([{"action": "WORK_DISPATCHED", "item": 88, "target": "qoder"}],
-                        mode="SEMI", runner=runner)
-    check("tick yang mengirim perintah ke CLI berbanner",
+                        mode="SEMI", runner=runner, mute=set())
+    check("tick yang mengirim perintah ke CLI berbanner (mute dikosongkan secara eksplisit, "
+          "supaya tes tidak berubah nasib karena ada/tidaknya config lokal)",
           len(calls) == 1 and "item 88" in calls[0][1], str(calls))
+    # dua sisi dari sakelar yang sama
+    m_yes, m_why = worth_notifying([{"action": "WORK_DISPATCHED", "item": 88}], mute={"progress"})
+    check("denyut yang dibungkam TIDAK menyentuh desktop, dan alasannya menyebut kelas yang dibungkam",
+          m_yes is False and m_why.startswith("MUTED:progress"), m_why)
+    check("pertanyaan manusia tetap berbunyi walau denyut dibungkam — yang boleh mati adalah noise, "
+          "bukan jalur yang memanggil orang",
+          worth_notifying([{"action": "ESCALATED", "id": 9}], mute={"progress"})[0] is True)
+    check("`unknown` tidak bisa dibungkam meski diminta — kalau bisa, cara termudah membungkam "
+          "loop selamanya hanyalah lupa mengklasifikasikan peristiwanya",
+          worth_notifying([{"action": "PERISTIWA_BARU"}, ], mute={"progress", "unknown", "urgent"})[0]
+          is True)
     check("peristiwa yang belum diklasifikasi TIDAK bisa lulus diam",
           classify("NAMA_BARU") == "unknown"
           and worth_notifying([{"action": "NAMA_BARU"}])[0] is True)
