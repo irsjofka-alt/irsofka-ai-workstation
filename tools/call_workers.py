@@ -2,7 +2,11 @@
 """Call-worker discipline: a process an action spawns dies with that action.
 
 The Active Workspace is the only persistent set on this workstation — the tmux panes the
-operator works in (Qoder tab, Antigravity tab, shell tab). Everything else that speaks to a
+operator works in, whatever `tmux -L irsofka list-sessions` returns at the moment of asking (four
+sessions on 2026-10-15: `boot`, `station-qoder`, `station-antigravity`, `station-shell`). Naming a
+fixed number of tabs here would contradict the rule two lines below, and did: this paragraph said
+three while the socket had four, so a reader checking the doc against `--list` would have found the
+tool "inventing" a persistent process. Everything else that speaks to a
 model is a CALL WORKER: it exists for one dispatch, and it must be cut as soon as its answer
 has been read, together with every child it left behind. The list of what is persistent is
 resolved from the tmux socket and the engine registry at the moment of use, never from a
