@@ -1197,8 +1197,12 @@ graph.
 The route that does build it is `RunUAT.sh BuildPlugin` run **from the repo** (and note it lives in
 `BatchFiles/`, not `BatchFiles/Linux/`; piping UAT through `| tail` hides a missing-file failure
 behind `tail`'s exit code 0). First run here: `BUILD SUCCESSFUL`, `UAT_EXIT=0`, 29 compile actions,
-45.29 s, seven module `.so`, and `nm -DC` finds 8 `FIRSofkaCppExporter` symbols in
-`libUnrealEditor-IRSofkaBlueprint.so` — present in the binary, not merely accepted by a compiler.
+45.29 s, seven module `.so`, and `nm -DC --defined-only` finds **8 defined `FIRSofkaCppExporter` symbols** in
+`libUnrealEditor-IRSofkaBlueprint.so` — `MapPinType`, `CollectShape`, `HandleExport`, `RenderHeader`,
+`RenderSource`, `MapEventOverride`, `SanitizeClassName`, `FShapeMember::PropertySpecifiers`. Present in
+the binary, not merely accepted by a compiler. The method is stated because the same file answers **11**
+to a plain `grep -o` count: three of those are *undefined references* from other translation units, not
+exports. A number without its measuring rule is a number someone else will contradict.
 
 What that first real compile found is the reason this section exists. Five APIs in new exporter code
 were wrong for 5.8 (`CPF_EditAnywhere`/`CPF_EditInstanceOnly`/`CPF_BlueprintReadWrite` do not exist;
