@@ -17,7 +17,7 @@ F7 Creative Studio (ComfyUI/UE5)  ✅ Completed (scope: studio wired + producing
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
-F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP written independently — no code copied: 61/61 selftest + live DENY and live ALLOW**; UE plugin: BYOK path fix + new Blueprint->C++ exporter **compile verified** via RunUAT BuildPlugin (runtime still unverified; deployment is an open decision — see the module-name collision under step 0); license chosen: BSL 1.1)
+F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP written independently — no code copied: 61/61 selftest + live DENY and live ALLOW**; UE plugin: BYOK path fix + new Blueprint->C++ exporter **compile verified** via RunUAT BuildPlugin (runtime still unverified; deployment is an open decision — see "The rebrand collision" above the ordered-work list); license chosen: BSL 1.1)
 ```
 
 ## F1–F4 — Foundation (Completed & Re-verified Oct 6)
@@ -1196,7 +1196,7 @@ graph.
 
 The route that does build it is `RunUAT.sh BuildPlugin` run **from the repo** (and note it lives in
 `BatchFiles/`, not `BatchFiles/Linux/`; piping UAT through `| tail` hides a missing-file failure
-behind `tail`'s exit code 0). First run here: `BUILD SUCCESSFUL`, `UAT_EXIT=0`, 29 compile actions,
+behind `tail`'s exit code 0). First run here: `BUILD SUCCESSFUL`, `UAT_EXIT=0`, 37 build actions of which **29 were compiles**,
 45.29 s, seven module `.so`, and `nm -DC --defined-only` finds **8 defined `FIRSofkaCppExporter` symbols** in
 `libUnrealEditor-IRSofkaBlueprint.so` — `MapPinType`, `CollectShape`, `HandleExport`, `RenderHeader`,
 `RenderSource`, `MapEventOverride`, `SanitizeClassName`, `FShapeMember::PropertySpecifiers`. Present in
