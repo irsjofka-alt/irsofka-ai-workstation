@@ -1374,6 +1374,29 @@ none of their logos.
 | permissive alternatives | blender: `ahujasid/mcp-for-blender` **MIT** 30,872★ pushed 2026-10-06 · comfy: `artokun/comfyui-mcp` **MIT** 825★ pushed 2026-10-14, `joenorton/comfyui-mcp-server` **Apache-2.0** 409★ | GitHub API (`license.spdx_id`, `stargazers_count`, `pushed_at`) |
 | live editor state today | bridge `UNAVAILABLE` when the editor is closed | `ue_world.get_all_actors` |
 
+## Ledger integrity: two defects found by using the queue (2026-10-15, pushed as `ccd32cb`, `51fe713`, `06e9eae`, `cdc1a1b`)
+
+Both were discovered because a run tried to close its own item and the ledger disagreed with what had
+just been written. Neither was visible from the code.
+
+| subject | value | method |
+|---|---|---|
+| evidence write path | `finish()` stored `(evidence or "")[:900]` while the column is `TEXT` with **no** length limit in either backend | `NEW_COLUMNS` declaration + `information_schema` (`data_type=text`, `character_maximum_length=NULL`) |
+| damage | `MAX(LENGTH(evidence)) = 900` and **6 rows pinned at exactly 900** — tails gone permanently | PostgreSQL, read-only, before the fix |
+| after the fix | **2 rows above 900** (items 291, 292), both written by shipping code | same query, after |
+| verifier identity | one verifier has two names: registry key `gemini-verify` vs answering id `gemini-3.8-flash-high`; `action_log.model` stores the second, `--list` prints the first | comparing a live dispatch row against the registry |
+| the trap | a `SETUJU` verdict recorded at 19:06:14 was reported as "no COMPLETED verification" at 19:06:5x, then accepted at 19:07:00 after retyping the same verifier | this run, three commands |
+| where resolution lives | in the **reader** (`verifier_log_name()` inside `push_clearance()`), not the caller — the first fix patched only the caller and the reviewer caught that | reviewer TEMUAN 1 on `51fe713` |
+| what the event names | `clearance["model"]`, i.e. whoever actually answered, not the typed key nor the registry's claimed primary | `record_push_verified` |
+| rejected alternative | matching on `summary` text (`"verifikasi oleh <key>: …"`), which would also cover a runtime fallback model | that string is written by the same process that writes the verdict, so it widens the gate |
+| headless-reviewer limit, re-measured | a dispatch told the facts were "re-runnable on this workstation" tried to run a command, was auto-denied, **exited 0**, and performed zero review | 1 of 5 dispatches tonight; fixed by opening every evidence file with `READ-ONLY REVIEW, NO TOOLS AVAILABLE IN THIS RUN` |
+| suites | work_order **283/283** (was 277/277), drainer **172/172**, `ai-station workers --audit` → 0 strays | commands run after each change |
+
+The rule this section exists to enforce: a limit applied at write time with nothing said about it is
+worse than no limit, because the caller gets exit 0, the row looks populated, and the part that always
+disappears is the tail — which is where the numbers live. Any future length concern belongs to display,
+and a display cut must name the original length.
+
 ## Known Boundaries & Constraints
 
 - **Token usage counters:** Some upstream CLI tools record `0` tokens in raw logs; the workstation preserves telemetry integrity without fabricating numbers.
