@@ -669,6 +669,21 @@ PHASE_MARKS = ("✅", "🟡", "🟨", "⬜")
 # Karena hanya sisi "selesai" yang perlu dibuktikan, daftar kata terbuka tidak lagi dipakai dan sudah
 # dibuang, bukan ditinggalkan sebagai kode mati.
 PHASE_DONE_WORDS = {"completed", "selesai", "done", "shipped", "final", "finished"}
+# Kata yang membuat sebuah ✅ menjadi tidak bisa dipercaya. Hanya dipakai untuk LEMPAR, tidak pernah
+# untuk memutuskan "terbuka" diam-diam.
+# Kata yang menggugurkan sebuah ✅ HANYA kalau muncul di frasa statusnya — yaitu teks setelah
+# penanda sampai kurung pembuka keterangan. Daftar ini pernah diterapkan ke SELURUH baris dan langsung
+# salah baca pada berkas nyata: baris F7 berbunyi `✅ Completed (scope: studio wired + producing;
+# see the scope note — UE handoff is not in it)`, dan kata "not" di dalam kurung keterangan membuat
+# baris itu dilempar sebagai pertentangan. Sebuah pagar yang menolak karena prosa orang lain adalah
+# pagar yang akan dimatikan orang dalam seminggu.
+PHASE_QUALIFIER_WORDS = {"partly", "partial", "partially", "pending", "wip", "ongoing", "underway",
+                         "testing", "review", "hold", "sebagian", "belum", "sedang", "tertunda",
+                         "berjalan", "proses", "incomplete", "tertahan"}
+# Penanda status lain yang TIDAK ikut PHASE_MARKS. Kehadirannya berdampingan dengan ✅ berarti baris
+# itu menyebut dua keadaan; `🚧 In Progress (tahap 1 ✅ done)` adalah contoh nyata yang tidak akan
+# terlihat oleh aturan apa pun yang hanya menghitung penanda yang dikenal.
+PHASE_FOREIGN_MARKS = ("🚧", "❌", "⏸", "⌛", "🔄", "⏳")
 
 
 def parse_phases(text):
@@ -714,6 +729,11 @@ def parse_phases(text):
         # Jadi yang dicari adalah pasangan penanda+kata status yang KNOWN, pada posisi paling awal.
         # Tidak ada pasangan yang ketemu = fase dihitung TERBUKA (gagal ke arah menutup).
         found = [e for e in PHASE_MARKS if e in ln]
+        # Yang dihitung adalah KEHADIRAN, bukan jenis: `F8 ✅ Done (sub ✅ in progress)` memuat satu
+        # JENIS penanda tapi dua KEMUNCULAN, dan aturan "len(found) > 1" tidak melihatnya sama sekali.
+        total = sum(ln.count(e) for e in PHASE_MARKS)
+        if total > len(found):
+            raise ValueError(f"baris fase F{n} mengulang penanda status ({total} kemunculan)")
         if len(found) > 1:
             # Lebih dari satu penanda pada satu baris fase berarti barisnya tidak mengatakan satu
             # status. Memilih "yang pertama" atau "yang terakhir" sama-sama menebak, dan tebak ke
@@ -731,9 +751,25 @@ def parse_phases(text):
         # ✅ harus dibuktikan. Kata pertama yang huruf diambil setelah menembus tanda baca dan kurung
         # — `✅ (in progress)`, `✅ [done]`, `✅ — selesai` — karena reviewer menemukan bahwa pola
         # `\[?` saja berhenti di kurat bulat dan membaca `word=""` sebagai selesai.
-        mw = re.search(re.escape(marker) + r"[\s\[\(\{\-—:;]*([A-Za-zÀ-ÿ]+)", ln)
-        if not mw or mw.group(1).lower() not in PHASE_DONE_WORDS:
+        # Kata yang MENOLAK sebuah ✅. Ini bukan daftar untuk memilih status — ia hanya mendeteksi
+        # kontradiksi: baris yang menulis ✅ dan sekaligus menyebut kata pengerjaan (sebagian, ongoing,
+        # pending, in progress, testing, atau penanda 🚧 di luar daftar) mengatakan dua hal, dan
+        # memilih salah satunya adalah menebak dengan gerbang menempel. Jadi ia LEMPAR; pagar
+        # membacanya TIDAK TAHU dan menolak menulis baris penajaman. Arah gagalnya menutup, bukan
+        # membuka — itu bedanya dengan daftar kata terbuka pada versi sebelumnya, yang justru
+        # membiarkan `✅ Ongoing` lolos sebagai selesai karena kata itu tidak ada di daftar.
+        if marker == "✅" and any(g in ln for g in PHASE_FOREIGN_MARKS):
+            raise ValueError(f"baris fase F{n} memuat ✅ bersama penanda status lain")
+        # Frasa status = setelah penanda, berhenti di kurung atau titik-koma pertama.
+        frag = re.split(r"[\(\[\{;]", ln.split(marker, 1)[1], 1)[0]
+        fwords = [w.lower() for w in re.findall(r"[A-Za-zÀ-ÿ]+", frag)]
+        if marker != "✅":
             open_phases.add(n)
+            continue
+        if not fwords or fwords[0] not in PHASE_DONE_WORDS:
+            open_phases.add(n)              # ✅ tanpa kata selesai = belum terbukti
+        elif set(fwords) & PHASE_QUALIFIER_WORDS:
+            raise ValueError(f"baris fase F{n} menulis ✅ dengan qualifiers {sorted(set(fwords) & PHASE_QUALIFIER_WORDS)}")
     return sorted(open_phases)
 
 
@@ -5403,37 +5439,37 @@ def idle_selftest(check):
               parse_phases(_ph_text) == [6, 11, 12], str(parse_phases(_ph_text)))
         check("baris fase tanpa penanda dihitung TERBUKA — belum dinyatakan bukan berarti selesai",
               12 in parse_phases(_ph_text), str(parse_phases(_ph_text)))
-        _tricky = ("## Phases\n\n```\n"
-                   "F8 Station  ✅ validation 🟡 In Progress\n"
-                   "F11 Bridge  🟨 Partly shipped (subsistem ✅ done)\n"
-                   "F12 Deprecated ❌ tidak ada di daftar penanda\n"
-                   "```\n")
-        def _one(line):
-            return parse_phases("## Phases\n\n```\n" + line + "\n```\n")
-        _raise = []
-        for label, line in (
-                ("dua penanda satu baris", "F8 A ✅ validation 🟡 In Progress"),
-                ("✅ di dalam kurung keterangan", "F11 B 🟨 Partly shipped (subsistem ✅ done)"),
-                ("bahasa Indonesia 🟡 Sedang (auth ✅ selesai)",
-                 "F8 D 🟡 Sedang berjalan (auth ✅ selesai)"),
-                ("🟡 [In Progress] (core ✅ done)", "F11 E 🟡 [In Progress] (core ✅ done)")):
+        # Dua belas bentuk baris fase sebagai tabel, termasuk semua yang reviewer tunjukkan. Alasannya
+        # bukan kerapian: parser inilah yang memutuskan apakah mesin boleh menulis pekerjaan untuk
+        # dirinya sendiri, dan aturan yang diuji satu per satu di narasi selalu menyisakan bentuk yang
+        # tidak terpikirkan penulisnya. Arah gagal dipilih sadar: `lempar` = TIDAK TAHU = pagar
+        # menolak; `terbuka` = membayar dengan ditahannya penajaman; yang tidak pernah boleh terjadi
+        # adalah `tutup` karena salah baca.
+        _cases = [
+            ("F8 a ✅ Done (sub ✅ in progress)", "lempar"),       # ✅ diulang, satu jenis penanda
+            ("F8 b ✅ Selesai sebagian", "lempar"),               # kata selesai + qualifier
+            ("F8 c 🚧 In Progress (tahap 1 ✅ done)", "lempar"),  # penanda asing berdampingan ✅
+            ("F8 d ✅ Done partially", "lempar"),
+            ("F8 e ✅ Final testing", "lempar"),
+            ("F8 f ✅ Completed", "tutup"),
+            ("F8 g ✅ selesai", "tutup"),
+            ("F8 h ✅ Completed (scope: not in it)", "tutup"),    # prosa dalam kurung bukan status
+            ("F8 i 🟡 In Progress", "terbuka"),
+            ("F8 j tanpa penanda apa pun", "terbuka"),
+            ("F8 k ✅ Ongoing", "terbuka"),                       # ✅ tanpa kata selesai = belum terbukti
+            ("F8 l ✅ (in progress)", "terbuka"),
+        ]
+        _bad = []
+        for line, want in _cases:
             try:
-                _one(line)
-                _raise.append(label + " -> TIDAK LEMPAR")
+                got = "terbuka" if 8 in parse_phases("## Phases\n\n```\n" + line + "\n```\n") else "tutup"
             except ValueError:
-                pass
-        check("baris dengan lebih dari satu penanda status dilempar — pagar membacanya sebagai "
-              "TIDAK TAHU dan menolak menulis penajaman, bukan memilih salah satu penanda",
-              not _raise, "; ".join(_raise))
-        _done = [ln for ln, want in (
-            ("F10 C ✅ In Progress", True), ("F10 F ✅ (in progress)", True),
-            ("F10 G ✅ Ongoing", True), ("F10 H ✅ {tertunda}", True),
-            ("F10 I ✅ — belum selesai", True), ("F10 J ✅ Completed", False),
-            ("F10 K ✅ (done)", False), ("F10 L ✅ selesai", False))
-            if (10 in _one(ln)) != want]
-        check("✅ harus DIBUKTIKAN kata selesai: kata yang tidak dikenal, kurung bulat, tanda hubung "
-              "atau kurung kurawal semuanya terbaca TERBUKA; yang mengenali ✅+done/selesai tertutup",
-              not _done, "; ".join(_done))
+                got = "lempar"
+            if got != want:
+                _bad.append(f"{line}: ingin {want}, dapat {got}")
+        check("dua belas bentuk baris fase dibaca sesuai arah gagal yang dijanjikan "
+              "(lempar=TIDAK TAHU, terbuka=menahan penajaman, tutup hanya untuk ✅ terbukti)",
+              not _bad, "; ".join(_bad)[:220])
         try:
             parse_phases("## Phases\n\n```markdown\nF1 A ✅ Completed\nF2 B 🟡 In Progress\n```\n")
             _tagged = [2]
