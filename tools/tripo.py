@@ -21,6 +21,19 @@ FAKTA PENTING dari pencarian web (bukan dari dokumen langsung): **API V2 Tripo a
 dipensiunkan dan endpoint V2 berhenti menerima request; migrasi ke V3 dianjurkan.** Menyiapkan
 klien V2 di sini berarti menyiapkan rute mati, jadi `base_url` dan `version` disimpan di config
 dan dibaca ulang setiap panggilan — bukan di-hardcode.
+
+DUA TEMPAT YANG BERBEDA, dan mengira keduanya sama adalah cara tercepat salah menghitung biaya:
+
+* `studio.tripo3d.ai` — aplikasi web tempat operator login dan melihat **500 point**. Ini permukaan
+  produk, bukan permukaan API.
+* `platform.tripo3d.ai` / `developers.tripo3d.ai` — sisi developer: dokumen, billing, dan tempat
+  API key dibuat.
+
+**BELUM DIKETAHUI: apakah poin Studio dan kredit API adalah wallet yang sama.** Pencarian tidak
+menjawabnya dan dokumen tidak bisa diambil saat modul ini ditulis (WebFetch kena batas, error 115).
+`probe` ada justru untuk itu: ia memanggil endpoint balance yang tidak memakai poin, dan jawabannya
+mengubah kalimat "mungkin" di atas menjadi angka. Sebelum itu, jangan tulis rencana produksi di atas
+asumsi bahwa 500 poin Studio bisa dihabiskan oleh API — atau sebaliknya.
 """
 from __future__ import annotations
 
@@ -216,10 +229,16 @@ def main(argv=None):
     if x.cmd == "selftest":
         return selftest()
     if x.cmd == "capabilities":
-        print(json.dumps({"endpoints": ENDPOINTS, "defaults": DEFAULTS,
-                          "warning": "API V2 Tripo dinyatakan akan dipensiunkan; verifikasi lewat "
-                                     "`tripo.py probe` sebelum membangun apa pun di atas path ini"},
-                         ensure_ascii=False, indent=1))
+        print(json.dumps({
+            "endpoints": ENDPOINTS, "defaults": DEFAULTS,
+            "surfaces": {
+                "studio": "studio.tripo3d.ai — aplikasi web; di sinilah 500 point operator terlihat",
+                "api": "platform.tripo3d.ai / developers.tripo3d.ai — dokumen, billing, API key"},
+            "unknown": "apakah poin Studio dan kredit API satu wallet yang sama — BELUM DIKETAHUI; "
+                       "`tripo.py probe` menjawabnya tanpa memakai poin",
+            "warning": "API V2 Tripo dinyatakan akan dipensiunkan; verifikasi lewat `tripo.py probe` "
+                       "sebelum membangun apa pun di atas path ini"},
+            ensure_ascii=False, indent=1))
         return 0
     cfg = load()
     if x.cmd == "status":
