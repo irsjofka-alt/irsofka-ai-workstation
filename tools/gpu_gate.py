@@ -10,7 +10,7 @@ Tiga keadaan keluar, dan ketiganya berbeda harganya:
   ALLOW   -- bebas >= perlu. Kerja dijalankan.
   DENY    -- bebas < perlu, dan PEMEGANGNYA DISEBUT. Menolak tanpa menyebut siapa yang menahan
              VRAM membuat operator mencari sendiri selama setengah jam; `gpu_holders()` dari
-             `local_llm` dipakai di sini supaya "siapa" answeringya satu definisi, bukan dua (§12).
+             `local_llm` dipakai di sini supaya jawaban "siapa" tetap satu definisi, bukan dua (§12).
   UNKNOWN -- `nvidia-smi` tidak bisa dibaca. UNKNOWN DITOLAK, bukan dianggap cukup. Ini bukan
              kehati-hatian tanpa biaya: menolak kerja GPU ketika alat ukurnya mati lebih baik
              daripada mengOOM-kan ComfyUI dan meninggalkan operator dengan gejala connection-loss

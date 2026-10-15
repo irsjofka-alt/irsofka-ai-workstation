@@ -535,7 +535,7 @@ def selftest():
     check("cli memaksa --dry-run + --no-open pada jalur tanpa biaya",
           dry is not None and "--dry-run" in dry and "--no-open" in dry, str(dry))
     check("Pintu KEDUA dijaga: cli(spend=True) tanpa angka biaya DITOLAK sebelum subprocess "
-          "samasekali (audit menemukan gerbang hanya hidup di submit())",
+          "sama sekali (audit menemukan gerbang hanya hidup di submit())",
           nocost is None and r_nocost.get("sent") is False and "DITOLAK" in r_nocost["why"],
           str(r_nocost)[:160])
     check("dengan angka biaya yang terukur, --dry-run dicabut dan perintah benar-benar berangkat",
