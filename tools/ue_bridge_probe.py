@@ -113,13 +113,25 @@ def actor_count(reply: dict):
     return len(actors) if isinstance(actors, list) else None
 
 
-def probe_labels() -> list[str]:
-    r = send("world", "get_all_actors", {})
-    actors = r.get("actors")
+def labels_from(reply: dict):
+    """Probe-owned labels in a get_all_actors reply — or None if the reply is not one.
+
+    Returning `[]` on a failed read was the reviewer's finding: `[]` satisfies "no leftovers", so a
+    socket error looked like a clean level, and the finally-block guard `if lbl in probe_labels()`
+    then skipped the delete and left the test actor in the operator's session. Unreadable is now a
+    distinct value, and the two callers must handle it rather than trust it.
+    """
+    if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
+        return None
+    actors = reply.get("actors")
     if not isinstance(actors, list):
-        return []
+        return None
     return [str(a.get("label")) for a in actors if isinstance(a, dict)
             and str(a.get("label") or "").startswith(PROBE_PREFIX)]
+
+
+def probe_labels():
+    return labels_from(send("world", "get_all_actors", {}))
 
 
 def logic_selftest() -> int:
@@ -155,6 +167,19 @@ def logic_selftest() -> int:
            actor_count({"status": "SUCCESS", "actors": [{"label": "A"}]}), 1)
     expect("actor_count refuses a shape it cannot read",
            actor_count({"status": "SUCCESS", "actors": "not-a-list"}), None)
+    # The finding-1 pair: an unreadable reply must not read as "nothing left behind".
+    expect("labels_of a failed read is None, not []", labels_from({"status": "FAILED"}), None)
+    expect("labels_of NO_REPLY is None", labels_from({"status": "NO_REPLY"}), None)
+    expect("labels_of a non-list actors is None",
+           labels_from({"status": "SUCCESS", "actors": "oops"}), None)
+    expect("labels_of an empty level is []",
+           labels_from({"status": "SUCCESS", "count": 0, "actors": []}), [])
+    expect("labels_of keeps only probe-prefixed labels",
+           labels_from({"status": "SUCCESS", "actors": [{"label": "Cube"},
+                                                        {"label": PROBE_PREFIX + "1"}]}),
+           [PROBE_PREFIX + "1"])
+    expect("None is not equal to [] (the guard that skipped cleanup)",
+           labels_from({"status": "FAILED"}) == [], False)
 
     bad = [o for o in out if not o[3]]
     for name, got, want, okk in out:
@@ -192,12 +217,17 @@ def main() -> int:
     check("get_all_actors mengembalikan count yang bisa dibaca", n_before is not None, actors)
 
     # 2. Sweep leftovers from earlier runs before measuring anything, so a previous crash cannot
-    #    quietly become this run's baseline.
+    #    quietly become this run's baseline. An unreadable list is reported and does NOT pass.
     stale = probe_labels()
-    for lbl in stale:
-        timed("delete", {"actor_label": lbl})
-    check("sisa probe dari run sebelumnya dibersihkan (atau memang tidak ada)",
-          len(probe_labels()) == 0, f"sweep={stale} left={probe_labels()}")
+    if stale is None:
+        check("sisa probe dapat dibaca sebelum mengukur", False,
+              "get_all_actors tidak mengembalikan daftar actor; sweep tidak bisa membuktikan apa pun")
+    else:
+        for lbl in stale:
+            timed("delete", {"actor_label": lbl})
+        left = probe_labels()
+        check("sisa probe dari run sebelumnya dibersihkan (atau memang tidak ada)",
+              left == [], f"sweep={stale} left={left}")
 
     n_swept = actor_count(timed("get_all_actors", {}))
 
@@ -290,11 +320,14 @@ def main() -> int:
               missing.get("status") == "FAILED" and "NoSuchActor_zzz" in json.dumps(missing),
               missing)
     finally:
-        # 6. Clean up whatever this process created, including on the paths that raised.
+        # 6. Delete what this run may have created, unconditionally. The guard used to be
+        #    `if lbl in probe_labels()`, and probe_labels() returns None when the editor did not
+        #    answer -- so a read failure silently skipped the cleanup and left the test actor in
+        #    the operator's level. A delete of something that is not there costs one FAILED reply;
+        #    skipping a delete of something that IS there costs the operator their session state.
         if mutate:
             for lbl in [PROBE_LABEL, PROBE_LABEL + "B"]:
-                if lbl in probe_labels():
-                    timed("delete", {"actor_label": lbl})
+                timed("delete", {"actor_label": lbl})
 
     # 7. No leftovers, measured as a number the editor itself reports. `n_before is None or ...`
     #    would have called a failed read a success, so both ends must be real and equal.
@@ -303,18 +336,29 @@ def main() -> int:
         check("jumlah actor kembali persis seperti sebelum probe (angka editor, bukan len(None))",
               n_swept is not None and n_after is not None and n_after == n_swept,
               f"baseline={n_swept} after={n_after}")
-    check("tidak ada actor probe yang tertinggal di level", probe_labels() == [],
-          probe_labels())
+    leftover = probe_labels()
+    check("tidak ada actor probe yang tertinggal di level", leftover == [],
+          f"leftover={leftover!r} (None berarti editor tidak menjawab, itu BUKAN bersih)")
 
     strict = "--strict" in sys.argv
     passed = sum(1 for r in results if r["ok"])
     total = len(results)
     fail = passed < total or (strict and bool(defects))
-    print(json.dumps({"state": "FAILED" if fail else "OK",
+    # A green default with defects listed is not a clean engine, so it is not called "OK". Finding 4
+    # of the correction round: `state:"OK"` over two measured bridge defects let a reader take the
+    # gate's zero as a verdict about the bridge. DEFECTS_PRESENT exits 0 (the contract checks all
+    # passed) but is never readable as clean; --strict makes it fail instead.
+    clean = passed == total
+    state = ("FAILED" if not clean else
+             ("DEFECTS_PRESENT" if defects else "CLEAN"))
+    print(json.dumps({"state": state,
                       "endpoint": f"{HOST}:{PORT}",
                       "checks": f"{passed}/{total}",
                       "mutation": mutate,
                       "strict": strict,
+                      "exit_meaning": "0 = every contract check passed; defects are listed under "
+                                      "engine_defects and are NOT covered by this exit unless "
+                                      "--strict is given",
                       "elapsed_ms": int((time.time() - started) * 1000),
                       "latency_ms_by_action": timings,
                       "probe_class": PROBE_CLASS, "probe_label": PROBE_LABEL,

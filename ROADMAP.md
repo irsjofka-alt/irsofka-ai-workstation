@@ -1386,18 +1386,40 @@ current):
 |---|---|---|---|---|---|
 | IRSofka ComfyUI MCP | yes, `~/Apps/mcp/irsofka-comfyui-mcp` | private, `irsofka-comfy-mcp`, `main` at pushed sha | **2 of 2** engines | `61/61` selftest | `F11/MCP-1` id 294 — **COMPLETED** |
 | IRSofka Blender MCP | yes, `~/Apps/mcp/irsofka-blender-mcp` (server.py, bridge.py, vram.py, LICENSE, UPSTREAM, README, pyproject) | local only, first commit `bc4eae3`, no remote yet | **2 of 2** engines | `28/28` selftest; live round-trip against Blender 5.2.2 measured | `F11/MCP-2` id 295 — **COMPLETED** |
-| IRSofka Workstation MCP | `~/Apps/mcp/irsofka-workstation-mcp` (server.py, in build) | none yet | not yet | `--selftest` in progress | `F11/MCP-3` id 298 — WORKING, unblocked once 297 went green |
+| IRSofka Workstation MCP | `~/Apps/mcp/irsofka-workstation-mcp` (server.py, README, LICENSE, UPSTREAM, pyproject) | private, `irsofka-workstation-mcp`, `main` | **2 of 2** engines | selftest 24/24; live round trip measured | `F11/MCP-3` id 298 — COMPLETED on its own measured evidence |
 
 **Scope line that must be read literally.** `F11/STEP-0` (id 297) is titled "write the round-trip
-probe, then fix `set_transform`/`get_transform` and prove the spawn class". What 297 delivered is
-the probe, the measurement, and the proof of the spawn class; the C++ change did **not** land in
-297, because it needs either a module rebuild with the editor closed or Live Coding keystrokes in
-the operator's live session, and an unattended run may not do either. The fix is carried by
-`F11/STEP-0b` (id 301), whose gate `tools/ue_bridge_probe.py --allow-mutation --strict` is red by
-design until the plugin changes, and whose status is **HUMAN** with decision 55 (escalated: an
-irreversible choice is not delegated to any engine). A reviewer correctly called the closure of 297
-an overstatement against its title; the record stands as written rather than being quietly edited,
-and this paragraph is the correction.
+probe, then fix `set_transform`/`get_transform` and prove the spawn class". It shipped the probe,
+the measurement and the proof of the spawn class; the C++ change did **not** land, because it needs
+either a module rebuild with the editor closed or Live Coding keystrokes in the operator's live
+session, and an unattended run may not do either. A reviewer returned PERLU_KOREKSI on that round
+and named the closure as an overstatement used to release `depends_on` on MCP-3. That is correct,
+and the ledger was changed to match it rather than defended: **297 is now status HUMAN**, not
+COMPLETED, with the unfinished half written on the row. The fix itself is `F11/STEP-0b` (id 301,
+also HUMAN, decision 55 with options A/B/C). `F11/MCP-3` (id 298) was built, measured and closed on
+its own evidence — class resolution, verified writes, 24/24 selftest, live round trip — and it does
+not depend on 297's status for the truth of that; what it must no longer inherit is a green light
+from a row that was not actually finished.
+
+What 297's probe does now, after two review rounds found four vacuous passes in it:
+
+- `same()` requires exactly three finite numbers, so a missing key, a None, an empty list or a
+  short list fails instead of satisfying `all([])`.
+- the no-leftovers check requires the editor's own `count` at both ends; `actor_count` returns None
+  for a shape it cannot read, and None now fails the check instead of escaping it.
+- `labels_from()` distinguishes "the editor did not answer" (None) from "the level is clean" ([]).
+  The old `[]`-on-error made a socket failure read as no leftovers, and the cleanup guard
+  `if lbl in probe_labels()` then skipped the delete and left the test actor in the operator's
+  session. Cleanup is now unconditional in the finally block.
+- fallback detection matches the spellings `Actor`, `AActor` and `/Script/Engine.Actor`, so the
+  defect cannot hide behind one literal.
+- `--selftest` is 24 pure-logic cases, each one a way a check used to pass for no reason.
+- **the gates never mutate.** `--allow-mutation` is opt-in and is deliberately absent from the
+  loop's gate: the first version of this text claimed mutation was opt-in while the gate passed the
+  flag, which meant every autopilot tick dirtied the operator's open level and its undo stack.
+  Read-only mode is the default (6/6, `state:CLEAN`); mutation mode is a human-run measurement
+  (16/16, `state:DEFECTS_PRESENT`, two defects listed); `--strict` exits 1 while they remain.
+
 
 What the probe measures, and what it found (all of it reproducible with one command):
 

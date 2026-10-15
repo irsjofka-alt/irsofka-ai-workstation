@@ -3043,7 +3043,13 @@ ROADMAP_ITEMS = [
      # socket-nya TIDAK ada di dokumentasi skill (saya memanggilnya lewat MCP, bukan lewat mentah),
      # jadi menulisnya tanpa membaca `FIRSofkaSocketServer` adalah menebak — dan alat ukur yang
      # ditebak lebih buruk dari tidak ada alat ukur. Editor tutup = probe tidak bisa lolos: benar.
-     "test -f tools/ue_bridge_probe.py && timeout 180 python3 tools/ue_bridge_probe.py --selftest && timeout 180 python3 tools/ue_bridge_probe.py --allow-mutation"),
+     # Gerbang ini dijalankan loop, jadi TIDAK memakai --allow-mutation. Reviewer menemukan
+     # kontradiksinya: saya menulis "mutasi opt-in" sambil menyuruh gerbang otomatis memberi
+     # flag itu, artinya setiap detak autopilot mengotori level yang sedang dibuka operator dan
+     # mencemari undo-stack-nya. Yang boleh dijalankan tanpa orang: logika probe dan mode baca-saja.
+     # Bukti round-trip dengan spawn/delete tetap ada, tapi dihasilkan oleh run yang ditunggui
+     # (bukti item 297), bukan oleh gerbang.
+     "test -f tools/ue_bridge_probe.py && timeout 180 python3 tools/ue_bridge_probe.py --selftest && timeout 180 python3 tools/ue_bridge_probe.py"),
     # Utang yang DIUKUR oleh probe di atas, bukan dirasakan. Probe hari ini keluar 0 dengan
     # `engine_defects` berisi dua cacat plugin; dengan --strict ia keluar 1 selama cacat itu ada.
     # Gerbang yang merah karena pekerjaannya belum selesai adalah gerbang yang bekerja — berbeda
@@ -3059,6 +3065,10 @@ ROADMAP_ITEMS = [
     ("f11step0b", "F11/STEP-0b IRSofkaStationCore: hentikan fallback AActor diam-diam dan buat "
                   "set_transform membalas transform yang mendarat (butuh rebuild modul plugin)",
      "build", ["f11step0"],
+     # 301 tidak bisa diklaim loop (statusnya HUMAN), jadi gerbangnya boleh yang memutasi: yang
+     # menjalankannya orang yang sedang duduk di depan editor, tepat sebelum/ sesudah rebuild.
+     # Merah hari ini karena cacatnya nyata; hijau hanya kalau plugin sudah membalas class yang
+     # diminta dan membalas transform yang mendarat.
      "timeout 180 python3 tools/ue_bridge_probe.py --allow-mutation --strict"),
     # Namanya IRSofka WORKSTATION MCP, bukan "<engine brand> MCP": yang dimiliki repo ini adalah sisi
     # mesin dari jembatan (server, transport, gerbang), sedangkan plugin editor tetap artefak
