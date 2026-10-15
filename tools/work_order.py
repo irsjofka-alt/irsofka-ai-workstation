@@ -2812,7 +2812,6 @@ def seed(conn, engine, items, refresh_gates=None):
                              else "SELECT id, title, status FROM quest_tasks WHERE title=? AND seed_key IS NULL",
                              (title,))
                 if exists:
-                    _ph = "%s" if engine == "POSTGRESQL" else "?"
                     run(conn, engine,
                         f"UPDATE quest_tasks SET seed_key={ph} WHERE id={ph}",
                         (key, int(exists[0]["id"])))
@@ -2833,7 +2832,12 @@ def seed(conn, engine, items, refresh_gates=None):
                     run(conn, engine,
                         f"UPDATE quest_tasks SET title={ph} WHERE id={ph}", (title, keymap[key]))
                     made.append((keymap[key], "judul diselaraskan", title))
-                    continue
+                    # TANPA `continue` di sini. Versi pertama berhenti setelah menyelaraskan judul,
+                    # sehingga baris yang judul DAN gerbangnya sama-sama berubah butuh DUA panggilan
+                    # seed untuk sampai ke keadaan yang benar — dan panggilan pertama melaporkan
+                    # "selesai" sementara gerbangnya masih teks lama. Ditemukan verifier 2026-10-15.
+                    # Judul dan gerbang adalah dua writes pada baris yang sama; keduanya boleh terjadi
+                    # di lintasan yang sama, dan yang membekukan salah satunya hanya status vonis.
                 # Gerbang boleh DIPERBAIKI selama barisnya belum divonis. Kebutuhan ini nyata:
                 # gerbang f109 diperketat hari ini (menuntut sisi "push tanpa verdict ditahan"),
                 # tapi seed idempoten berdasarkan judul dan tidak pernah menulis ulang
@@ -5052,6 +5056,20 @@ def selftest():
               (_held_row[0]["c"] or "") == "baru"
               and not any(s == "gerbang diperbarui" for _i, s, _t in _r_held),
               f"{_held_row[:1]} report={_r_held}")
+        # Temuan #2 verifier: baris yang judul DAN gerbangnya berubah butuh dua panggilan seed,
+        # karena jalur penyelarasan judul berhenti sebelum blok gerbang. Satu panggilan sekarang
+        # harus menghasilkan keduanya — kalau tidak, laporan pertama menyebut "selesai" di atas
+        # baris yang gerbangnya masih teks lama.
+        _both = int([_i for _i, _s, _t in seed(conn, "SQLITE",
+                     [("kBoth", "Judul Awal", "build", None, "gerbang-lama")])][0])
+        _r_both = seed(conn, "SQLITE", [("kBoth", "Judul Baru", "build", None, "gerbang-baru")])
+        _both_row = run(conn, "SQLITE",
+                        "SELECT title, check_command AS c FROM quest_tasks WHERE id=?", (_both,))
+        check("satu panggilan seed menyelaraskan judul DAN gerbang baris PENDING sekaligus",
+              _both_row[0]["title"] == "Judul Baru" and (_both_row[0]["c"] or "") == "gerbang-baru"
+              and any(s == "judul diselaraskan" for _i, s, _t in _r_both)
+              and any(s == "gerbang diperbarui" for _i, s, _t in _r_both),
+              f"{_both_row[:1]} report={_r_both}")
         finish(conn, "SQLITE", _gate, "COMPLETED", evidence="9/9", followup=False)
         seed(conn, "SQLITE", [("kGate", "Gerbang Default", "build", None, "setelah vonis")])
         _post = run(conn, "SQLITE", "SELECT check_command AS c FROM quest_tasks WHERE id=?",
