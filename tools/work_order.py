@@ -1804,6 +1804,40 @@ def answer_decision(conn, engine, decision_id, answer, by="operator", note=None)
     return True, f"decision {decision_id} ANSWERED oleh {who}", fresh
 
 
+def revise_decision(conn, engine, decision_id, question, options=None):
+    """Perbaiki PERTANYAAN yang belum dijawab, id-nya tetap sama.
+
+    Ada karena satu baris lahir cacat dan terbukti: teksnya dibangun dari argumen shell yang memuat
+    backtick, dan substitusi perintah menghabiskan bagian itu sebelum `decide()` sempat membacanya —
+    operator melihat kalimat bolong dengan enam "opsi" padahal pilihannya tiga. Antrean yang salah
+    baca membuat orang menjawab pertanyaan yang tidak pernah ditanyakan, jadi barisnya yang dibetulkan,
+    bukan dimaafkan.
+
+    Id TETAP sama, bukan pertanyaan baru: tautan `item_id` dan posisi di tab Human Decide adalah
+    setengah dari kegunaan baris ini. Pertanyaan baru akan meninggalkan yang cacat di samping yang
+    benar, dan dua pertanyaan untuk satu item adalah dua angka yang beredar bersamaan.
+
+    Yang ditolak: baris ber-state ANSWERED/RESOLVED. Jawabannya menunjuk teks lama; mengganti teks di
+    bawahnya berarti memalsukan apa yang disetujui seseorang. Untuk perubahan pikiran jalurnya tetap
+    pertanyaan baru, sama seperti di `answer_decision`.
+    """
+    if not (question or "").strip():
+        return False, f"pertanyaan kosong ditolak: {decision_id} tetap seperti adanya", None
+    row = _decision_row(conn, engine, decision_id)
+    if not row:
+        return False, f"decision {decision_id} tidak ada — tidak ada yang diperbaiki", None
+    if row.get("state") not in ("OPEN", "ESCALATED"):
+        who = row.get("answered_by") or row.get("model_id") or "tidak tercatat"
+        return False, (f"decision {decision_id} sudah {row['state']} oleh {who}; revisi ditolak — "
+                       "jawabannya menunjuk teks yang lama"), row
+    ph = "%s" if engine == "POSTGRESQL" else "?"
+    run(conn, engine,
+        f"UPDATE decisions SET question={ph}, options={ph} WHERE id={ph}",
+        (question.strip()[:2000], json.dumps(normalise_options(options))[:4000], decision_id))
+    fresh = _decision_row(conn, engine, decision_id)
+    return True, f"decision {decision_id} diperbaiki, id dan tautan item tetap", fresh
+
+
 def decisions_for_item(conn, engine, item_id):
     """Semua pertanyaan yang menunjuk satu item, terbuka maupun terjawab.
 
@@ -3984,6 +4018,26 @@ def selftest():
               not answer_decision(conn, "SQLITE", q_b, "   ")[0])
         ok_a3, msg_a3, _ = answer_decision(conn, "SQLITE", 9_999_999, "x")
         check("id asing ditolak sebelum ada UPDATE", not ok_a3 and "tidak ada" in msg_a3, msg_a3)
+        # --- merevisi pertanyaan yang BELUM dijawab, tanpa memindahkan id-nya ---
+        q_c = decide(conn, "SQLITE", "Teks bolong akibat substitusi shell", ["X", "Y"],
+                     "heavy", host)[0]["id"]
+        ok_r, msg_r, row_r = revise_decision(
+            conn, "SQLITE", q_c, "Pertanyaan yang sudah diperbaiki",
+            [{"label": "X", "evidence": "ukur 1"}, {"label": "Y", "evidence": "ukur 2"}])
+        check("revisi memakai id yang sama, supaya tautan item dan posisinya di tab tidak pindah",
+              ok_r and row_r and int(row_r["id"]) == q_c and int(row_r["item_id"]) == host, msg_r)
+        check("teks DAN opsi lama benar-benar terganti",
+              row_r and str(row_r["question"]).startswith("Pertanyaan yang sudah diperbaiki")
+              and len(json.loads(row_r["options"] or "[]")) == 2, str(row_r)[:150])
+        ok_r2, msg_r2, _ = revise_decision(conn, "SQLITE", q_b, "menimpa yang sudah dijawab")
+        check("baris yang sudah dijawab DITOLAK direvisi — jawabannya menunjuk teks lama",
+              not ok_r2 and "ANSWERED" in msg_r2, msg_r2)
+        check("revisi atas id asing tidak menulis apa pun",
+              not revise_decision(conn, "SQLITE", 9_999_999, "x")[0])
+        check("pertanyaan kosong tidak menghapus teks yang sudah ada",
+              not revise_decision(conn, "SQLITE", q_c, "   ")[0]
+              and str(_decision_row(conn, "SQLITE", q_c)["question"])
+              .startswith("Pertanyaan yang sudah diperbaiki"))
         check("jawaban dapat dibaca balik dari itemnya",
               any(d["id"] == q_b and d["state"] == "ANSWERED" for d in
                   decisions_for_item(conn, "SQLITE", host)),
@@ -5602,6 +5656,9 @@ def main(argv=None):
     p.add_argument("--item", type=int, default=None,
                    help="quest id yang menunggu jawaban ini; tanpa ini pertanyaan tidak membangunkan siapa-siapa")
     p.add_argument("--route", action="store_true", help="langsung kiratkan ke tangga resolver")
+    p.add_argument("--replace", type=int, default=None, metavar="ID",
+                   help="perbaiki pertanyaan yang belum dijawab alih-alih membuat yang baru; id lama "
+                        "dan tautan itemnya tetap")
     p.add_argument("--timeout", type=int, default=240)
     p = sub.add_parser("answer"); p.add_argument("id", type=int)
     p.add_argument("--choice", required=True, help="isi jawaban; label pilihan, kalimat bebas, apa pun yang operator tulis")
@@ -5729,6 +5786,11 @@ def main(argv=None):
     elif a.cmd == "drain":
         print(json.dumps(drain_level(conn, engine), default=str, indent=2))
     elif a.cmd == "decide":
+        if a.replace:
+            ok, msg, row = revise_decision(conn, engine, a.replace, a.question,
+                                           parse_options_arg(a.options))
+            print(json.dumps({"ok": ok, "message": msg, "decision": row}, default=str, indent=2))
+            return 0 if ok else 1
         rows = decide(conn, engine, a.question, parse_options_arg(a.options), a.weight, a.item)
         row = rows[0]
         print(json.dumps(row, default=str, indent=2))
