@@ -193,10 +193,16 @@ pool until a measurement says otherwise.
 `tools/tripo.py` wraps the official `tripo-cli` (0.6.1, API **V3**) as the workstation's paid 3D
 half. It is deliberately a *gate*, not a faucet. What exists today is narrow and named exactly:
 
-- **HTTP routes in `ENDPOINTS`**, each measured by a free `--dry-run`: `text_to_model`
-  (`/v3/generation/text-to-model`), `texture` (`/v3/models/texture`), `convert`
-  (`/v3/models/convert`), plus `balance` which is not a REST path at all but `tripo whoami`.
-  Image→model is **not** in that table; it is reachable only through the raw `cli` passthrough.
+- **One measured HTTP route.** `tripo make "<prompt>" --dry-run` (free, no credential) confirms
+  `text_to_model` at `/v3/generation/text-to-model`. `texture` and `convert` are listed in
+  `ENDPOINTS` but marked **TEBAKAN** (guess): what `tripo make --help` actually shows is that they
+  are a processing chain — `--then "texture,convert:fbx"` on `make` — not routes of their own, and
+  their `/v3/...` paths have never been confirmed against any server. Their cost is not a number, so
+  the gate below refuses them regardless.
+- `balance` is not a REST path either; it is `tripo whoami`, and it uses the vendor's own login
+  session, which is why `probe` does not ask for an API key on that route.
+- Image→model is reachable, but only through the raw `cli` passthrough (`make` accepts image files),
+  not through the cost table.
 - `ai-station` has no `tripo` verb; call `python3 tools/tripo.py status|probe|capabilities|submit|cli`.
 
 The cost rule:
@@ -218,9 +224,10 @@ The cost rule:
   credential exists on this machine yet — `probe` refuses rather than assuming, and `404` handling
   in the code is tested with a fake transport, not observed.
 
-`ai-station tripo status` reports what is installed and whether a credential exists. Live calls are
-still pending: the Studio wallet (500 points, browser session) and the API wallet have not been shown
-to be the same balance, and that has to be measured with `tripo whoami --json` before any run is
+`python3 tools/tripo.py status` reports whether a key is present (length and fingerprint only) and
+`tools/tripo.py probe` runs the free `tripo whoami --json`. Live calls are still pending: no
+credential exists on this machine yet, and the Studio wallet (500 points, browser session) has not
+been shown to be the same balance as the API wallet — that has to be measured before any run is
 allowed to spend.
 
 ## MCP Servers — the workstation's hands

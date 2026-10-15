@@ -57,14 +57,26 @@ CONFIG = REPO / "config" / "tripo.json"
 SPEND_COMMANDS = {"make", "ai", "redo"}
 
 ENDPOINTS = {
+    # SATU-satunya yang benar-benar diukur: `tripo make "..." --dry-run` (2026-10-15 11:1x) tanpa
+    # kunci dan tanpa poin. `texture` dan `convert` di bawah adalah NAMA CHAIN, bukan endpoint:
+    # `tripo make --help` (terukur) menunjukkan mereka lewat `--then "texture,convert:fbx"` pada
+    # `make`, bukan sebagai rute sendiri. Path /v3 mereka adalah tebakan saya dari draf pertama
+    # dan tidak pernah dikonfirmasi server mana pun — jadi labelnya TEBAKAN, dan `biaya_poin`-nya
+    # bukan angka, yang berarti gerbang biaya menolak memakainya apa pun yang terjadi di bawah.
     "text_to_model": {"kind": "http", "path": "/v3/generation/text-to-model", "method": "POST",
                       "task_type": "text_to_model",
                       "status": "TERUKUR lewat dry-run (rencana valid=true, model P1-20260311)",
                       "biaya_poin": "cost_notes kosong saat dry-run tanpa kunci — ukur lewat whoami"},
-    "texture": {"kind": "http", "path": "/v3/models/texture", "method": "POST", "task_type": "texture_model",
-                "status": "TERUKUR lewat dry-run", "biaya_poin": "belum terukur"},
-    "convert": {"kind": "http", "path": "/v3/models/convert", "method": "POST", "task_type": "convert_model",
-                "status": "TERUKUR lewat dry-run", "biaya_poin": "belum terukur"},
+    "texture": {"kind": "http", "path": "/v3/models/texture", "method": "POST",
+                "task_type": "texture_model",
+                "status": "TEBAKAN — path tidak pernah dikonfirmasi; yang terukur adalah chain "
+                          "`make --then texture`, jadi rute nyata fungsi ini adalah CLI",
+                "biaya_poin": "belum terukur"},
+    "convert": {"kind": "http", "path": "/v3/models/convert", "method": "POST",
+                "task_type": "convert_model",
+                "status": "TEBAKAN — path tidak pernah dikonfirmasi; yang terukur adalah chain "
+                          "`make --then convert:fbx`",
+                "biaya_poin": "belum terukur"},
     "balance": {"path": "whoami", "method": "-", "kind": "cli",
                 "status": "GRATIS dan wajib dipanggil pertama; butuh `tripo login` lebih dulu",
                 "biaya_poin": 0},
