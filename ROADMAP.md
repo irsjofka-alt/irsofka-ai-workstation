@@ -1345,17 +1345,18 @@ TERAKHIR"):
 |---|---|------|---|---|
 | IRSofka ComfyUI MCP | yes, `~/Apps/mcp/irsofka-comfyui-mcp` (server.py, vram.py, LICENSE, README, pyproject) | **none** (`git remote get-url origin` fails) | **0 of 2** (`grep irsofka-comfyui-mcp` in `~/.qoder/settings.json` and `~/.gemini/settings.json`: no match) | **no `dist/`** | `F11/MCP-1` id 294, `origin='roadmap'` |
 | IRSofka Blender MCP | no such directory | n/a | n/a | n/a | `F11/MCP-2` id 295 |
-| IRSofka Unreal Engine MCP | no such directory (the plugin lives inside the engine project) | n/a | n/a | n/a | `F11/MCP-3` id 298, `depends_on` `F11/STEP-0` id 297 |
+| IRSofka Unreal Engine MCP | no such directory (the plugin lives inside the engine project) | n/a | n/a | n/a | `F11/MCP-3` id 298 (`depends_on` 297, so not offerable until 297 is green) |
 
-Four rows (294, 295, 297, 298), four numeric gates, all **red today and meant to be red**; the first seed of MCP-3 was parked as id 296 rather than deleted, because its gate claimed to measure the bridge while it only proved a README exists. Each gate is a
+Four rows (294, 295, 297, 298); three offerable now, 298 gated behind 297; all gates **red today and meant to be red**; the first seed of MCP-3 was parked as id 296 rather than deleted, because its gate claimed to measure the bridge while it only proved a README exists. Each gate is a
 `check_command` in `ROADMAP_ITEMS`, so `work_order.py seed --roadmap` re-derives them and the queue
 offers them before anything the machine writes for itself. `next_ready()` returned id 286 (a
 machine-authored skill-sharpening row) before this; with rank 0 empty it returns 294 now. A second
 consequence of the same audit: `drop_stale_legacy` **hid** legacy working rows whose lease had died
 (decision 45, answered `qwen3.5:9b` at 03:5x). Its premise was the id-ordered queue — with ranking,
 those rows can no longer overtake an operator command or a roadmap item, so hiding them only made
-unfinished real work invisible forever (ids 235, 236, 244). They are now **demoted to rank 2.5**
-instead of dropped, still cooled down by `due_epoch` when a gate refuses them.
+unfinished real work invisible forever (ids 235, 236, 244). The flag was **deleted** rather than
+re-defaulted — a flag any caller can set gives one row two orders — and stale legacy rows now sit
+at `RANK_STALE_LEGACY` (25), below roadmap and above idle, still cooled down by `due_epoch`.
 
 **Naming is a licence term, not branding.** "Blender", "ComfyUI"/"Comfy Org" and "Unreal" are other
 parties' marks; descriptive use ("MCP for Blender") is fine, implying official status is not, and

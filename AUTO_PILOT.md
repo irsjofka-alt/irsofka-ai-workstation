@@ -38,11 +38,20 @@ So this ladder is not advice, and it is enforced in two places: `work_rank()` in
 |---|---|---|
 | 0 | a command the operator typed himself (`origin='operator'`) | `queue`, Human Decide answers, instructions written into SQL |
 | 1 | ROADMAP items (`origin='roadmap'`) | F11/MCP-1..3, F10.x, F9.x — anything in `ROADMAP_ITEMS` |
-| 2 | living legacy rows (`origin='legacy'`) | old working rows whose lease is genuinely still held |
+| 2 | unclaimed legacy rows (`origin='legacy'`) | old work no session is holding; a row whose lease IS held belongs to that session and is never offered to you |
 | 3 | work the **machine wrote for itself** (`origin='idle'`) | skill sharpening, re-reading a decision note, `FOLLOWUP_CONTRACTS` |
+
+A stale legacy row (working status, dead lease) sits at 25 — below roadmap, above idle. It is never hidden: the flag that used to hide it was **deleted**, because a flag that any caller can set gives one row two orders, and contract 12 forbids that.
 
 The rules that bind rank 3, and these are the ones that were broken:
 
+- **The sharpening row may not even be written.** `ensure_idle_item()` and `queue_followup()` now ask
+  `roadmap_open()` first, which reads BOTH the ledger and ROADMAP.md, and refuses with
+  `IDLE_HELD_BY_ROADMAP` (rows still claimable), `IDLE_MAP_NOT_PROJECT` (phases open but never
+  projected into the queue — run `seed --roadmap`, that is a finding, not a licence to polish) or
+  `IDLE_DEBT_UNKNOWN` (unreadable). That guard is the real answer to "whose command was that?": the
+  sharpening rows were the machine's own invention, written because the ledger looked empty while the
+  map was not.
 - **Never take a sharpening row while any rank 0–2 item can be worked.** If `next_ready()` hands you
   an `origin='idle'` row while `ROADMAP.md` still has an F at 🟡 or ⬜, that is NOT the signal "the
   roadmap is done". It means the roadmap steps were never turned into rows. Fix the rows

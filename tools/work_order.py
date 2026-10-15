@@ -497,7 +497,11 @@ ORIGIN_OPERATOR = "operator"
 ORIGIN_IDLE = "idle"
 # Peringkat penawaran antrean. `work_rank()` punya alasannya sendiri; angkanya tinggal di sini supaya
 # tidak ada tempat kedua yang memutuskan "mana yang lebih dulu".
-KIND_RANK = {ORIGIN_OPERATOR: 0, ORIGIN_ROADMAP: 1, ORIGIN_LEGACY: 2, ORIGIN_IDLE: 3}
+KIND_RANK = {ORIGIN_OPERATOR: 0, ORIGIN_ROADMAP: 10, ORIGIN_LEGACY: 20, ORIGIN_IDLE: 30}
+# Jarak 10 bukan kosetika: versi pertama memakai 1/2/3 dan langsung butuh sisipan 2,5. Pecahan adalah
+# undang-undang — besok ada yang menambah 1,5, lusa 0,5 — dan kata "berikutnya" berhenti punya satu
+# pemilik. Tingkat baru masuk ke celah yang memang disediakan.
+RANK_STALE_LEGACY = 25
 
 # Batas sendiri untuk baris idle. `NIGHT_MAX_ITEMS` menjaga seluruh run; tanpa angka kedua ini,
 # pekerjaan pengayaan-diri akan memakan anggaran item malam dan menyisakan sedikit ruang untuk
@@ -656,6 +660,41 @@ def idle_debt_menu(conn, engine, brain_root=None):
             "partial": bool(unreadable), "items": items}
 
 
+def roadmap_open(conn, backend):
+    """Pekerjaan ROADMAP yang masih terbuka — dibaca dari ledger DAN dari peta itu sendiri.
+
+    Fungsi ini ada karena satu kejadian, malam ini: `queue_followup` menulis baris penajaman skill
+    dengan alasan "tidak ada utang terukur", dan loop mengerjakan penajaman sementara perintah MCP
+    operator (turn 458) belum pernah punya baris dan ROADMAP.md masih punya enam fase belum ✅.
+    Premis "antrean kosong" itu benar dari titik pandang ledger dan salah dari titik pandang peta —
+    dan yang dibaca mesin hanyalah ledger. Jadi pertanyaan "apa yang masih terbuka" dijawab dari dua
+    sumber, dan keduanya dilaporkan. Yang TIDAK dilakukan di sini: memperbaiki sendiri dengan
+    meng-seed peta ke antrean sebagai efek samping; itu tulisan, dan pemanggil harus memutuskan
+    sendiri (perintahnya `work_order.py seed --roadmap`).
+
+    Bacaan yang gagal adalah UNKNOWN dan dilaporkan sebagai UNKNOWN, bukan nol. §3: ketiadaan bukti
+    tidak pernah berarti tidak ada pekerjaan.
+    """
+    ph = "%s" if backend == "POSTGRESQL" else "?"
+    out = {"ledger_rows": None, "open_phases": None, "unreadable": []}
+    try:
+        rows = run(conn, backend,
+                   f"SELECT COUNT(*) AS n FROM quest_tasks WHERE origin={ph} "
+                   f"AND status IN {CLAIMABLE_SQL}", (ORIGIN_ROADMAP,)) or []
+        out["ledger_rows"] = int((rows[0].get("n") if rows else 0) or 0)
+    except Exception as exc:  # noqa: BLE001
+        out["unreadable"].append(f"ledger ({str(exc)[:40]})")
+    try:
+        text = (REPO / "ROADMAP.md").read_text(encoding="utf-8")
+        # Blok "## Phases" membaris tiap fase dengan tanda selesainya. ✅ = selesai; apa pun yang
+        # lain (🟡 berjalan, 🟨 sebagian, ⬜ belum) adalah pekerjaan yang masih terbuka.
+        marks = re.findall(r"^F(\d+)[^\n]*?(✅|🟡|🟨|⬜)", text, re.M)
+        out["open_phases"] = sorted({int(m[0]) for m in marks if m[1] != "✅"})
+    except Exception as exc:  # noqa: BLE001
+        out["unreadable"].append(f"ROADMAP.md ({str(exc)[:40]})")
+    return out
+
+
 def idle_budget_used(conn, backend):
     """Berapa baris idle yang sudah MEMAKAN anggaran pada jendela ON yang sedang berjalan.
 
@@ -723,6 +762,24 @@ def ensure_idle_item(conn, backend, cli_engine=None, who=IDLE_HOLDER, emit=None,
         # Tanpa jendela yang terbaca DAN masih terbuka, "berapa idle yang sudah dipakai" tidak bisa
         # dijawab — dan menjawabnya dengan nol adalah mengizinkan loop tanpa batas. UNKNOWN bukan 0.
         emit("IDLE_DEBT_UNKNOWN", why="jendela ON tidak terbaca atau sudah lewat")
+        return None
+
+    # Penolakan keenam, dan ini yang tidak ada malam ini. `ensure_idle_item` sudah menahan dirinya
+    # ketika "utang terukur" kosong, tapi utang itu diukur dari brain/skills dan ledger — bukan dari
+    # ROADMAP.md. Hasilnya tepat yang dikeluhkan operator: loop menulis baris penajaman sendiri pada
+    # 17:08 sementara perintah MCP-nya belum punya baris sama sekali dan enam fase peta masih
+    # terbuka. Selama masih ada pekerjaan roadmap, baris yang mesin karang sendiri tidak ditulis.
+    _ro = roadmap_open(conn, backend)
+    if _ro["ledger_rows"]:
+        emit("IDLE_HELD_BY_ROADMAP", rows=int(_ro["ledger_rows"]), open_phases=_ro["open_phases"])
+        return None
+    if _ro["open_phases"]:
+        emit("IDLE_MAP_NOT_PROJECT", open_phases=_ro["open_phases"],
+             why="fase peta masih terbuka tapi tidak ada barisnya di antrean — jalankan "
+                 "`python3 tools/work_order.py seed --roadmap`, jangan tulis penajaman")
+        return None
+    if _ro["ledger_rows"] is None or _ro["open_phases"] is None:
+        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro["unreadable"]))
         return None
 
     if not eng:
@@ -1286,6 +1343,25 @@ def queue_followup(conn, backend, cli_engine, emit=None):
     """
     emit = emit or (lambda *a, **kw: None)
     ph = "%s" if backend == "POSTGRESQL" else "?"
+    # Pagar pertama, dan ini yang tidak ada malam ini: selama pekerjaan ROADMAP masih terbuka,
+    # mesin TIDAK boleh mengantrikan penajaman miliknya sendiri. Bukan soal urutan penawaran saja —
+    # barisnya bahkan tidak boleh lahir. Dua keadaan dilaporkan beda:
+    #   IDLE_HELD_BY_ROADMAP  : ledger masih punya baris roadmap yang bisa diklaim;
+    #   IDLE_MAP_NOT_PROJECT  : peta masih terbuka tapi ledger kosong, artinya langkah roadmap belum
+    #                           pernah dipetakan (`seed --roadmap`), dan itu TEMUAN, bukan izin.
+    _ro = roadmap_open(conn, backend)
+    if _ro["ledger_rows"]:
+        emit("IDLE_HELD_BY_ROADMAP", rows=int(_ro["ledger_rows"]),
+             open_phases=_ro["open_phases"], why="antrean roadmap belum kosong — penajaman tidak ditulis")
+        return None
+    if _ro["open_phases"]:
+        emit("IDLE_MAP_NOT_PROJECT", open_phases=_ro["open_phases"],
+             why="ROADMAP.md masih punya fase terbuka tapi tidak ada barisnya di antrean — "
+                 "jalankan `python3 tools/work_order.py seed --roadmap`, jangan kerjakan penajaman")
+        return None
+    if _ro["ledger_rows"] is None or _ro["open_phases"] is None:
+        emit("IDLE_DEBT_UNKNOWN", why="utang roadmap tidak terbaca: " + "; ".join(_ro["unreadable"]))
+        return None
     if not cli_engine:
         emit("IDLE_DEBT_UNKNOWN", why="item selesai tanpa cli_engine — lanjutan tidak tahu ke mana")
         return None
@@ -1675,9 +1751,15 @@ def work_rank(row):
     tujuh langkah terbuka di ROADMAP.md. Loop tidak sedang memilih pekerjaan ringan; ia hanya mengambil
     yang nomornya kecil, dan baris mesin punya nomor terbaru sekaligus paling ringan dikerjakan.
 
-    Urutannya sekarang: perintah orang > item roadmap > baris warisan yang masih hidup > pekerjaan yang
-    dibuat mesin sendiri. Di dalam satu peringkat urutan id tetap berlaku, jadi tidak ada bintang baru
-    yang menentukan "berikutnya" selain fungsi ini — §12: satu pemilik untuk kata "berikutnya".
+    Urutannya sekarang: perintah orang > item roadmap > baris warisan > pekerjaan yang dibuat mesin
+    sendiri. Di dalam satu peringkat urutan id tetap berlaku, jadi tidak ada bintang baru yang
+    menentukan "berikutnya" selain fungsi ini — §12: satu pemilik untuk kata "berikutnya".
+
+    Yang TIDAK termasuk di dalam daftar ini, dan perlu disebut karena dokumen penajaman sempat
+    menuliskannya terbalik: baris warisan yang masih DIPEGANG orang (claimed_by terisi, lease hidup)
+    tidak ditawarkan sama sekali — `ready_items` melewatinya, dan itu benar, itu pekerjaan milik sesi
+    lain. Peringkat 20 adalah untuk baris warisan yang bisa diambil; yang lease-nya mati justru
+    turun ke 25 supaya tidak pernah menyalip pekerjaan yang benar-benar diminta.
 
     BATAS YANG DISENGAJA, ditulis karena reviewer menemukannya dan tidak bisa dibantah: peringkat ini
     buta terhadap urgensi. Sebuah baris `origin='idle'` yang isinya pemulihan kritis (disk habis,
@@ -1687,11 +1769,19 @@ def work_rank(row):
     roadmap (`seed --roadmap`), bukan sebagai penajaman. Peringkat 3 adalah peringkat untuk hal yang
     memang boleh menunggu.
     """
-    return KIND_RANK.get(str(row.get("origin") or ORIGIN_LEGACY), 2)
+    origin = str(row.get("origin") or ORIGIN_LEGACY)
+    base = KIND_RANK.get(origin, KIND_RANK[ORIGIN_LEGACY])
+    # Baris warisan yang berstatus kerja tanpa lease hidup turun sendiri, dan dihitung dari BARISNYA,
+    # bukan dari flag pemanggil. Versi pertama menurunkan peringkatnya hanya saat caller mengirim
+    # `drop_stale_legacy=True`, jadi laporan dan GUI membaca urutan yang berbeda untuk baris yang sama
+    # — klaim "satu definisi berikutnya" salah di dalam kalimat yang menuliskannya sendiri.
+    if (origin == ORIGIN_LEGACY and norm(row.get("status")) in ("WORKING", "CLAIMED")
+            and int(row.get("lease_epoch") or 0) <= now()):
+        return RANK_STALE_LEGACY
+    return base
 
 
-def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None,
-              drop_stale_legacy=False):
+def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None):
     """Item berikutnya yang siap: semua dependensinya COMPLETED, dan lease-nya tidak dipegang orang.
 
     `UNAVAILABLE` tidak pernah ditawarkan, sama seperti `FAILED`: keduanya adalah kesimpulan yang
@@ -1713,25 +1803,17 @@ def next_item(conn, engine, skip_blocked=True, respect_due=False, origin=None, f
     Urutan penawaran bukan lagi `ORDER BY id` mentah: lihat `work_rank()`. Perintah orang dulu, lalu
     item roadmap, lalu warisan, lalu pekerjaan yang dibuat mesin sendiri — supaya sebuah loop tidak
     pernah lagi mengambil baris penajaman miliknya sendiri sambil meninggalkan F11 di ROADMAP.md.
+    Tidak ada lagi flag "buang yang usang": reviewer menemukan bahwa flag seperti itu memberi dua
+    urutan berbeda untuk baris yang sama tergantung pemanggilnya, dan §12 melarang itu.
     """
     return next(iter(ready_items(conn, engine, skip_blocked=skip_blocked,
                                  respect_due=respect_due, origin=origin,
-                                 for_engine=for_engine,
-                                 drop_stale_legacy=drop_stale_legacy)), None)
+                                 for_engine=for_engine)), None)
 
 
-def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None,
-                drop_stale_legacy=False):
+def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None, for_engine=None):
     """SEMUA baris yang siap, dengan aturan yang sama persis dengan `next_item`.
 
-    `drop_stale_legacy` (keputusan 45, dijawab `qwen3.5:9b` pada rung `resolver-local`, 03:5x):
-    baris `origin='legacy'` yang masih berstatus kerja tapi lease-nya 0 adalah kepala antrean yang
-    mustahil selesai — `next_item` membacanya sebagai lease kedaluwarsa, jadi ia ditawarkan ulang
-    SETIAP tick, selalu kena cooldown, dan menahan baris operator yang nyata. Terukur: 14 baris
-    (id 222..244), dan `next_ready()` malam ini menyerahkan 223, sebuah rebrand UECP dari sebelum
-    skema ini ada. Yang dibuang di sini hanya yang sedemikian: legacy PENDING biasa TETAP
-    ditawarkan, dan pelaporan TIDAK memakai flag ini — baris yang ditahan harus tetap terlihat,
-    sama seperti baris ber-cooldown.
 
     Dipisah supaya pelaporan bisa memakai daftar ini. Sebelumnya `semi_status` menyusun
     `operator_queue`-nya sendiri dengan SQL mentah `status='PENDING'` — tanpa `norm()`, tanpa
@@ -1750,25 +1832,9 @@ def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None,
             continue
         if state in ("BLOCKED", "HUMAN", "PARKED") and skip_blocked:
             continue
-        # KEDUA status kerja ikut, dan itu bukan kosmetik: `norm()` memetakan IN_PROGRESS warisan
-        # ke CLAIMED, bukan WORKING — jadi versi pertama filter ini hanya menulis WORKING,
-        # `next_ready()` tetap mengembalikan 222, dan keputusan 45 seolah sudah dikerjakan padahal
-        # tidak mengubah apa pun. Yang ditahan adalah klaim tanpa lease hidup: tidak ada yang
-        # memegangnya, dan tidak ada yang bisa menyelesaikannya lewat jalur ini.
-        if (drop_stale_legacy and state in ("WORKING", "CLAIMED")
-                and (r.get("origin") or ORIGIN_LEGACY) == ORIGIN_LEGACY
-                and int(r.get("lease_epoch") or 0) <= now()):
-            # Dulu `continue`: barisnya HILANG dari penawaran. Itu benar saat satu-satunya urutan
-            # adalah `ORDER BY id`, karena kepala antrean yang mustahil selesai menahan perintah
-            # operator di belakangnya (keputusan 45). Dengan peringkat, alasan itu tidak ada lagi:
-            # baris usang sudah otomatis di bawah operator dan roadmap. Yang tersisa dari membuang
-            # hanyalah biaya yang sekarang dilihat operator sebagai "task-ku di-skip": pekerjaan
-            # nyata yang belum selesai (235 IP cleanup, 236 plafon VRAM, 244 F10.9) jadi tidak
-            # pernah ditawarkan lagi selamanya. Jadi ia TURUN, bukan hilang: rank 2.5, di belakang
-            # legacy yang leasesnya masih hidup, dan tetap kena cooldown lewat due_epoch kalau
-            # memang ditolak gerbang.
-            r = dict(r)
-            r["_rank"] = KIND_RANK[ORIGIN_LEGACY] + 0.5
+        # Baris warisan ber-lease mati TIDAK dibuang lagi. Ia tetap ada dan `work_rank()`
+        # menurunkannya ke RANK_STALE_LEGACY — lihat komentar di sana untuk mengapa membuang adalah
+        # bagian yang salah dari keputusan 45.
         if origin is not None and (r.get("origin") or ORIGIN_LEGACY) != origin:
             continue
         # `for_engine` ada di sini karena pemicu yang hidup DI DALAM satu sesi tidak boleh mengambil
@@ -1788,8 +1854,7 @@ def ready_items(conn, engine, skip_blocked=True, respect_due=False, origin=None,
         out.append(r)
     # Stabil di dalam peringkat: id tetap penentu untuk baris dengan asal yang sama, jadi menambahkan
     # peringkat tidak mengubah urutan yang sudah diyakini tes lama.
-    out.sort(key=lambda r: (r.get("_rank") if r.get("_rank") is not None else work_rank(r),
-                            int(r["id"])))
+    out.sort(key=lambda r: (work_rank(r), int(r["id"])))
     return out
 
 
@@ -2700,15 +2765,22 @@ ROADMAP_ITEMS = [
      "git -C ~/Apps/mcp/irsofka-comfyui-mcp rev-parse origin/main && "
      "grep -q irsofka-comfyui-mcp ~/.qoder/settings.json && "
      "grep -q irsofka-comfyui-mcp ~/.gemini/settings.json"),
-    ("f11mcp_blender", "F11/MCP-2 IRSofka Blender MCP: basis PERMISIF, dimodifikasi habis-habisan "
-                       "untuk ai-station, dan bukan turunan AGPL", "build", None,
-     # `mcp-blender` yang sekarang adalah AGPL-3.0-or-later sejak v0.4.0 dengan opsi komersialnya
-     # DICABUT (commit `8f64128`) - menurunkannya sambil melabeli hasilnya BSL adalah satu pintu ke
-     # arah yang salah, jadi gerbang ini menanyakan berkas IRSofka sendiri plus kartu lisensi
-     # permissive yang dibaca dari sumber, bukan dari nama model atau ingatan.
+    ("f11mcp_blender", "F11/MCP-2 IRSofka Blender MCP: turunan dari basis PERMISIF, dilabeli BSL atas "
+                       "keputusan operator, dan bukan turunan AGPL", "build", None,
+     # VERSI PERTAMA GERBANG INI SALAH ARAH dan reviewer menemukannya: ia menuntut kata
+     # "MIT|Apache" di dalam LICENSE milik IRSofka sendiri, padahal keputusan operator (turn 461,
+     # "jadikan BSL saja semua") menyatakan keluarga publik whole-nya BSL 1.1. Gerbang itu akan
+     # gagal PERMANEN justru ketika pekerjaannya selesai dengan benar — bentuk gerbang yang paling
+     # berbahaya, karena ia terlihat ketat. Yang permissive adalah BASISNYA, bukan label kita.
+     # Yang ditanya sekarang: (a) kodenya ada, (b) lisensi kita BSL seperti keputusan, (c) ada
+     # catatan UPSTREAM yang menyebut basis dan lisensinya, dan (d) catatan itu tidak menunjuk
+     # turunan AGPL. `mcp-blender` sendiri AGPL-3.0-or-later sejak v0.4.0 dengan opsi komersialnya
+     # DICABUT (commit `8f64128`), jadi menurunannya sambil melabeli BSL adalah pintu satu arah.
      "test -f ~/Apps/mcp/irsofka-blender-mcp/server.py && "
-     "grep -qiE 'MIT|Apache' ~/Apps/mcp/irsofka-blender-mcp/LICENSE && "
-     "test ! -f ~/Apps/mcp/irsofka-blender-mcp/AGPL-NOTICE"),
+     "grep -qi 'Business Source License' ~/Apps/mcp/irsofka-blender-mcp/LICENSE && "
+     "test -f ~/Apps/mcp/irsofka-blender-mcp/UPSTREAM && "
+     "grep -qiE 'MIT|Apache' ~/Apps/mcp/irsofka-blender-mcp/UPSTREAM && "
+     "! grep -qiE 'AGPL' ~/Apps/mcp/irsofka-blender-mcp/UPSTREAM"),
     ("f11step0", "F11/STEP-0 Jembatan UE: tulis probe round-trip (tools/ue_bridge_probe.py) lalu "
                  "perbaiki `set_transform`/`get_transform` dan bukti kelas `spawn`", "build", None,
      # Ini gerbang yang PEKERJAANNYA DULU HARUS ADA, dan itu ditulis di judul, bukan disembunyikan di
@@ -4061,10 +4133,10 @@ def selftest():
         # penawaran selamanya — dan itulah keluhan operator 20:11 ("task MCP kenapa di-skip",
         # "ROADMAP.MD masih JAUH"). Jadi perilakunya dibalik secara sadar, dengan nama yang diubah:
         # TURUN PERINGKAT, bukan hilang.
-        keep = {r["title"] for r in ready_items(conn, "SQLITE", drop_stale_legacy=True)}
-        offer = [r["title"] for r in ready_items(conn, "SQLITE", drop_stale_legacy=True)]
-        check("legacy tanpa lease hidup tidak lagi disembunyikan — ia TURUN; legacy PENDING dan yang "
-              "sedang dikerjakan orang tetap ada, dan laporan tetap melihat keduanya",
+        keep = {r["title"] for r in ready_items(conn, "SQLITE")}
+        offer = [r["title"] for r in ready_items(conn, "SQLITE")]
+        check("legacy tanpa lease hidup tetap ditawarkan dan TURUN peringkat; legacy PENDING dan "
+              "yang sedang dikerjakan orang tetap seperti kemarin",
               "legacy-stale" in keep and "legacy-pending" in keep and "legacy-dikerjakan" in keep
               and offer.index("legacy-stale")
               > offer.index("roadmap-umpan-f11"),
@@ -4679,14 +4751,18 @@ def selftest():
         conn.execute("INSERT INTO quest_tasks (title, status, origin, cli_engine, lease_epoch) "
                      "VALUES ('stale-legacy','WORKING','legacy','qoder',1)")
         conn.commit()
-        _offer = [(int(r["id"]), str(r["title"])) for r in
-                  ready_items(conn, "SQLITE", drop_stale_legacy=True)]
-        _titles = [x[1] for x in _offer]
-        check("baris legacy dengan lease mati TETAP ditawarkan, hanya turun ke belakang",
+        _titles = [str(r["title"]) for r in ready_items(conn, "SQLITE")]
+        _hidden = [str(r["title"]) for r in ready_items(conn, "SQLITE")]
+        check("jalur penawaran melihat baris legacy ber-lease mati — ia TURUN, bukan hilang",
               "stale-legacy" in _titles, str(_titles[:8]))
         check("dan ia tidak pernah mendahului item roadmap yang bisa dikerjakan",
               _titles.index("stale-legacy") > _titles.index("roadmap-f11-umpan"),
               str(_titles[:6]))
+        check("tidak ada lagi jalur yang menyembunyikan baris usang — flag-nya dihapus dari kode, "
+              "jadi tidak ada pemanggil yang bisa memilih urutan lain untuk baris yang sama",
+              "stale-legacy" in _hidden and work_rank(next(
+                  r for r in ready_items(conn, "SQLITE") if r["title"] == "stale-legacy"))
+              == RANK_STALE_LEGACY, str(_hidden[:6]))
         conn.execute("DELETE FROM quest_tasks WHERE title IN ('stale-legacy','legacy-stale',"
                      "'legacy-dikerjakan','legacy-pending','roadmap-umpan-f11')")
         conn.commit()
@@ -5087,6 +5163,14 @@ def idle_selftest(check):
     import tempfile as _tf
     _broot = Path(_tf.mkdtemp(prefix="idle_brain_")) / "brain"
     _broot.mkdir(parents=True, exist_ok=True)
+    # `roadmap_open` dibaca dari ROADMAP.md sungguhan, dan di mesin ini peta memang masih terbuka
+    # (F11 🟨, F6/F8 🟡, F9/F10 ⬜). Dibiarkan apa adanya, SEMUA tes idle di bawah akan menolak
+    # karena alasan yang benar di produksi tapi salah di fixture — sisi positifnya tidak akan pernah
+    # menguji apa pun. Jadi ia disetel "peta sudah proyeksi dan kosong" di sini, dan pagar itu sendiri
+    # punya tesnya sendiri di bawah, dengan stub yang mengembalikan angka.
+    _ro_orig = globals()["roadmap_open"]
+    globals()["roadmap_open"] = lambda conn, backend: {"ledger_rows": 0, "open_phases": [],
+                                                        "unreadable": []}
     try:
         ensure_schema(c, "SQLITE")
         # `ensure_schema` sudah memasang baris id=1, jadi jendela ON-nya ditulis lewat UPDATE —
@@ -5178,6 +5262,32 @@ def idle_selftest(check):
         check("tanpa utang yang terukur mesin DIAM — ia tidak membuat pekerjaan supaya terlihat sibuk",
               none is None and _idle_count() == 0 and any(a == "IDLE_NO_DEBT" for a, _ in ev),
               str([a for a, _ in ev]))
+
+        # --- pagar baru: peta masih terbuka = baris penajaman TIDAK BOLEH LAHIR ------------------
+        # Kemelut yang dilaporkan operator 2026-10-15 20:11 dan 20:2x: loop mengerjakan penajaman
+        # skill sementara perintah MCP-nya (session_turns 458) dan enam fase ROADMAP.md belum
+        # selesai. `ensure_idle_item` menahan dirinya saat "utang terukur" kosong, tapi utang itu
+        # diukur dari brain/skills + ledger — ROADMAP.md tidak pernah ditanyakan sama sekali, jadi
+        # "antrean kosong" bisa benar di ledger dan salah di peta pada saat yang sama.
+        for label, stub, event in (
+            ("baris roadmap masih bisa diklaim",
+             lambda conn, backend: {"ledger_rows": 3, "open_phases": [6, 11], "unreadable": []},
+             "IDLE_HELD_BY_ROADMAP"),
+            ("peta terbuka tapi belum dipetakan ke antrean",
+             lambda conn, backend: {"ledger_rows": 0, "open_phases": [11], "unreadable": []},
+             "IDLE_MAP_NOT_PROJECT"),
+            ("peta tidak terbaca",
+             lambda conn, backend: {"ledger_rows": None, "open_phases": None,
+                                    "unreadable": ["ROADMAP.md (tidak ada)"]},
+             "IDLE_DEBT_UNKNOWN")):
+            globals()["roadmap_open"] = stub
+            ev.clear()
+            blocked = ensure_idle_item(c, "SQLITE", "qoder", emit=emit, brain_root=_broot)
+            check(f"peta yang masih terbuka ({label}) menutup penulisan baris idle",
+                  blocked is None and any(a == event for a, _ in ev) and _idle_count() == 0,
+                  str([a for a, _ in ev]))
+        globals()["roadmap_open"] = lambda conn, backend: {"ledger_rows": 0, "open_phases": [],
+                                                            "unreadable": []}
 
         # dan baris idle yang dibuat harus melewati keranjang yang sama, bukan memotong jalan
         c.execute("INSERT INTO skills_inventory (name, category, level, description, file_path, "
@@ -5304,6 +5414,7 @@ def idle_selftest(check):
                     "INTEGER) >= ?", (_oe,))),
               f"used={spent_ev[0].get('used') if spent_ev else None} expected={_expected}")
     finally:
+        globals()["roadmap_open"] = _ro_orig
         c.close()
         tmp.unlink(missing_ok=True)
 
