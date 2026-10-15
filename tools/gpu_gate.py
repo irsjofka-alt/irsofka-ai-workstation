@@ -44,21 +44,29 @@ from local_llm import gpu_holders, vram_free_mib  # noqa: E402
 # dibaca, lalu classify menyimpulkan need 0, lalu check meloloskannya sebagai NOT_GPU_WORK: gerbang
 # yang terbuka persis ketika pengamannya hilang, dan selftest-nya mengunci perilaku itu karena
 # testnya ditulis dari asumsi yang sama. Ditemukan audit 2026-10-15, dibalik di sini.
+#
+# Cadangan mencakup DUA kelas GPU, bukan cuma yang satu. Audit putaran kedua menemukannya: dengan
+# hanya 3d-trellis di sini, config yang hilang membuat `flux`/`sdxl`/`z-image` lolos tanpa penjaga
+# sama sekali — fail-closed yang separuh masih fail-open.
 FALLBACK_RULES = [
     {"label": "3d-trellis", "need_mib": 9966,
      "match": ["trellis", "pixal3d", "image-to-3d", "image_to_3d", "3d_pipeline"]},
+    {"label": "image-diffusion", "need_mib": 5919,
+     "match": ["z-image", "flux", "sdxl", "txt2img", "juggernaut"]},
 ]
 
 
 def _word_match(word: str) -> str:
     """Pencocokan berbatas kata, bukan substring mentah.
 
-    `flux` sebagai substring cocok di "reflux"/"confusing"; `checkpoint` dan `sdxl` di dalam judul
-    item biasa akan menahan pekerjaan yang tidak menyentuh GPU sama sekali. Yang ditolak di sini
-    adalah kerja GPU yang salah ukur, bukan kerja lain kebetulan mengandung huruf yang sama.
+    `_` dan alfanumerik di kiri-kanan dianggap bagian dari kata yang sama, jadi `flux` tidak lagi cocok
+    dengan `reflux`, `flux_store`, atau `test_flux` — judul item biasa yang tidak menyentuh GPU
+    sama sekali, dan menolak itu karena VRAM sedang penuh adalah gerbang yang menahan pekerjaan
+    yang benar. `.` sengaja TIDAK masuk daftar: nama produk nyata yang dipakai di antrean ini
+    adalah `TRELLIS.2`, dan membatalkan deteksinya demi satu false positive adalah tukar yang rugi.
     """
     w = re.escape(word.strip().lower())
-    return rf"(?<![a-z0-9]){w}(?![a-z0-9])"
+    return rf"(?<![0-9a-z_]){w}(?![0-9a-z_])"
 
 
 def rules(path=None) -> list:
@@ -72,23 +80,22 @@ def rules(path=None) -> list:
         cfg = json.loads(Path(path or CONFIG).read_text(encoding="utf-8"))
         raw = cfg.get("rules")
         assert isinstance(raw, list) and raw, "rules kosong"
+        # Elemen yang bukan dict membuat seluruh config tidak dipercaya, bukan dilewati: kita tidak
+        # tahu kata kunci apa yang hilang bersamanya, dan "tidak tahu" tidak boleh berarti "boleh".
+        assert all(isinstance(r, dict) for r in raw), "anggota rules bukan objek"
     except Exception:  # noqa: BLE001 — tidak ada config bukan berarti GPU aman
         return [dict(r, degraded=True) for r in FALLBACK_RULES]
     out = []
     for r in raw:
         need = r.get("need_mib")
-        if not isinstance(need, int) or isinstance(need, bool):
+        if not isinstance(need, int) or isinstance(need, bool) or need < 0:
             # Ambang yang tidak bisa dibaca BUKAN nol. Aturan tetap dipakai, dengan need None,
-            # dan `check(None)` menjawab UNKNOWN — menolak. Ini bedanya penting: versi pertama
-            # melewati aturan, sehingga item yang cocok dengannya jatuh ke need 0 dan jalan.
+            # dan `check(None)` menjawab UNKNOWN — menolak. Versi pertama melewati aturan begitu
+            # saja, sehingga item yang cocok dengannya jatuh ke need 0 dan jalan: rusak = terbuka.
             out.append({"label": str(r.get("label") or "?"), "need_mib": None,
                         "match": [str(m).lower() for m in (r.get("match") or [])],
                         "bad_threshold": True})
             continue
-        if need < 0:
-            out.append({"label": str(r.get("label") or "?"), "need_mib": None,
-                        "match": [str(m).lower() for m in (r.get("match") or [])],
-                        "bad_threshold": True})
             continue
         out.append({"label": str(r.get("label") or "?"), "need_mib": int(need),
                     "match": [str(m).lower() for m in (r.get("match") or [])]})
@@ -145,18 +152,32 @@ def gate(text, sampler=None, holders=None, config_path=None) -> dict:
     return res
 
 
-def status(config_path=None) -> dict:
+def status(config_path=None, sampler=None, holders=None) -> dict:
     """Keadaan mesin saat ini dibandingkan semua ambang yang terdaftar — untuk layar dan untuk
     seseorang yang bertanya "kenapa pekerjaan 3D tidak jalan". Tidak ada angka yang dikarang:
-    yang tidak terbaca dilaporkan sebagai tidak terbaca."""
-    free = vram_free_mib()
+    yang tidak terbaca dilaporkan sebagai tidak terbaca.
+
+    Sampler bisa disuntik supaya selftest tidak bergantung pada GPU operator malam ini. Versi
+    tanpa injeksi akan membuat satu pemeriksaan "status tidak crash" jadi lulus tanpa mengukur
+    apa pun setiap kali nvidia-smi tidak terbaca — test yang diam-diam tidak menjalankan apa
+    pun adalah test yang hilang, bukan test yang hijau.
+    """
+    free = (sampler or vram_free_mib)()
     out = {"free_mib": free, "readable": free is not None,
-           "holders": [f"{n} {m}MiB" for n, m in sorted(gpu_holders() or [], key=lambda h: -h[1])[:6]],
+           "holders": [f"{n} {m}MiB" for n, m in
+                       sorted((holders if holders is not None else (gpu_holders() or [])),
+                              key=lambda h: -h[1])[:6]],
            "rules": []}
     for r in rules(config_path):
-        out["rules"].append({"label": r["label"], "need_mib": r["need_mib"],
-                             "fits": (None if free is None else free >= r["need_mib"]),
-                             "margin_mib": (None if free is None else free - r["need_mib"])})
+        need = r["need_mib"]
+        # `need` bisa None (ambang rusak). Membandingkan int dengan None melempar TypeError, dan
+        # sebuah laporan keadaan yang crash justru saat config bermasalah adalah cara gerbang ini
+        # membungkam dirinya sendiri pada saat ia paling dibutuhkan.
+        usable = need is not None and isinstance(need, int)
+        out["rules"].append({"label": r["label"], "need_mib": need,
+                             "fits": (None if (free is None or not usable) else free >= need),
+                             "margin_mib": (None if (free is None or not usable) else free - need),
+                             "threshold_readable": usable})
     return out
 
 
@@ -224,6 +245,36 @@ def selftest() -> int:
            "yang mirip GPU, bukan seluruh antrean",
           gate("perbaiki selftest work_order", sampler=lambda: 1,
                config_path=bad.parent / "tiada.json")["state"] == "NOT_GPU_WORK")
+    # Fail-closed yang separuh masih fail-open: audit putaran kedua menemukan FALLBACK hanya
+    # melindungi 3D, jadi config yang hilang membuat `flux`/`sdxl` berjalan tanpa penjaga sama
+    # sekali — tepatnya pekerjaan 5,9 GiB yang paling sering dijalankan di mesin ini.
+    check_("config hilang juga menjaga difusi gambar, bukan cuma 3D — cadangan menutup DUA kelas",
+          gate("flux txt2img poster", sampler=lambda: 1,
+               config_path=bad.parent / "tiada.json")["state"] == "DENY"
+          and gate("jalankan TRELLIS.2", sampler=lambda: 1,
+                   config_path=bad.parent / "tiada.json")["state"] == "DENY")
+    junk = Path(tempfile.mkdtemp()) / "gpu_budget.json"
+    junk.write_text(json.dumps({"rules": ["bukan objek", {"label": "k", "match": ["k"],
+                                                           "need_mib": 100}]}), encoding="utf-8")
+    check_("anggota rules yang bukan objek membuat SELURUH config tidak dipercaya (cadangan dipakai), "
+           "kita tidak tahu kata kunci apa yang ikut hilang",
+          all(r.get("degraded") for r in rules(junk))
+          and gate("flux job", sampler=lambda: 1, config_path=junk)["state"] == "DENY",
+          str(rules(junk))[:180])
+    check_("batas kata menghormati underscore: flux_store, test_flux dan reflux bukan kerja GPU, "
+           "tapi TRELLIS.2 tetap terdeteksi (nama produk nyata di antrean ini)",
+          gate("rapikan flux_store helpers", sampler=lambda: 1)["state"] == "NOT_GPU_WORK"
+          and gate("test_flux.py merah", sampler=lambda: 1)["state"] == "NOT_GPU_WORK"
+          and gate("REFLUX guard di compositor", sampler=lambda: 1)["state"] == "NOT_GPU_WORK"
+          and gate("render TRELLIS.2 jadi glb", sampler=lambda: 1)["rule"] == "3d-trellis")
+    st_box = Path(tempfile.mkdtemp()) / "gpu_budget.json"
+    st_box.write_text(json.dumps({"rules": [{"label": "rusak", "match": ["q"],
+                                             "need_mib": "sembilan"}]}), encoding="utf-8")
+    stt = status(st_box, sampler=lambda: 12000, holders=[("ComfyUI", 1624)])
+    check_("status() tidak crash saat ambang rusak: need None dilaporkan threshold_readable False "
+           "dan fits None, bukan dibandingkan dengan int (int >= None pernah melempar TypeError)",
+          stt["rules"][0]["threshold_readable"] is False and stt["rules"][0]["fits"] is None
+          and stt["free_mib"] == 12000 and stt["holders"] == ["ComfyUI 1624MiB"], str(stt)[:200])
     check_("pencocokan berbatas kata: 'reflux' tidak memicu aturan 'flux', dan 'git checkpoint' "
            "tidak lagi ditahan ambang difusi (istilah itu dibuang dari config karena itu)",
           gate("perbaiki reflux test", sampler=lambda: 1)["state"] == "NOT_GPU_WORK"

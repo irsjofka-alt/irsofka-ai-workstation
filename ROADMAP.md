@@ -243,9 +243,24 @@ measurement cited (3D 9,966 MiB; image diffusion 5,919 MiB; vendor-cloud 0), re-
 of remembered, and an unreadable `nvidia-smi` refuses rather than assuming. Measured against the
 live card the moment it shipped: 9,532 MiB free against 9,966 needed, so a TRELLIS.2 item is refused
 by 434 MiB right now — while ComfyUI itself holds 1,624 MiB, which is exactly the situation the gate
-was written for. `gpu_gate selftest 10/10`, `drainer 172/172` (four new checks: deny names the
+was written for. `gpu_gate selftest 16/16`, `drainer 172/172` (four new checks: deny names the
 holder and leaves the row PENDING; non-GPU work still passes a full GPU; allow records its
 headroom; an unreadable meter refuses).
+
+The gate's own first version failed open, and the audit that found it was aimed at exactly that:
+an unreadable `config/gpu_budget.json` produced zero rules, so a TRELLIS item classified as
+"not GPU work" and dispatched; a rule with a non-integer threshold was skipped with the same
+result; and raw substring matching meant the keyword `checkpoint` would have held ordinary git
+items behind a 5,919 MiB floor whenever the GPU was busy. Two of those three were written down as
+*intended behaviour* by selftests I had written fifteen minutes earlier - `check_("config tidak
+ada = kerja dianggap bukan GPU, BUKAN GPU yang dianggap aman")` asserts the fail-open in its own
+name. A test written from the same assumption as the function it checks cannot catch that
+assumption. Now: a missing or malformed config uses in-code fallback rules that cover **both** GPU
+classes and marks the decision `degraded`; an unreadable threshold keeps its rule and answers
+UNKNOWN (refuse); matching is word-bounded on `_` and alphanumerics, while `.` deliberately stays a
+boundary because the real product name in this queue is `TRELLIS.2`. `status()` also crashed on a
+broken threshold (`int >= None`), which is how a reporting function silences a gate at the moment it
+is most needed; it takes an injected sampler now, so its test cannot go quietly vacuous.
 
 ### Verified
 
