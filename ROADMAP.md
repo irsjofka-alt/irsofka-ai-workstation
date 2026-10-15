@@ -17,6 +17,7 @@ F7 Creative Studio (ComfyUI/UE5)  ✅ Completed (scope: studio wired + producing
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
+F11 Unreal Bridge & MCP Ownership  ⬜ Planned (mcp/ map shipped; plugin path bug fixed pending rebuild; license chosen: BSL 1.1)
 ```
 
 ## F1–F4 — Foundation (Completed & Re-verified Oct 6)
@@ -974,6 +975,129 @@ that skips the order cannot claim.
   *Acceptance still owed:* one commit reaching `origin` with a verifier row naming the model that cleared
   it, and one commit deliberately unverifiable and still local at dawn, both visible in the event log and
   neither produced by a human hand.
+
+## F11 — Unreal bridge, MCP ownership, and what to publish ⬜
+
+Opened 2026-10-15 by the operator, after he asked whether the UE 5.8 plugin should be shared and
+which license covers "showcase it, nobody may claim it, and sell it if someone asks". The decisions
+below are recorded here so a later session does not re-derive them or quietly reverse them.
+
+### Already done in this feature
+
+- **`mcp/` exists as the explicit map** (`mcp/README.md` + one README per server): where each server's
+  code lives, who owns it, what it is licensed under, and how many tools it really serves.
+  Registration files stay per-machine and untracked (`git ls-files` verified).
+- **The UE plugin's personal-path defect is fixed.** `IRSofkaBYOKManager.cpp` carried one user's
+  absolute config path twice — a read fallback and, worse, a mirror write inside `SaveConfig()` whose
+  return value was discarded, so on another machine keys silently stopped being shared. Both now
+  derive from the home directory (matching `<home>/.ai-station`, the convention every `tools/*.py`
+  uses) with `AI_STATION_BYOK` as the override and no mirror at all when neither is set; a failed
+  mirror is now reported instead of swallowed. Verified: zero personal absolute paths remain in
+  `Source/`, `Content/`, `Config/`.
+  *Still owed:* rebuild `IRSofkaCore` and restart the editor. The change is inert until UBT runs, and
+  a running editor must not have its module swapped from an automation loop.
+
+### License decision: BSL 1.1 for the plugin and any irsofka-owned MCP server
+
+Chosen over PolyForm Noncommercial, Apache-2.0 and a private EULA, because it is the only one that
+satisfies all three of the operator's demands at once. Verified terms:
+[Business Source License 1.1](https://mariadb.com/bsl11/) restricts **Production Use** by default,
+the Licensor may add an **Additional Use Grant**, and on the **Change Date** — which in 1.1 must be
+within four years and whose **Change License must be GPL-compatible** — the work converts to an open
+license ([fossa overview](https://fossa.com/blog/business-source-license-requirements-provisions-history/),
+[Wikipedia](https://en.wikipedia.org/wiki/Business_Source_License)).
+
+| demand | how BSL answers it |
+|---|---|
+| "jangan ada yang copy-paste lalu mengklaim hak" | copyright never transfers; notices must be retained; anyone re-releasing it as their own is infringing on text, not on interpretation. It is also public evidence of first publication date per release |
+| "saya ingin pamer sebagai showcase" | source is readable from day one; the Additional Use Grant can explicitly allow personal, evaluation, and non-production use so a visitor can actually run it |
+| "kalau ada yang mau beli, silakan" | Production Use *requires* a license from the licensor — that is the product being sold, with no renegotiation of terms later |
+| the escape hatch | Change Date (proposed: 4 years) converts it to Apache-2.0, so the asset still becomes open if the business does not want it |
+
+Cost, stated plainly: **BSL is not OSI-approved open source**, so some contributors, distributions and
+enterprise legal teams will refuse it. If adoption breadth ever outranks the sale, the switch is
+Apache-2.0 — that trade is the operator's, not an engine's.
+
+Boundaries of the decision: `irsofka-ai-workstation` itself stays **PolyForm Noncommercial 1.0.0**; the
+BSL work is a **separate repository**, because one work cannot carry both grants. Nothing AGPL-derived
+may be merged into either — see `mcp/README.md`.
+
+### "Make the architecture complicated so it cannot be rebuilt" — recorded as rejected
+
+The proposal was to obfuscate deliberately: hard to recreate, hard to claim, still functional. It is
+rejected on this workstation's own evidence, not on taste. **Every real defect found in this session
+was found because code was readable:** a spend gate comparing against a string no row contained (i.e.
+an open gate), a cost check bypassable by putting a flag before the subcommand, a `sent=True` that
+would have invited a paid retry of an already-billed request, a config-loss path that failed *open*,
+and a fix that was never executing because a **second `def rules()` shadowed the guarded one** while
+16 selftests reported green. Unreadable code does not hide secrets from a copier; it hides defects from
+the author and from the auditors — and the auditors here are the operator's own engines, which read
+this repository as their working material.
+
+What actually resists re-implementation is not obscurity but **not shipping the parts that make it
+work**:
+
+- **Publishable** (BSL): the UE plugin — in-editor hands, 6 master domains, transaction sandbox,
+  socket bridge; and any irsofka-owned MCP server surface.
+- **Never distributed**: the ledger and its rules (`work_order`, `drainer`, `awakener`, the
+  hand ladder, night breakers), `config/slots.yaml` and `engines.json` role resolution, the verifier
+  tier and its per-model quota gating, `gpu_budget.json` thresholds, and the measured knowledge in
+  `brain/skills/` and `brain/memory/` — including hard-won negatives such as "decimate worsens an open
+  mesh" and "weld by position before judging topology".
+- The asymmetry is the moat: the plugin without the loop is a good editor bridge; the loop without
+  the plugin cannot touch a live graph at all, because `GEditor`, `ResetLoaders`, `UPackage` and
+  `UEdGraphNode` are only reachable in-process on the game thread. **No architecture removes that
+  constraint, including Epic's own** — the experimental `ModelContextProtocol` plugin in this engine is
+  also an in-editor process.
+
+### Capability negotiation (the operator's item 5), as an acceptance test
+
+One codebase, three states, and the plugin must never assume ai-station exists:
+
+1. **plugin alone** — full in-editor capability, own BYOK file in `ProjectSavedDir()`, no bridge.
+   This state must keep working after every future change; it is the fallback, not the toy.
+2. **plugin + ai-station detected** — bridge active: ledger events, verifier verdicts,
+   `ai-station recovery`, VRAM handshake.
+3. **ai-station without the plugin** — headless only: cook, commandlets, build/UBT, config edits.
+   It must refuse to *claim* live Blueprint editing; an unavailable engine reports `UNAVAILABLE`.
+
+### Ordered work, each with a numeric gate
+
+1. **Measure before claiming** — compare the tool surface of Epic's experimental
+   `ModelContextProtocol` / `MCPClientToolset` against the six domains. Gate: both counts. Until then
+   "ours is more powerful" is not written anywhere as a fact.
+2. **Test `ResolvePinFuzzy` on PCG Graph and GAS** — it exists (`IRSofkaBlueprintSubsystem.h:29`) and
+   is proven on Blueprint graphs only. Gate: fuzzy-hit rate before/after on a fixed pin-name corpus.
+3. **Wire rollback to a `DISPUTED` verdict** plus asset hashes before/after an operation. Gate: one
+   deliberately-failed operation leaves `.uasset` byte-identical.
+4. **VRAM handshake** (`quiesce?` → `ready-to-load`) joining `tools/gpu_gate.py`. Gate: VRAM figures
+   before/after and one TRELLIS.2 run that completes without OOM.
+5. **State Handover last.** Stable node/package identity emitted into the existing `action_log`; no
+   second database client in C++ — the ledger has one owner (§12). It needs the event vocabulary from
+   steps 3–4, so doing it first guarantees a schema that gets regretted.
+6. **Fork decision, open:** the current `mcp-blender` is **AGPL-3.0-or-later since v0.4.0** with its
+   commercial option **withdrawn** (commit `8f64128`), while [`ahujasid/mcp-for-blender`](https://github.com/ahujasid/mcp-for-blender)
+   is **MIT, 30,872 stars, pushed 2026-10-06**, and `artokun/comfyui-mcp` **MIT (825, pushed
+   2026-10-14)** and `joenorton/comfyui-mcp-server` **Apache-2.0 (409)** exist as permissive ComfyUI
+   paths. A permissive base is the only route to a relicensable derivative; the AGPL fork is a one-way
+   door. Not started — the operator chooses.
+   Note also that the [Blender Foundation ships its own MCP server](https://www.blender.org/lab/mcp-server/)
+   and states on that page that it runs LLM-generated code "without any guards in place to protect your
+   data" — which is the sandbox and transaction work above, expressed as their gap.
+
+### Facts measured here, so nobody re-derives them
+
+| subject | value | method |
+|---|---|---|
+| `mcp-blender` tools | **218** (naive `def blender_*` = 61) | `TOOLS: list[Tool]` in `src/mcp_blender/server.py`, 218 unique names, zero duplicates |
+| `comfy-mcp` tools | **39**, not the 40 this file used to claim | `@mcp.tool` defs in `comfy_mcp/server.py` of installed 0.10.0 |
+| `mcp-blender` history | MIT ≤ v0.3.0 → AGPL v0.4.0 | `git show v0.2.0:LICENSE`, `v0.3.0:LICENSE` |
+| `comfy-mcp` license | AGPL-3.0-or-later **OR** commercial (`licensing@comfy.org`) | dist-info `License-Expression` + `LICENSE`, section 13 named |
+| UE plugin size | 92 files, 12 MB, `Binaries/` = 9.5 MB, already gitignored with `Intermediate/`+`Saved/` | `find`/`du`/`.gitignore` |
+| plugin socket | `127.0.0.1:9877`, **no authentication** | grep of `Source` |
+| plugin ↔ database | **none** (`postgres`/`sqlite`/`libpq` = 0 hits) — correct, ledger stays ai-station's | grep of `Source` |
+| VRAM/GC inside plugin | **none** (`CollectGarbage`/`VRAM`/`RenderResource` = 0 hits) | grep of `Source` |
+| live editor state today | bridge `UNAVAILABLE` when the editor is closed | `ue_world.get_all_actors` |
 
 ## Known Boundaries & Constraints
 

@@ -39,11 +39,18 @@ absolute paths remain in `Source/`, `Content/`, `Config/`.
 **Still required: a rebuild and an editor restart.** The running editor holds the old binary, so
 this change is inert until UBT recompiles `IRSofkaCore` — deliberately not triggered from here.
 
-## License: undecided, and it is a real fork in the road
+## License: decided 2026-10-15 — BSL 1.1
+
+Chosen in `ROADMAP.md` F11 because it is the only instrument that satisfies all three of the
+operator's demands at once: source readable as a showcase, copyright never transfers (so nobody can
+re-claim it), and Production Use requires a license purchased from him — with a Change Date that
+converts it to an open license if he later prefers adoption over selling. It is **not** OSI-approved
+open source; that is the accepted cost.
 
 `.uplugin` points `DocsURL`/`SupportURL` at `github.com/irsjofka-alt/IRSofka-UE-AIStation-Core` and
-`README.md` badges it "Proprietary / IRSofka" — publishing intent is already in the metadata; the
-open question is the grant.
+`README.md` still badges it "Proprietary / IRSofka" — that badge should be replaced by the BSL notice
+when the repo is actually opened, and this plugin must live in its **own** repository: one work cannot
+carry both BSL and the workstation's PolyForm Noncommercial grant.
 
 This plugin is entirely our own code: no AGPL line inside it. So the license is genuinely ours to
 choose, and no third-party term forces a hand — with one boundary: it links Unreal Engine headers,
