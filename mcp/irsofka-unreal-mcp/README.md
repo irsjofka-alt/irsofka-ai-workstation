@@ -50,7 +50,9 @@ open source; that is the accepted cost.
 `.uplugin` points `DocsURL`/`SupportURL` at `github.com/irsjofka-alt/IRSofka-UE-AIStation-Core` and
 `README.md` still badges it "Proprietary / IRSofka" — that badge should be replaced by the BSL notice
 when the repo is actually opened, and this plugin must live in its **own** repository: one work cannot
-carry both BSL and the workstation's PolyForm Noncommercial grant.
+carry two grants at once. Note that both sides now use BSL 1.1: sharing a licence name is not the
+same as sharing a licence *text*, and each repository states its own Licensor, Licensed Work and
+Change Date, so the separation is still required.
 
 This plugin is entirely our own code: no AGPL line inside it. So the license is genuinely ours to
 choose, and no third-party term forces a hand — with one boundary: it links Unreal Engine headers,

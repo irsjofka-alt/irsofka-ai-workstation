@@ -1018,9 +1018,18 @@ Cost, stated plainly: **BSL is not OSI-approved open source**, so some contribut
 enterprise legal teams will refuse it. If adoption breadth ever outranks the sale, the switch is
 Apache-2.0 — that trade is the operator's, not an engine's.
 
-Boundaries of the decision: `irsofka-ai-workstation` itself stays **PolyForm Noncommercial 1.0.0**; the
-BSL work is a **separate repository**, because one work cannot carry both grants. Nothing AGPL-derived
-may be merged into either — see `mcp/README.md`.
+Inverted the same day by the operator — *"jadikan BSL saja semua, toh saya juga ga rugi"* — so
+**the whole published family is BSL 1.1**: `irsofka-ai-workstation`, the UE plugin, and all three MCP
+repos. Nothing is left on PolyForm Noncommercial; `README.md`, `INSTALL.md` and
+`THIRD_PARTY_NOTICES.md` were changed with it, and each release still carries its own Change Date, so
+new work never "un-converts" old work.
+
+**Change License is MIT, not Apache-2.0 — and that is a correction, not a preference.** BSL 1.1's
+Covenants of Licensor require the Change License to be GPL-v2-compatible, and Apache-2.0 is expressly
+*not* compatible with GPLv2, so the Apache option I first recommended would have made our own licence
+non-compliant with the terms it borrows. MIT satisfies the covenant and gives the same practical end
+state the operator wanted: fully free code after four years. A separate repository is still required
+for anything AGPL-derived, because AGPL forbids exactly the additional restriction BSL imposes.
 
 ### "Make the architecture complicated so it cannot be rebuilt" — recorded as rejected
 

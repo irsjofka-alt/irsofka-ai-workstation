@@ -21,7 +21,7 @@ upstream, not with copying this folder.
 
 Legally yes, but the fork is AGPL unless Comfy Org sells you the other branch. That means: your
 derivative is AGPL, source must be published including for hosted use, and it cannot be folded into
-this PolyForm Noncommercial repository as one work. If the goal is proprietary or commercial,
+this BSL 1.1 repository as one work. If the goal is proprietary or commercial,
 `licensing@comfy.org` is the intended path and this README records that so nobody re-derives it.
 
 ## How we use it today

@@ -14,7 +14,9 @@ Deliberately **excluded** from this repository:
 A fresh clone will **explicitly fail to connect to the database** until configured with your own
 credentials, preventing credential leaks by design.
 
-License: PolyForm Noncommercial — free to use and modify for noncommercial purposes.
+License: Business Source License 1.1 — free to use and modify for non-production purposes;
+production use requires a licence from the Licensor, and each version converts to MIT four
+years after it is first published.
 
 ## Prerequisites
 

@@ -23,7 +23,7 @@ Local install: `~/Apps/mcp/mcp-blender` — a real git checkout with tags `v0.2.
 Yes, and there is a clean way. Fork from **tag `v0.3.0` (MIT)**: that code is permissive, so it can
 be developed, renamed, and even sold without carrying AGPL. What you must not do is merge commits
 from `v0.4.0` onward back into that fork — those are AGPL, and AGPL would then govern the whole
-derivative and collide with this repository's PolyForm Noncommercial license.
+derivative and collide with this repository's BSL 1.1 licence.
 
 If instead you build on 0.4.x, your fork is AGPL: keep `LICENSE` and the copyright notices, publish
 the source of the derivative, and rename it (the name is excluded from the grant). Section 13 also

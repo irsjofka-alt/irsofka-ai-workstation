@@ -56,6 +56,14 @@ MAX_BYTES = 400_000
 FALLBACK = {
     "config/cli_profiles.json": "Per-model context/effort caps and CLI flags, one entry per tab",
     "config/db_local.json": "PostgreSQL connection string — git-ignored, never committed",
+    # Teks lisensi harus direproduksi apa adanya: menambah baris judul atau komentar di dalamnya
+    # mengubah dokumen hukum yang kita klaim kita patuhi. PolyForm yang lama lolos tanpa entri ini
+    # hanya karena kebetulan dibuka dengan "# PolyForm …" bergaya markdown; BSL 1.1 tidak begitu.
+    # Kunci di bawah bukan typo: purpose() mencari FALLBACK dengan `sect + nama berkas`, dan berkas
+    # root mendapat sect "repo root" TANPA pemisah (baris `rows.append` di atas), jadi "LICENSE"
+    # saja tidak akan pernah cocok. Memperlonggar pencariannya akan ikut membuat berkas tanpa-header
+    # di subfolder lolos hanya karena namanya kebetulan sama dengan entri root.
+    "repo rootLICENSE": "Business Source License 1.1 text — reproduced verbatim, must not be annotated",
 }
 
 

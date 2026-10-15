@@ -380,7 +380,7 @@ different, abandoned plugin, not this one).
 ### Requesting access to a private stage
 
 The two Unreal Engine repositories are private because they carry in-engine C++ and project content that
-is not offered under this repository's PolyForm terms. An account without access receives **HTTP 404**,
+is not offered under this repository's licence terms. An account without access receives **HTTP 404**,
 which is how GitHub hides a private repository — it is not evidence that the name is wrong or that the
 project does not exist.
 
@@ -398,8 +398,12 @@ forbids an engine from narrating an action it did not perform — an unavailable
 
 ## License
 
-Code in this repository is licensed under the **PolyForm Noncommercial License 1.0.0** — free to
-use, modify, and distribute for noncommercial purposes. Full terms in [`LICENSE`](LICENSE).
+Code in this repository is licensed under the **Business Source License 1.1** — you may copy,
+modify, create derivative works, redistribute and make **non-production** use of it freely;
+**production use requires a commercial licence** from PT IRSofka. Each version converts to the
+**MIT License** on its own Change Date, four years after that version is first made publicly
+available, so the clock never resets no matter how many releases follow. Full terms in
+[`LICENSE`](LICENSE).
 
 Third-party dependencies maintain their respective licenses: xterm.js (MIT) and Inter / JetBrains Mono
 fonts (SIL OFL 1.1) — see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

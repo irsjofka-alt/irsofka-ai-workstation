@@ -1,9 +1,11 @@
 # Pemberitahuan Pihak Ketiga
 
-Kode tulisan proyek ini dilindungi **PolyForm Noncommercial License 1.0.0** (lihat
-[`LICENSE`](LICENSE)). Sebagian aset yang ikut dibagikan **bukan** karya proyek ini dan
-tetap berada di bawah lisensinya masing-masing. Lisensi-lisensi itu lebih permisif, dan
-sengaja **tidak** ikut dibatasi non-komersial oleh `LICENSE`.
+Kode tulisan proyek ini dilindungi **Business Source License 1.1** (lihat
+[`LICENSE`](LICENSE)): pemakaian non-produksi bebas, pemakaian produksi butuh lisensi dari
+Licensor, dan tiap versi terbuka sendiri di bawah MIT pada Change Date-nya masing-masing.
+Sebagian aset yang ikut dibagikan **bukan** karya proyek ini dan tetap berada di bawah
+lisensinya masing-masing. Lisensi-lisensi itu lebih permisif, dan sengaja **tidak** ikut
+dibatasi oleh `LICENSE` -- termasuk saat Change Date sebuah versi sudah lewat.
 
 ## xterm.js — MIT License
 
