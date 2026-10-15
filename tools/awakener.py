@@ -67,6 +67,12 @@ def decide_wake(conn, engine, target, now=None, beats=None, heartbeat=None):
     """
     now = now or wo.now()
     beats = beats if beats is not None else []
+    # Temuan audit independen 2026-10-15 10:3x (verdict PERLU_KOREKSI): blok ALREADY_OPEN yang saya
+    # tambahkan memakai {ph}, padahal `ph` hanya didefinisikan di `_wake_rows` dan `open_wake`, tidak
+    # di sini. Jalur SEMI keluar lebih dulu sehingga tidak pernah menabraknya — artinya worker
+    # melempar NameError TEPAT pada keadaan ia dibutuhkan: FULL AUTO. Tidak ada selftest sisi-diam
+    # yang bisa menemukan ini; hanya tes yang memaksa mode ON bisa.
+    ph = "%s" if engine == "POSTGRESQL" else "?"
     ap = wo.autopilot(conn, engine) or {}
     mode = str(ap.get("mode") or "").upper()
     if mode != "ON":
