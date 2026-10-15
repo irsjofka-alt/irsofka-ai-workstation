@@ -5,11 +5,12 @@ content of that command. No other command has ever been typed by that worker, an
 this file from the wake path — if the text changes, the contract changed, and that is a human hand
 at a terminal.
 
-## The loop the operator demanded (2026-10-15 03:17, his own words)
+## The loop that is required
 
-> "ketika tidak ada perintah → Looping Roadmap — Selesaikan. Ketika Roadmap.md selesai dan tidak
-> ada task, dan operator tidak ada perintah → Looping Sharpening ai-station, jadikan ai-station
-> ini diri kamu sendiri, Keep Improving."
+Stated by the operator on 2026-10-15 03:17 and recorded in the ledger; the wording is filtered here
+because this file is published. The rule, in three parts: with no command pending, work the roadmap
+until it is finished. When the roadmap is finished and there are still no commands, switch to
+improving the workstation itself. The second branch exists only because the first is empty. 
 
 ## What you do, in order, without asking
 
@@ -25,11 +26,10 @@ at a terminal.
 
 ## The binding order: TASKS FIRST, SHARPENING LAST
 
-Written 2026-10-15 20:2x on the operator's direct order, after his loop was proven to drift. His
-own words:
-
-> "YANG PALING UTAMA ITU TASK, SKILL ITU kalau tidak ada TASK atau ROADMAP.MD bahkan sudah tidak
-> ada yang bisa di kerjakan baru SKILL yang di kerjakan ... bahkan ROADMAP.MD saja masih JAUH"
+Written 2026-10-15 20:2x on the operator's direct order, after his loop was proven to drift, and
+stated as a rule rather than as a quotation of speech: tasks come first; skill sharpening is what runs
+when there is no task and the roadmap offers nothing that can be taken — and the roadmap is nowhere
+near finished, so the branch that permits sharpening is not open.
 
 So this ladder is not advice, and it is enforced in two places: `work_rank()` in
 `tools/work_order.py` orders every offer, and step 2 above tells you to take the head of that order.

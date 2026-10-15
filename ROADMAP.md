@@ -917,8 +917,8 @@ that skips the order cannot claim.
   lines of locked guidelines — while item 88, addressed to qoder, correctly stayed `PENDING`. Engine
   isolation is `next_item(for_engine=…)`, in the module that owns "what is next".
 - ✅ **F10.11 The loop must not die quietly, and OFF stops being a mode.** The operator's boundary for
-  tonight was explicit: *"sekali saja auto mati maka Komputer jadi IDLE … ketika full auto saya tidak di
-  desk tiba tiba berhenti ini akan jadi waktu yang terbuang."* Four defects matched that sentence, and all
+  tonight was explicit: an unattended run that stops the moment the machine goes idle wastes the
+  window it was given, and he will not be at the desk to restart it. Four defects matched that sentence, and all
   four are now closed by measurement rather than by intent.
   1. **The breaker was miscounted, not mislabelled.** `night_state` reported *"kegagalan berturut-turut"*
      while its SQL summed **every** `FAILED`/`PARKED` row in twelve hours, so over a long night three
@@ -978,8 +978,9 @@ that skips the order cannot claim.
 
 ## F11 — Unreal bridge, MCP ownership, and what to publish ⬜
 
-Opened 2026-10-15 by the operator, after he asked whether the UE 5.8 plugin should be shared and
-which license covers "showcase it, nobody may claim it, and sell it if someone asks". The decisions
+Opened 2026-10-15 by the operator, on two questions put to him about the UE 5.8 plugin: whether it
+should be shared at all, and which licence satisfies public demonstrability, protection against a
+re-attribution of his work, and a commercial path if one appears. The decisions
 below are recorded here so a later session does not re-derive them or quietly reverse them.
 
 ### Already done in this feature
@@ -1012,11 +1013,11 @@ Terms paragraph, which converts the work on the Change Date **or its fourth anni
 availability, whichever comes first**: a longer date is permitted and simply loses that race ([fossa overview](https://fossa.com/blog/business-source-license-requirements-provisions-history/),
 [Wikipedia](https://en.wikipedia.org/wiki/Business_Source_License)).
 
-| demand | how BSL answers it |
+| requirement | how BSL answers it |
 |---|---|
-| "jangan ada yang copy-paste lalu mengklaim hak" | copyright never transfers; notices must be retained; anyone re-releasing it as their own is infringing on text, not on interpretation. each version carries its own Change Date formula, so the conversion clock is fixed by the text rather than argued later — though it has not started yet: no version of this work has been made publicly available, the dates are relative to that event, and these commits are still unpushed |
-| "saya ingin pamer sebagai showcase" | source is readable from day one, and the first Terms paragraph already grants copy, modify, derivative works and **non-production** use — a visitor reads and runs it without asking. The Additional Use Grant is the lever for the opposite case: admitting limited **production** use for free, which is the pattern NVIDIA's `nsfc-comfy-ui` grant uses. Leaving it at `None` is our current answer, and it is a choice, not an omission |
-| "kalau ada yang mau beli, silakan" | Production Use *requires* a license from the licensor — that is the product being sold, with no renegotiation of terms later |
+| attribution cannot be stripped by a re-upload | copyright never transfers; notices must be retained; re-releasing the work as someone else's is infringement on the text, not on interpretation. Each version carries its own Change Date formula, so the conversion clock is fixed by the licence rather than argued later — and it has not started: no version of this work has been made publicly available, the dates run from that event, and the commits carrying this text were still unpushed when it was written |
+| the work must remain demonstrable to the public | source is readable from day one, and the first Terms paragraph already grants copy, modify, derivative works and **non-production** use — a visitor reads and runs it without asking. The Additional Use Grant is the lever for the opposite case: admitting limited **production** use at no charge, the pattern NVIDIA's `nsfc-comfy-ui` grant uses. Leaving it at `None` is the current answer, and it is a choice, not an omission |
+| a commercial path must exist without renegotiating terms | Production Use *requires* a licence from the licensor, so the sale is the licence itself and the published terms do not change when one happens |
 | the escape hatch | Change Date (4 years, per version) converts it to the MIT License, so the asset still becomes open even if the business never sells a licence |
 | admissibility of the Change License | covenant 1 accepts GPL-v2 **or any later version, or a licence compatible with either**. MIT qualifies under both readings; **Apache-2.0 qualifies too** (compatible with GPL-3.0), so it was never disqualifying — made and retracted on the **same day**, 2026-10-15. Commit `157aa74`'s
 title says "a week ago", which is wrong; it is left as written and corrected here |
@@ -1054,7 +1055,8 @@ Cost, stated plainly: **BSL is not OSI-approved open source**, so some contribut
 enterprise legal teams will refuse it. If adoption breadth ever outranks the sale, the switch is
 Apache-2.0 — that trade is the operator's, not an engine's.
 
-Inverted the same day by the operator — *"jadikan BSL saja semua, toh saya juga ga rugi"* — so
+Reversed the same day by the operator, on the ground that the four-year conversion makes the
+downside of a strict licence small; the instruction was recorded as "BSL for all of it", so
 **the whole published family is BSL 1.1**: `irsofka-ai-workstation`, the UE plugin, and all three MCP
 repos. Nothing is left on PolyForm Noncommercial; `README.md`, `INSTALL.md` and
 `THIRD_PARTY_NOTICES.md` were changed with it, and each release still carries its own Change Date, so
@@ -1322,6 +1324,41 @@ a default to inherit.
    Note also that the [Blender Foundation ships its own MCP server](https://www.blender.org/lab/mcp-server/)
    and states on that page that it runs LLM-generated code "without any guards in place to protect your
    data" — which is the sandbox and transaction work above, expressed as their gap.
+
+
+### Pedoman repositori: satu repo utama, tiga server MCP, dan mana yang harus ditulis bersih
+
+Dipulihkan dari SQL pada 2026-10-15 21:1x, karena instruksinya hanya ada di percakapan
+(`session_turns` 450 dan 457/458, 2026-10-15 15:26) dan belum pernah menjadi aturan tertulis; tabel
+di bawah ini adalah bentuk tertapisinya, bukan transkrip.
+
+| repositori | isi | dari mana kode ini boleh datang | mengapa |
+|---|---|---|---|
+| `irsofka-ai-workstation` (repo utama) | daemon, GUI, ledger, `tools/`, aturan | milik sendiri sepenuhnya; tidak ada bersih-bersih yang diperlukan | tidak ada basis pihak ketiga yang diturunkan |
+| IRSofka Comfy MCP | pelayan MCP yang bicara ke ComfyUI lewat HTTP `127.0.0.1:8188` | **bersih secara fungsi**: ditulis dari perilaku HTTP terdokumentasi, bukan dari penerjemahan kode pihak mana pun | `comfy-mcp` ber-AGPL-3.0-or-later; menulis ulang dari perilakunya menjaga kita tetap di luar ranah turunan |
+| IRSofka Blender MCP | pelayan MCP untuk Blender, dimodifikasi berat untuk workstation | **WAJIB basis permissif** (`ahujasid/mcp-for-blender` MIT, atau `RFingAdam` v0.3.0 MIT): bukan `mcp-blender` v0.4.x yang AGPL | lisensi turunan mengikuti basisnya, dan AGPL tidak bisa dicabut di belakang; ini pintu satu arah |
+| IRSofka Workstation MCP (jembatan mesin grafis) | sisi mesin dari jembatan editor/UBT/komandolet; plugin UE tetap artefak terpasang, bukan bagian repo ini | milik sendiri; satu-satunya batasan adalah tidak ada konten Epic yang ikut ter-paket | "Unreal Engine" milik Epic dan plugin ini menyinggung header-nya; yang dijual/dipamerkan adalah kode jembatan kita |
+
+Tiga keputusan yang mengikat bentuknya, masing-masing dengan angka tempat ia diukur:
+
+1. **Tidak ada git submodule untuk kode yang akan banyak ditulis ulang.** Sebuah submodule mengunci
+   satu commit, dan kunci itulah yang menjadi bug ketika repo anak bergerak; yang dicatat di tiap
+   `mcp/<server>/README.md` adalah hulu, versi terpasang, dan perintah pemasangannya.
+2. **Registrasi MCP adalah keadaan per-mesin dan tidak pernah dilacak di git.** Terukur malam ini:
+   `engines/qoder/settings.json` 4 → 5 server, `engines/antigravity-cli/settings.json` 0 → 1; dua
+   berkas itu hidup di luar repo dan tidak akan pernah masuk riwayatnya.
+3. **Nama produk dan nama slug repo adalah dua hal berbeda dan keduanya ditulis.** Yang dipakai operator
+   adalah IRSofka Comfy MCP / IRSofka Workstation MCP / IRSofka Blender MCP; slug yang sudah terpakai
+   (`irsofka-comfy-mcp`, `irsofka-comfyui-mcp`) tetap alamat yang dibaca mesin, jadi tiap README menyebut
+   nama produk lebih dulu lalu slug-nya, supaya tidak ada yang menebak bahwa keduanya benda yang sama.
+
+Batas yang jujur atas klaim "bersih" di baris Comfy: `server.py` milik `comfy-mcp` PERNAH DIBACA pada
+sesi yang sama, untuk menghitung jumlah toolnya, dan `LICENSE`/`NOTICE`-nya juga dibaca. Yang diukur
+bukan kenangan: 7 baris identik dari 654 baris kita, semuanya boilerplate generik, rentan bersama
+terpanjang 1, nol identifier privat kita di sumber mereka — dan sebuah perbandingan baris tidak akan
+melihat sebuah terjemahan yang mempertahankan struktur sambil mengganti nama. Kalimat itu batas
+alatnya, bukan pembelaan.
+
 
 ### Target shape: one workstation repo, three MCP repos — and each has a different licence route
 

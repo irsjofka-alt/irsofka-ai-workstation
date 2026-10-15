@@ -475,6 +475,13 @@ NEW_COLUMNS = [
     # mengaku mengerjakan perintah orang yang bukan perintahnya).
     # Nilainya didefinisikan di sini, di kolom, satu kali (§12).
     ("quest_tasks", "origin", "VARCHAR(16)", "TEXT"),
+    # Kunci stabil untuk baris yang dipetakan dari ROADMAP_ITEMS. Idempotensi `seed` dulu dikenali
+    # dari JUDUL, dan judul adalah label yang boleh dikoreksi — jadi setiap koreksi judul tidak
+    # memindahkan barisnya melainkan melahirkan kembarannya. Terukur 2026-10-15: tiga baris parkir
+    # (296, 299, 300) semuanya lahir dari perbaikan judul, dan yang paling jelek, 300 mengulang
+    # pekerjaan yang sudah COMPLETED (294) — satu pekerjaan, dua baris, dua vonis. §12: satu kata,
+    # satu kunci.
+    ("quest_tasks", "seed_key", "VARCHAR(60)", "TEXT"),
     # `ws_path` adalah proyek baris ini — direktori tempat gerbangnya dijalankan. KOSONG berarti
     # hari kemarin persis: `REPO`. Itulah sebabnya kolom ini boleh ditambahkan tanpa menyentuh
     # satu pun baris lama: tidak ada yang dipaksa punya proyek sebelum ia memang punya satu.
@@ -2752,12 +2759,32 @@ def seed(conn, engine, items, refresh_gates=None):
     pernah punya id di pemanggilan pertama.
     """
     keymap, made = {}, []
+    ph = "%s" if engine == "POSTGRESQL" else "?"
     for key, title, phase, deps, check in items:
-            exists = run(conn, engine, "SELECT id FROM quest_tasks WHERE title=%s"
-                         if engine == "POSTGRESQL" else "SELECT id FROM quest_tasks WHERE title=?",
-                         (title,))
+            # Urutan pencarian: kunci dulu, judul kedua. Kunci adalah identitas; judul hanyalah label,
+            # dan label yang dikoreksi harus memperbarui baris yang sama, bukan memunculkan yang baru.
+            exists = run(conn, engine, "SELECT id, title, status FROM quest_tasks WHERE seed_key=%s"
+                         if engine == "POSTGRESQL" else "SELECT id, title, status FROM quest_tasks WHERE seed_key=?",
+                         (key,))
+            if not exists:
+                # Baris lama tidak punya kunci; serahkan pada kecocokan judul sekali saja, lalu
+                # kunci itu ditulis supaya kesempatan berikutnya tidak bergantung pada teks.
+                exists = run(conn, engine, "SELECT id, title, status FROM quest_tasks WHERE title=%s"
+                             if engine == "POSTGRESQL" else "SELECT id, title, status FROM quest_tasks WHERE title=?",
+                             (title,))
+                if exists:
+                    _ph = "%s" if engine == "POSTGRESQL" else "?"
+                    run(conn, engine,
+                        f"UPDATE quest_tasks SET seed_key={ph} WHERE id={ph}",
+                        (key, int(exists[0]["id"])))
             if exists:
                 keymap[key] = int(exists[0]["id"])
+                if str(exists[0].get("title") or "") != title:
+                    # Judul boleh KOREKSI, vonis tidak: status dan evidence tidak disentuh di sini.
+                    run(conn, engine,
+                        f"UPDATE quest_tasks SET title={ph} WHERE id={ph}", (title, keymap[key]))
+                    made.append((keymap[key], "judul diselaraskan", title))
+                    continue
                 # Gerbang boleh DIPERBAIKI selama barisnya belum divonis. Kebutuhan ini nyata:
                 # gerbang f109 diperketat hari ini (menuntut sisi "push tanpa verdict ditahan"),
                 # tapi seed idempoten berdasarkan judul dan tidak pernah menulis ulang
@@ -2780,12 +2807,11 @@ def seed(conn, engine, items, refresh_gates=None):
                         continue
                 made.append((keymap[key], "ada", title))
                 continue
-            ph = "%s" if engine == "POSTGRESQL" else "?"
             run(conn, engine,
-                f"INSERT INTO quest_tasks (title, status, phase, check_command, summary, origin) "
-                f"VALUES ({ph}, 'PENDING', {ph}, {ph}, {ph}, {ph})",
+                f"INSERT INTO quest_tasks (title, status, phase, check_command, summary, origin, "
+                f"seed_key) VALUES ({ph}, 'PENDING', {ph}, {ph}, {ph}, {ph}, {ph})",
                 (title, phase, check, "dipetakan dari ROADMAP.md oleh work_order seed",
-                 ORIGIN_ROADMAP))
+                 ORIGIN_ROADMAP, key))
             row = run(conn, engine, "SELECT id FROM quest_tasks WHERE title=%s"
                       if engine == "POSTGRESQL" else "SELECT id FROM quest_tasks WHERE title=?",
                       (title,))
@@ -2896,7 +2922,7 @@ ROADMAP_ITEMS = [
     # adalah id 286 — baris penajaman skill yang DIBUAT MESIN SENDIRI. Pekerjaan yang ia minta tidak
     # pernah masuk ledger, jadi tidak ada yang bisa diambil. Tiga baris di bawah adalah pekerjaan itu,
     # masing-masing dengan gerbang angka yang hari ini MERAH dan memang harus merah.
-    ("f11mcp_comfy", "F11/MCP-1 IRSofka ComfyUI MCP: repo berdiri sendiri sampai ke origin, gerbang "
+    ("f11mcp_comfy", "F11/MCP-1 IRSofka Comfy MCP: repo berdiri sendiri sampai ke origin, gerbang "
                      "VRAM dibuktikan dua arah, dan terpasang di KEDUA CLI", "build", None,
      # Empat sifat, bukan keberadaan berkas. `remote get-url` hari ini gagal (repo belum punya
      # remote — itu justru sisanya), `rev-parse origin/main` menuntut sha-nya benar-benar sampai,
@@ -2941,14 +2967,19 @@ ROADMAP_ITEMS = [
      # jadi menulisnya tanpa membaca `FIRSofkaSocketServer` adalah menebak — dan alat ukur yang
      # ditebak lebih buruk dari tidak ada alat ukur. Editor tutup = probe tidak bisa lolos: benar.
      "test -f tools/ue_bridge_probe.py && timeout 120 python3 tools/ue_bridge_probe.py"),
-    ("f11mcp_ue", "F11/MCP-3 IRSofka Unreal Engine MCP: plugin berdiri sendiri sebagai repo sampai "
-                  "ke origin (setelah F11/STEP-0 hijau, bukan sebelum)", "build", ["f11step0"],
+    # Namanya IRSofka WORKSTATION MCP, bukan "Unreal Engine MCP": yang dimiliki repo ini adalah sisi
+    # mesin dari jembatan (server, transport, gerbang), sedangkan plugin UE tetap artefak terpasang
+    # di proyek engine dan menyebut merek Epic di nama repo kita hanya menambah masalah merek dagang
+    # tanpa menambah informasi.
+    ("f11mcp_workstation", "F11/MCP-3 IRSofka Workstation MCP: jembatan sisi mesin berdiri sendiri "
+                           "sebagai repo sampai ke origin (setelah F11/STEP-0 hijau, bukan sebelum)",
+     "build", ["f11step0"],
      # Yang dijamin gerbang ini hanya dua hal yang memang bisa dilihat dari berkas: repositori IRSofka
      # sendiri dan sha-nya benar-benar sampai ke remote. Klaim "jembatan sudah benar" dipindah ke
      # F11/STEP-0 di atas, dan `depends_on` menahannya di sana — memisahkan repo yang belum bisa
      # membuktikan posisi actor hanya membungkus kebohongan dengan struktur yang lebih rapi.
-     "test -f ~/Apps/mcp/irsofka-unreal-mcp/README.md && "
-     "git -C ~/Apps/mcp/irsofka-unreal-mcp rev-parse origin/main"),
+     "test -f ~/Apps/mcp/irsofka-workstation-mcp/README.md && "
+     "git -C ~/Apps/mcp/irsofka-workstation-mcp rev-parse origin/main"),
     ("f109", "F10.9 push gate: push hanya setelah verdict verifier COMPLETED menyebut model yang "
              "meloloskan diff-nya; tanpa verdict, commit berhenti lokal dan masuk digest pagi",
      "build", ["f101", "f103"],
@@ -4869,6 +4900,26 @@ def selftest():
         # dibaca mesin adalah kolom check_command di barisnya. Kalau sumber diperbaiki tapi barisnya
         # tidak disegarkan, yang berjalan tetap grep lama — dan itu sudah terjadi malam ini.
         seed(conn, "SQLITE", ROADMAP_ITEMS)   # baris roadmap nyata, supaya tes di bawah punya objek
+        # --- idempotensi `seed` dikenali dari KUNCI, bukan dari judul ------------------------------
+        # Ini bukan kebersihan: malam ini tiga baris parkir lahir karena perbaikan JUDUL (296, 299,
+        # 300) dan yang terburuk mengulang pekerjaan yang sudah COMPLETED, jadi satu pekerjaan punya
+        # dua baris dengan dua vonis. Yang diuji di bawah: judul yang dikoreksi memperbarui baris yang
+        # sama, dan seed kedua tidak menambah apa pun.
+        _first = {int(i) for i, s, _t in seed(conn, "SQLITE", ROADMAP_ITEMS)}
+        _lengkap = [(i, s, t) for i, s, t in seed(conn, "SQLITE", ROADMAP_ITEMS)]
+        check("seed kedua atas daftar yang sama tidak melahirkan satu baris pun",
+              all(s != "baru" for _i, s, _t in _lengkap), str([i for i, s, _t in _lengkap if s == "baru"]))
+        _renamed = [(k, title + " (dijudulkan ulang)", ph_, d, ck) for k, title, ph_, d, ck in ROADMAP_ITEMS]
+        _res = seed(conn, "SQLITE", _renamed)
+        _baru = [i for i, s, _t in _res if s == "baru"]
+        _selaras = [i for i, s, _t in _res if s == "judul diselaraskan"]
+        check("koreksi judul memperbarui baris yang sama, bukan membuat kembarannya",
+              not _baru and len(_selaras) >= 1, f"baru={_baru} diselaraskan={len(_selaras)}")
+        _row = run(conn, "SQLITE", "SELECT id, status, seed_key FROM quest_tasks WHERE seed_key='f109'")
+        check("kunci menempel di baris dan status vonisnya tidak disentuh saat judul diganti",
+              len(_row) == 1 and _row[0]["seed_key"] == "f109"
+              and norm(_row[0]["status"]) in ("PENDING", "COMPLETED", "FAILED", "WORKING", "CLAIMED"),
+              str(_row[:1]))
         _g103 = run(conn, "SQLITE",
                     "SELECT check_command AS c FROM quest_tasks WHERE title LIKE 'F10.3%'")
         # `not _g103 or ...` akan lulus tanpa satu baris pun — fixture SQLite memang tidak selalu
