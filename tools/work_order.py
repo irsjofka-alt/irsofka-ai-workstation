@@ -488,6 +488,17 @@ NEW_COLUMNS = [
     ("quest_tasks", "ws_path", "TEXT", "TEXT"),
 ]
 
+# Index ditegakkan dari kode, bukan dari niat pemanggil. `seed_key` adalah identitas baris roadmap,
+# dan identitas yang tidakunik adalah kegagalan yang tidak terukur: tanpa index, dua baris boleh
+# memakai kunci yang sama, `seed` akan mengambil yang pertama dan `depends_on` ditulis ke baris yang
+# salah — persis cacat C1 yang ditemukan verifier 2026-10-15, hanya saja selapis lebih dalam.
+# NULL tidak bertabrakan di PostgreSQL maupun SQLite, jadi ribuan baris lama tanpa kunci tidak
+# terhentikan oleh index ini (terukur sebelum dipasang: 0 kunci non-null yang kembar).
+NEW_INDEXES = [
+    ("quest_tasks_seed_key_uq",
+     "CREATE UNIQUE INDEX IF NOT EXISTS quest_tasks_seed_key_uq ON quest_tasks (seed_key)"),
+]
+
 # Nilai `origin` untuk baris yang sudah ada ketika kolomnya belum ada. Ini pernyataan tentang
 # sejarah, bukan tentang perilaku: 'legacy' tetap ditawarkan ke ON (sama seperti sebelum kolom ini
 # ada) dan tetap tidak pernah diambil SEMI.
@@ -1042,6 +1053,19 @@ def ensure_schema(conn, engine: str) -> list[str]:
             log.append(f"col {table}.{column}")
         except Exception as exc:  # noqa: BLE001
             log.append(f"skip {table}.{column}: {exc}")
+    # Index datang SETELAH kolom: `quest_tasks.seed_key` adalah bagian dari NEW_COLUMNS, jadi
+    # membuat indexnya lebih dulu pada instalasi yang benar-benar baru menjawab "column does not
+    # exist" dan menghasilkan laporan merah yang bukan apa-apa. Nama index ikut disimpan karena
+    # `log` dibaca operator lewat `work_order.py ensure`; laporan yang menyebut "quest_tasks" saja
+    # tidak membedakan index yang terpasang dari index yang tidak pernah ada.
+    # Kegagalan dicatat dengan namanya, tidak ditelan — kegagalan yang tidak dilaporkan adalah
+    # kolom yang tidak pernah ditegakkan.
+    for idx_name, stmt in NEW_INDEXES:
+        try:
+            cur.execute(stmt)
+            log.append(f"idx {idx_name}")
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"skip idx {idx_name}: {exc}")
     if engine == "POSTGRESQL":
         # Lewat run(), bukan cur.execute().fetchone(): cursor psycopg2 mengembalikan None dari
         # execute, jadi bentuk sqlite3 di sini akan AttributeError tepat saat schema sedang
@@ -2751,12 +2775,20 @@ def broker(conn, engine, decision_id, timeout=240):
 
 
 def seed(conn, engine, items, refresh_gates=None):
-    """Idempoten berdasarkan judul — memanggil ulang tidak menggandakan pekerjaan.
+    """Idempoten berdasarkan KUNCI — memanggil ulang tidak menggandakan pekerjaan.
 
     Dependensi ditulis sebagai KEY, bukan id: id di DB live sudah mulai dari 27, jadi angka
     '1' akan menunjuk baris tua yang bukan apa-apa. Peta key->id dibangun setelah semua baris
     ada, lalu kolom depends_on diisi — dua tahap, karena item B bisa menyebut A yang belum
     pernah punya id di pemanggilan pertama.
+
+    `refresh_gates=None` (default) berarti SEMUA gerbang diselaraskan pada baris yang belum
+    divonis. Ini dibalik dari versi pertama, yang membaca None sebagai "tidak ada": konsekuensinya
+    nyata dan senyap — `seed --roadmap` tanpa flag itu adalah perintah produksi, dan ia tidak pernah
+    menyentuh check_command, jadi setiap pengetatan gerbang di ROADMAP_ITEMS hanya sampai ke baris
+    kalau pemanggilnya ingat menyebut kuncinya satu per satu. Aturan yang butuh diingatkan adalah
+    aturan yang akan melenceng. Flag sekarang mempersempit (perbarui HANYA kunci yang disebut),
+    bukan mengizinkan.
     """
     keymap, made = {}, []
     ph = "%s" if engine == "POSTGRESQL" else "?"
@@ -2769,8 +2801,15 @@ def seed(conn, engine, items, refresh_gates=None):
             if not exists:
                 # Baris lama tidak punya kunci; serahkan pada kecocokan judul sekali saja, lalu
                 # kunci itu ditulis supaya kesempatan berikutnya tidak bergantung pada teks.
-                exists = run(conn, engine, "SELECT id, title, status FROM quest_tasks WHERE title=%s"
-                             if engine == "POSTGRESQL" else "SELECT id, title, status FROM quest_tasks WHERE title=?",
+                # "Baris lama" harus berarti benar-benar belum bertuan: tanpa `seed_key IS NULL`,
+                # satu judul yang dipakai ulang item lain MERECOK baris milik kunci yang sudah ada
+                # — kunci lama itu hilang dari barisnya, dan pada seed berikutnya item lama tidak
+                # menemukannya lagi lalu membuat baris keduanya. Satu pekerjaan, dua baris: itu
+                # persis cacat yang baru saja ditutup 296/299/300, hanya lewat pintu samping.
+                exists = run(conn, engine,
+                             "SELECT id, title, status FROM quest_tasks WHERE title=%s AND seed_key IS NULL"
+                             if engine == "POSTGRESQL"
+                             else "SELECT id, title, status FROM quest_tasks WHERE title=? AND seed_key IS NULL",
                              (title,))
                 if exists:
                     _ph = "%s" if engine == "POSTGRESQL" else "?"
@@ -2779,8 +2818,18 @@ def seed(conn, engine, items, refresh_gates=None):
                         (key, int(exists[0]["id"])))
             if exists:
                 keymap[key] = int(exists[0]["id"])
+                status = norm(exists[0].get("status"))
                 if str(exists[0].get("title") or "") != title:
-                    # Judul boleh KOREKSI, vonis tidak: status dan evidence tidak disentuh di sini.
+                    # Judul boleh KOREKSI selama barisnya belum mulai; vonis membekukannya.
+                    # Alasannya bukan keramahan pada teks lama: baris COMPLETED/FAILED/PARKED adalah
+                    # bukti yang menyebut dirinya sendiri. Mengganti judulnya setelah vonis ditulis
+                    # membuat evidence tidak lagi menjelaskan barisnya, dan itu bisa dilakukan mundur
+                    # tanpa menyentuh satu baris pun — persis celah retroaktif yang dilarang §12.
+                    # Divergensi dilaporkan, tidak dibuang diam-diam: yang boleh berubah adalah
+                    # ROADMAP.md oleh tangan operator, bukan baris vonis oleh loop.
+                    if status != "PENDING":
+                        made.append((keymap[key], f"judul dibekukan ({status})", title))
+                        continue
                     run(conn, engine,
                         f"UPDATE quest_tasks SET title={ph} WHERE id={ph}", (title, keymap[key]))
                     made.append((keymap[key], "judul diselaraskan", title))
@@ -2794,9 +2843,8 @@ def seed(conn, engine, items, refresh_gates=None):
                 # adalah laporan yang ditulis tangan, dan itu §12.
                 # Hanya PENDING yang boleh disentuh: COMPLETED/FAILED adalah vonis, dan vonis
                 # tidak pernah ditulis ulang.
-                if refresh_gates and key in refresh_gates \
-                        and norm(get_item(conn, engine, keymap[key])
-                                          .get("status")) == "PENDING":
+                if (refresh_gates is None or key in refresh_gates) \
+                        and status == "PENDING":
                     cur_gate = (get_item(conn, engine, keymap[key]).get("check_command") or "").strip()
                     if cur_gate != (check or "").strip():
                         run(conn, engine, "UPDATE quest_tasks SET check_command=%s WHERE id=%s"
@@ -2812,9 +2860,18 @@ def seed(conn, engine, items, refresh_gates=None):
                 f"seed_key) VALUES ({ph}, 'PENDING', {ph}, {ph}, {ph}, {ph}, {ph})",
                 (title, phase, check, "dipetakan dari ROADMAP.md oleh work_order seed",
                  ORIGIN_ROADMAP, key))
-            row = run(conn, engine, "SELECT id FROM quest_tasks WHERE title=%s"
-                      if engine == "POSTGRESQL" else "SELECT id FROM quest_tasks WHERE title=?",
-                      (title,))
+            # Identitas dibaca dari KUNCI, bukan dari judul. Versi pertama mengambil id dengan
+            # `WHERE title=`, dan itu salah dua kali: satu baris PARKED yang pernah memakai judul
+            # yang sama (terukur di DB live: 296/299/300 diparkir justru karena tabrakan judul)
+            # membuat keymap menunjuk baris tua, dan `depends_on` ditulis ke baris yang bukan
+            # miliknya. Setelah INSERT, baris kuci ini adalah satu-satunya pemegang kunci itu —
+            # dan UNIQUE index `quest_tasks_seed_key_uq` menjadikannya fakta, bukan harapan.
+            row = run(conn, engine, "SELECT id FROM quest_tasks WHERE seed_key=%s"
+                      if engine == "POSTGRESQL" else "SELECT id FROM quest_tasks WHERE seed_key=?",
+                      (key,))
+            if not row:
+                made.append((None, f"INSERT TANPA BARIS TERBACA kunci={key}", title))
+                continue
             keymap[key] = int(row[0]["id"])
             made.append((keymap[key], "baru", title))
     for key, _title, _phase, deps, _check in items:
@@ -4933,6 +4990,75 @@ def selftest():
               and "irsofka-autopilot.timer" in (_g103[0]["c"] or ""),
               str((_g103[0]["c"] if _g103 else "")[:120]))
 
+        # --- kunci adalah IDENTITAS: empat celah yang dibawa verifier round-10 ---------------------
+        # Semuanya lahir dari bentuk yang sama: baris dikenali dari teks, padahal teks adalah label.
+        # (1) `keymap` dibaca dari judul SETELAH INSERT, jadi judul yang dipakai ulang menyandarkan
+        # item baru ke baris tua dan `depends_on` mendarat di baris yang bukan miliknya. (2) fallback
+        # judul ikut mengambil baris yang sudah punya kunci lain, sehingga kunci lama hilang dari
+        # barisnya dan item lama melahirkan kembaran di seed berikutnya. (3) judul baris vonis boleh
+        # ditulis ulang, yang adalah koreksi mundur atas bukti. (4) default `refresh_gates=None`
+        # berarti "tidak ada", jadi penyelarasan gerbang butuh orang mengingat sebuah flag.
+        # Dua item dalam SATU panggilan: kDup memakai judul yang sama persis dengan kDep yang baru
+        # saja di-INSERT. Bentuk inilah yang membuat celah (1) terukur — `SELECT id WHERE title=`
+        # mengembalikan DUA baris dan yang pertama adalah milik kDep, jadi keymap mendarat di sana.
+        _r_dup = seed(conn, "SQLITE", [("kDep", "Dep Satu", "build", None, "true"),
+                                       ("kDup", "Dep Satu", "build", ["kDep"], "true")])
+        _dep_row = run(conn, "SQLITE", "SELECT id, seed_key, depends_on FROM quest_tasks "
+                                       "WHERE seed_key='kDep'")
+        _dup_rows = run(conn, "SQLITE", "SELECT id, depends_on FROM quest_tasks WHERE seed_key='kDup'")
+        _kdep = int(_dep_row[0]["id"]) if _dep_row else None
+        check("judul yang dipakai ulang tidak mencuri baris milik kunci lain",
+              _dep_row and _dep_row[0]["seed_key"] == "kDep"
+              and len(_dup_rows) == 1 and int(_dup_rows[0]["id"]) != _kdep,
+              f"dup={_dup_rows[:1]} dep={_dep_row[:1]}")
+        check("depends_on mendarat di baris pemilik kunci, bukan di baris tua berjudul sama (C1)",
+              len(_dup_rows) == 1 and str(_dup_rows[0]["depends_on"] or "") == str(_kdep)
+              and not str(_dep_row[0]["depends_on"] or ""),
+              f"baru={_dup_rows[:1]} lama={_dep_row[:1]} report={_r_dup}")
+        _frz = int([_i for _i, _s, _t in seed(conn, "SQLITE",
+                                             [("kFrz", "Judul Vonis", "build", None, "true")])][0])
+        finish(conn, "SQLITE", _frz, "COMPLETED", evidence="12/12", followup=False)
+        _r_frz = seed(conn, "SQLITE", [("kFrz", "Judul Vonis DIUBAH", "build", None, "true")])
+        _frz_row = run(conn, "SQLITE", "SELECT title, status, evidence FROM quest_tasks WHERE id=?",
+                       (_frz,))
+        check("judul baris yang sudah divonis dibekukan, dan divergansinya dilaporkan (B)",
+              _frz_row[0]["title"] == "Judul Vonis"
+              and norm(_frz_row[0]["status"]) == "COMPLETED"
+              and (_frz_row[0]["evidence"] or "") == "12/12"
+              and any(str(s).startswith("judul dibekukan") for _i, s, _t in _r_frz),
+              f"{_frz_row[:1]} report={_r_frz}")
+        _uq_ok, _uq_detail = False, "INSERT kunci kembar LOLOS — identitas tidak ditegakkan"
+        try:
+            run(conn, "SQLITE", "INSERT INTO quest_tasks (title, status, seed_key) "
+                                "VALUES ('kunci kembar','PENDING','kFrz')")
+        except Exception as exc:  # noqa: BLE001 — kegagalan yang DIINGINKAN; catat bentuknya
+            _uq_ok, _uq_detail = True, str(exc)[:90]
+        conn.rollback()
+        check("UNIQUE index menolak dua baris memegang seed_key yang sama (A1)", _uq_ok, _uq_detail)
+        _gate = int([_i for _i, _s, _t in seed(conn, "SQLITE",
+                                             [("kGate", "Gerbang Default", "build", None, "lama")])][0])
+        _r_gate = seed(conn, "SQLITE", [("kGate", "Gerbang Default", "build", None, "baru")])
+        _gate_row = run(conn, "SQLITE", "SELECT check_command AS c FROM quest_tasks WHERE id=?",
+                        (_gate,))
+        check("seed polos menyelaraskan gerbang baris PENDING — tanpa perlu mengingat flag (C2)",
+              (_gate_row[0]["c"] or "") == "baru"
+              and any(s == "gerbang diperbarui" for _i, s, _t in _r_gate),
+              f"{_gate_row[:1]} report={_r_gate}")
+        _r_held = seed(conn, "SQLITE", [("kGate", "Gerbang Default", "build", None, "lewat-flag")],
+                       refresh_gates={"bukan-kunci-ini"})
+        _held_row = run(conn, "SQLITE", "SELECT check_command AS c FROM quest_tasks WHERE id=?",
+                        (_gate,))
+        check("flag --refresh-gates MEMPERSEMPIT (hanya kunci yang disebut), bukan mengizinkan",
+              (_held_row[0]["c"] or "") == "baru"
+              and not any(s == "gerbang diperbarui" for _i, s, _t in _r_held),
+              f"{_held_row[:1]} report={_r_held}")
+        finish(conn, "SQLITE", _gate, "COMPLETED", evidence="9/9", followup=False)
+        seed(conn, "SQLITE", [("kGate", "Gerbang Default", "build", None, "setelah vonis")])
+        _post = run(conn, "SQLITE", "SELECT check_command AS c FROM quest_tasks WHERE id=?",
+                    (_gate,))
+        check("gerbang baris yang sudah divonis tidak pernah ditulis ulang",
+              (_post[0]["c"] or "") == "baru", str(_post[:1]))
+
         # --- urutan penawaran: perintah orang > roadmap > warisan > buatan mesin ------------------
         # Kemelut nyata 2026-10-15 20:0x: operator menanyakan kenapa loop mengerjakan penajaman skill
         # padahal task MCP-nya (session_turns id 458) belum disentuh. Jawabannya bukan "mesin memilih
@@ -6387,8 +6513,12 @@ def main(argv=None):
         if a.refresh_gates and not a.roadmap:
             print("seed: --refresh-gates butuh --roadmap (daftar butirnya kosong tanpa itu, "
                   "jadi tidak ada yang bisa diperbarui)"); return 2
+        # Tanpa flag: None, yaitu "semua kunci" (lihat docstring `seed`). Dulu baris ini menulis
+        # `set(a.refresh_gates or [])` — himpunan kosong — yang di bawah aturan lama berarti
+        # "tidak ada", sehingga `seed --roadmap` polos tidak pernah menyelaraskan satu gerbang pun.
+        gates = set(a.refresh_gates) if a.refresh_gates else None
         for i, state, title in seed(conn, engine, ROADMAP_ITEMS if a.roadmap else [],
-                                    refresh_gates=set(a.refresh_gates or [])):
+                                    refresh_gates=gates):
             print(f"{i}\t{state}\t{title}")
     elif a.cmd == "claim":
         ok, msg = claim(conn, engine, a.id, a.by)
