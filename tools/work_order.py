@@ -661,11 +661,14 @@ def idle_debt_menu(conn, engine, brain_root=None):
 
 
 PHASE_MARKS = ("✅", "🟡", "🟨", "⬜")
-# Kata yang boleh mengikuti penanda di blok `## Phases`. Ia daftar, bukan tebakan: hanya
-# pasangan penanda+kata yang dihitung sebagai status, jadi emoji di dalam keterangan tidak
-# bisa lagi menyamar sebagai status sebuah fase.
-PHASE_STATUS_WORDS = {"completed", "selesai", "done", "in", "berjalan", "partly",
-                    "sebagian", "planned", "belum", "not", "shipped"}
+PHASE_MARKS = ("✅", "🟡", "🟨", "⬜")
+# Kata yang boleh mengikuti penanda, DIPISAH dua sisi. Versi pertama menyimpan keduanya dalam satu
+# daftar, dan itu membuka celah yang reviewer tunjukkan: `F10 ... ✅ In Progress` cocok dengan daftar
+# itu, penanda ✅ menang, dan fase terbaca SELESAI. Sekarang ✅ yang diikuti kata "belum selesai"
+# adalah kontradiksi, dan kontradiksi dilempar — tidak dibaca selesai.
+PHASE_DONE_WORDS = {"completed", "selesai", "done", "shipped", "final"}
+PHASE_OPEN_WORDS = {"in", "partly", "planned", "not", "pending", "wip", "berjalan", "sebagian",
+                    "belum", "sedang", "started", "hold", "on", "deprecated"}
 
 
 def parse_phases(text):
@@ -710,12 +713,23 @@ def parse_phases(text):
         #   `F11 ... 🟨 Partly shipped (x ✅ done)` -> ✅ di dalam kurung datang setelah penanda asli
         # Jadi yang dicari adalah pasangan penanda+kata status yang KNOWN, pada posisi paling awal.
         # Tidak ada pasangan yang ketemu = fase dihitung TERBUKA (gagal ke arah menutup).
-        hit = None
-        for m in re.finditer(r"(✅|🟡|🟨|⬜)\s+([A-Za-zÀ-ÿ]+)", ln):
-            if m.group(2).lower() in PHASE_STATUS_WORDS:
-                hit = m.group(1)
-                break
-        if hit is None or hit != "✅":
+        found = [e for e in PHASE_MARKS if e in ln]
+        if len(found) > 1:
+            # Lebih dari satu penanda pada satu baris fase berarti barisnya tidak mengatakan satu
+            # status. Memilih "yang pertama" atau "yang terakhir" sama-sama menebak, dan tebak ke
+            # arah selesai adalah jalan keluar yang sedang kita tutup. Jadi: LEMPAR. `roadmap_open`
+            # melaporkannya sebagai `unreadable`, dan kedua pagar memperlakukan itu sebagai
+            # TIDAK TAHU lalu menolak menulis baris penajaman.
+            raise ValueError(f"baris fase F{n} memuat {len(found)} penanda status")
+        if not found:
+            open_phases.add(n)              # tidak dinyatakan = belum selesai
+            continue
+        marker = found[0]
+        mw = re.search(re.escape(marker) + r"\s*\[?\s*([A-Za-zÀ-ÿ]+)", ln)
+        word = (mw.group(1).lower() if mw else "")
+        if marker == "✅" and word in PHASE_OPEN_WORDS:
+            raise ValueError(f"baris fase F{n} menulis ✅ tetapi diikuti kata '{word}'")
+        if marker != "✅":
             open_phases.add(n)
     return sorted(open_phases)
 
@@ -998,13 +1012,19 @@ def ensure_schema(conn, engine: str) -> list[str]:
         cur.execute("INSERT OR IGNORE INTO autopilot_state (id) VALUES (1)")
     else:
         cur.execute("INSERT INTO autopilot_state (id) VALUES (1) ON CONFLICT DO NOTHING")
-    # OFF bukan lagi sebuah mode, tapi barisnya masih ada di database yang hidup. Nilai lama
-    # dipindahkan ke SEMI dengan TANGAN yang tetap turun: `off_reason` mencatat penghentian,
-    # `level='observe'` sudah ditulis jalur OFF, dan jendela tidak dibuka ulang. Jadi perpindahan
-    # ini tidak bisa menyalakan sesuatu yang orang matikan — ia hanya mengganti kata untuk keadaan
-    # yang sama, dan tick yang membaca 'OFF' tidak lagi bangun sebagai MODE_UNKNOWN setiap 5 menit.
+    # Baris lama boleh menyimpan kata yang TIDAK ADA dalam kosakata mode (sisa sebelum
+    # `MODES = ("SEMI", "OFF", "ON")` dipulihkan operator 2026-10-09). Hanya itu yang dipindahkan ke
+    # SEMI. Versi pertama baris ini menyaring `NOT IN ('SEMI','ON')` — yaitu MENIMPA 'OFF' jadi
+    # 'SEMI' setiap kali modul ini dimuat, daemon start, atau selftest menyentuh skema. Efeknya
+    # nyata dan satu arah: rem yang orang tarik dengan `autopilot off` hilang sendiri, dan
+    # `claim()` yang menolak mode OFF tidak lagi punya apa pun untuk dibaca. Komentar lama
+    # ("OFF bukan lagi sebuah mode") adalah teks dari sebelum pemulihan itu dan dibiarkan tinggal
+    # di atas kode yang salah, jadi keduanya dibuang bersamaan.
+    # Daftar kata yang sah TIDAK ditulis ulang di sini: ia diambil dari MODES, satu-satunya tempat
+    # kosakata mode didefinisikan (§12).
     try:
-        cur.execute("UPDATE autopilot_state SET mode='SEMI' WHERE mode NOT IN ('SEMI','ON')")
+        _ok = ",".join(f"'{m}'" for m in MODES)
+        cur.execute(f"UPDATE autopilot_state SET mode='SEMI' WHERE mode NOT IN ({_ok})")
     except Exception:  # noqa: BLE001 — kolom lama yang belum ada bukan alasan untuk menolak start
         pass
     # Baris yang lebih tua dari kolomnya tidak bisa diklasifikasikan dengan menebak. Yang bisa
@@ -4587,6 +4607,24 @@ def selftest():
         ap = autopilot(conn, "SQLITE", "SEMI", minutes=30, who="selftest")
         check("SEMI tersimpan sebagai SEMI dengan tangan turun",
               ap["mode"] == "SEMI" and ap["level"] == "observe", str(ap))
+        # Rem harus bertahan dari start ulang. `ensure_schema` dulu menulis
+        # `mode='SEMI' WHERE mode NOT IN ('SEMI','ON')`, jadi setiap kali modul dimuat baris OFF
+        # berubah sendiri menjadi SEMI — rem yang operator tarik hilang diam-diam, dan `claim()`
+        # tidak lagi punya keadaan OFF untuk dibaca. Kosakata yang sah sekarang diambil dari MODES.
+        c2 = conn
+        c2.execute("UPDATE autopilot_state SET mode='OFF' WHERE id=1")
+        c2.commit()
+        ensure_schema(c2, "SQLITE")
+        check("mode OFF selamat dari ensure_schema berikutnya — rem tidak boleh melepas dirinya sendiri",
+              str(autopilot(c2, "SQLITE")["mode"]) == "OFF",
+              str(autopilot(c2, "SQLITE")["mode"]))
+        c2.execute("UPDATE autopilot_state SET mode='SEMIIX' WHERE id=1")
+        c2.commit()
+        ensure_schema(c2, "SQLITE")
+        check("kata mode yang memang tidak dikenal tetap dinormalkan ke SEMI",
+              str(autopilot(c2, "SQLITE")["mode"]) == "SEMI", str(autopilot(c2, "SQLITE")["mode"]))
+        c2.execute("UPDATE autopilot_state SET mode='SEMI' WHERE id=1")
+        c2.commit()
         ap = autopilot(conn, "SQLITE", "semii", who="selftest")
         check("nilai mode yang tidak dikenal tidak mengubah apa pun (invarian 6: typo bukan izin)",
               ap.get("refused") and ap["mode"] == "SEMI" and ap["level"] == "observe", str(ap))
@@ -5355,11 +5393,10 @@ def idle_selftest(check):
                     "F1 A       ✅ Completed\n"
                     "F6 Cross   🟡 In Progress\n"
                     "F7 Studio  ✅ Completed (scope note — UE handoff not in it)\n"
-                    "F11 Bridge 🟨 Partly shipped (subsistem ✅ sudah)\n"
+                    "F11 Bridge 🟨 Partly shipped\n"
                     "F12 Tanpa penanda apa pun\n"
                     "```\n")
-        check("penanda PERTAMA yang menentukan status, jadi catatan ber-✅ di dalam kurung tidak "
-              "menutup fase yang masih 🟨",
+        check("baris yang bersih dibaca benar: ✅ selesai, 🟡 terbuka, tanpa penanda terbuka",
               parse_phases(_ph_text) == [6, 11, 12], str(parse_phases(_ph_text)))
         check("baris fase tanpa penanda dihitung TERBUKA — belum dinyatakan bukan berarti selesai",
               12 in parse_phases(_ph_text), str(parse_phases(_ph_text)))
@@ -5368,9 +5405,22 @@ def idle_selftest(check):
                    "F11 Bridge  🟨 Partly shipped (subsistem ✅ done)\n"
                    "F12 Deprecated ❌ tidak ada di daftar penanda\n"
                    "```\n")
-        check("penanda di dalam keterangan tidak bisa menyamar jadi status: ✅ di depan kata yang "
-              "bukan status diabaikan, fase tetap terbuka",
-              parse_phases(_tricky) == [8, 11, 12], str(parse_phases(_tricky)))
+        _amb = []
+        for label, line in (
+                ("dua penanda satu baris", "F8 A ✅ validation 🟡 In Progress"),
+                ("✅ di dalam kurung", "F11 B 🟨 Partly shipped (subsistem ✅ done)"),
+                ("✅ + kata belum selesai", "F10 C ✅ In Progress"),
+                ("bahasa Indonesia 🟡 Sedang (auth ✅ selesai)",
+                 "F8 D 🟡 Sedang berjalan (auth ✅ selesai)"),
+                ("penanda diikuti kurung siku", "F11 E 🟡 [In Progress] (core ✅ done)")):
+            try:
+                parse_phases("## Phases\n\n```\n" + line + "\n```\n")
+                _amb.append(label + " -> TIDAK LEMPAR")
+            except ValueError:
+                pass
+        check("semua baris yang tidak mengatakan satu status dilempar, bukan dibaca selesai — "
+              "pagar mengubahnya menjadi TIDAK TAHU dan menolak menulis penajaman",
+              not _amb, "; ".join(_amb))
         try:
             parse_phases("## Phases\n\n```markdown\nF1 A ✅ Completed\nF2 B 🟡 In Progress\n```\n")
             _tagged = [2]
