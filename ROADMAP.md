@@ -1237,7 +1237,9 @@ together" — and asymmetric, which matters for choosing:
 | build | result |
 |---|---|
 | `RunUAT BuildPlugin` on the **rebrand** (26 modules) | **fails in 3.86 s, 0 compile actions**, six errors of the form `Module 'IRSofkaBlueprint' (Marketplace) should not reference module 'IRSofkaCore' (Plugin). Hierarchy is Plugin -> Project -> Marketplace -> …` |
-| `RunUAT BuildPlugin` on the **installed** plugin, same moment, same machine | `BUILD SUCCESSFUL`, 46.39 s |
+| `RunUAT BuildPlugin` on the **installed** plugin, re-run right after the failed attempt, same machine |
+  `BUILD SUCCESSFUL`, 46.39 s — the same build earlier in this section took 45.29 s; both are real, |
+  they are two separate runs, and the figure is labelled by which one it came from |
 
 So the two trees do not merely refuse to load side by side: while both are present, **the rebrand
 cannot be built at all**, because UBT resolves the installed Marketplace modules' `IRSofkaCore`
