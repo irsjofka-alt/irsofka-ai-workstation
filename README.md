@@ -191,20 +191,32 @@ pool until a measurement says otherwise.
 ## Tripo3D — prepared route, no spend
 
 `tools/tripo.py` wraps the official `tripo-cli` (0.6.1, API **V3**) as the workstation's paid 3D
-half: text/image → model, texture, conversion. It is deliberately a *gate*, not a faucet.
+half. It is deliberately a *gate*, not a faucet. What exists today is narrow and named exactly:
+
+- **HTTP routes in `ENDPOINTS`**, each measured by a free `--dry-run`: `text_to_model`
+  (`/v3/generation/text-to-model`), `texture` (`/v3/models/texture`), `convert`
+  (`/v3/models/convert`), plus `balance` which is not a REST path at all but `tripo whoami`.
+  Image→model is **not** in that table; it is reachable only through the raw `cli` passthrough.
+- `ai-station` has no `tripo` verb; call `python3 tools/tripo.py status|probe|capabilities|submit|cli`.
+
+The cost rule:
 
 - Every command that can spend points (`make`, `ai`, `redo`) runs with `--dry-run` unless `--spend`
-  is passed explicitly, and `--spend` is refused unless that operation's cost in
-  `tools/tripo.py:ENDPOINTS[...]["biaya_poin"]` is an actual **number**. A prose value like
-  "belum terukur" is not a price. The guard sits in `cost_is_known()` and is enforced at *both*
-  doors — `submit()` and `cli()` — because a gate that only guards one entry point is an open gate
-  with extra steps. Unknown cost means no call, never an estimate guessed at runtime.
+  is passed explicitly, and `--spend` is refused unless a **number** is available for that
+  operation. `submit()` reads `ENDPOINTS[...]["biaya_poin"]`; the `cli` passthrough has no row in
+  that table, so it requires `--cost <points>` written by whoever measured it. A prose value like
+  "belum terukur" is not a price. One predicate, `cost_is_known()`, guards both doors — a gate that
+  only guards one entry point is an open gate with extra steps.
 - The module never adds `--yes`: the vendor CLI enables it automatically when it detects a
-  non-TTY, which is exactly the state an unattended tick runs in.
-- Keys never travel through argv, stdout or git. `config/tripo.json` is gitignored; credentials come
-  from `tripo login`, whose owner is the operator, not an agent.
-- The three API paths in `ENDPOINTS` were read off the installed CLI's own requests, not from
-  documentation, after the V2 guesses in the first draft returned 404.
+  non-TTY, which is exactly the state an unattended tick runs in. `--no-open` is always appended so
+  no browser window appears on the operator's desktop while he sleeps.
+- Keys never travel through argv, stdout or git. `config/tripo.json` is gitignored; credentials for
+  the CLI route come from `tripo login`, whose owner is the operator, not an agent — that is why
+  `probe` does not demand an API key for `whoami`.
+- The V2 paths in the very first draft were guesses. They were replaced by what the installed
+  CLI's own dry-run prints. Neither version has been confirmed against the live server, because no
+  credential exists on this machine yet — `probe` refuses rather than assuming, and `404` handling
+  in the code is tested with a fake transport, not observed.
 
 `ai-station tripo status` reports what is installed and whether a credential exists. Live calls are
 still pending: the Studio wallet (500 points, browser session) and the API wallet have not been shown

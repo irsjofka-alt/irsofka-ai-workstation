@@ -429,6 +429,13 @@ def selftest():
     def fake_run(args, **kw):
         _captured["args"] = list(args)
         return types.SimpleNamespace(returncode=0, stdout="ok", stderr="")
+    # `main()` DIUJI DI DALAM blok subprocess yang dipalsukan juga. Bentuk pertama menaruhnya
+    # sesudah `finally` memulihkan subprocess.run, jadi `--cost 40` benar-benar memanggil
+    # binari `tripo` asli. Tidak ada poin yang terpakai di sini hanya karena kebetulan mesin ini
+    # belum punya kredensial (`tripo whoami` menjawab "no API key configured") — sebuah tes yang
+    # selamat karena keadaan lain bukan tes.
+    import io
+    real_stdout = sys.stdout
     real_sub = __import__("subprocess").run
     __import__("subprocess").run = fake_run
     try:
@@ -441,6 +448,26 @@ def selftest():
         _captured.clear()
         r_paid = cli(["make", "a rock"], spend=True, cost_confirmed=40)
         paid = _captured.get("args")
+        _captured.clear()
+        sys.stdout = io.StringIO()
+        try:
+            rc_nocost = main(["cli", "make", "a rock", "--spend"])
+        finally:
+            sys.stdout = real_stdout
+        nocost2 = _captured.get("args")
+        _captured.clear()
+        sys.stdout = io.StringIO()
+        try:
+            rc_cost = main(["cli", "make", "a rock", "--spend", "--cost", "40"])
+        finally:
+            sys.stdout = real_stdout
+        paid2 = _captured.get("args")
+        _captured.clear()
+        sys.stdout = io.StringIO()
+        try:
+            rc_badcost = main(["cli", "make", "a rock", "--spend", "--cost"])
+        finally:
+            sys.stdout = real_stdout
     finally:
         __import__("subprocess").run = real_sub
     check("cli memaksa --dry-run + --no-open pada jalur tanpa biaya",
@@ -452,6 +479,18 @@ def selftest():
     check("dengan angka biaya yang terukur, --dry-run dicabut dan perintah benar-benar berangkat",
           paid is not None and "--dry-run" not in paid and "--no-open" in paid
           and r_paid.get("ok") is True, str(paid))
+    # Flag yang ditulis SESUDAH subcommand tidak pernah sampai ke argparse (REMAINDER memakannya),
+    # jadi `--spend` dulu diam-diam hilang dan modul ini mengaku punya pintu bayar yang sebenarnya
+    # mati. Yang diukur di sini adalah perilaku lewat main(), bukan lewat fungsi.
+    check("main() benar-benar membaca --spend yang ditulis setelah subcommand: tanpa --cost ia "
+          "MENOLAK dan tidak menjalankan apa pun",
+          rc_nocost == 1 and nocost2 is None, str(nocost2))
+    check("main() meneruskan --cost sebagai angka ke gerbang, dan perintah berangkat tanpa "
+          "--dry-run (dan --cost tidak ikut ke argv vendor)",
+          rc_cost == 0 and paid2 is not None and "--dry-run" not in paid2
+          and "40" not in paid2 and "--cost" not in paid2, str(paid2))
+    check("--cost tanpa angka ditolak, tidak diteruskan sebagai token mentah ke vendor CLI",
+          rc_badcost == 1 and _captured.get("args") is None, str(_captured.get("args")))
     for name, cond, detail in checks:
         print(f"[{'ok' if cond else 'GAGAL'}] tripo: {name}" + (f" — {detail}" if not cond else ""))
     n_ok = sum(1 for _n, c, _d in checks if c)
@@ -472,9 +511,6 @@ def main(argv=None):
     x = a.parse_args(argv)
     if x.cmd == "selftest":
         return selftest()
-    if x.cmd == "cli":
-        r = cli(x.rest, spend=x.spend)
-        print(json.dumps(r, ensure_ascii=False)); return 0 if r.get("ok") else 1
     if x.cmd == "capabilities":
         print(json.dumps({
             "endpoints": ENDPOINTS, "defaults": DEFAULTS,
@@ -492,6 +528,28 @@ def main(argv=None):
         print(json.dumps(status(cfg), ensure_ascii=False)); return 0
     if x.cmd == "probe":
         r = probe(cfg); print(json.dumps(r, ensure_ascii=False)); return 0 if r["ok"] else 1
+    if x.cmd == "cli":
+        # `rest` memakai REMAINDER, jadi flag yang ditulis SESUDAH subcommand tidak pernah sampai
+        # ke argparse — `tripo.py cli make x --spend` menghasilkan x.spend False dan --spend
+        # menguap ke dalam argv vendor. Diam-diam mengabaikan pagar bayaran adalah bug, dan
+        # membiarkannya berarti modul ini mengaku punya pintu yang sebenarnya tidak ada. Dua token
+        # itu diambil sendiri dari `rest` di sini, dan satu-satunya tempat keputusan biayanya
+        # tetap `cost_is_known()` di dalam cli().
+        raw = list(x.rest)
+        spend = "--spend" in raw
+        raw = [t for t in raw if t != "--spend"]
+        cost = None
+        if "--cost" in raw:
+            i = raw.index("--cost")
+            if i + 1 >= len(raw):
+                print(json.dumps({"ok": False, "why": "--cost butuh angka poin"}, ensure_ascii=False))
+                return 1
+            token = raw[i + 1]
+            raw = raw[:i] + raw[i + 2:]
+            cost = int(token) if str(token).lstrip("-").isdigit() else token
+        r = cli(raw, spend=spend, cost_confirmed=cost)
+        print(json.dumps(r, ensure_ascii=False))
+        return 0 if r.get("ok") else 1
     if not x.input:
         print(json.dumps({"ok": False, "why": "submit butuh --input"}, ensure_ascii=False)); return 1
     r = submit(cfg, x.kind, x.input, spend=x.spend)
