@@ -1201,20 +1201,31 @@ changes what the other engine sees), and `python -m build` — this system Pytho
    base64. Owner: whoever rebuilds the plugin — the editor holds the binary, so this needs the
    operator's editor closed.
 
-1. **Measure before claiming** — **DONE 2026-10-15, both counts.** Epic's `Experimental/ModelContextProtocol`
-   (186 files) is a transport and registry host, not a toolbox: of the **14** classes deriving from
-   `UToolsetDefinition` in this engine build, **11 sit under `Private/Tests/` or `Mocks/`**
-   (`UFakeToolset*`, `UMockToolsetDefinition`, `UToolCallAsyncResultReturnPropertyTest`). Only two are
-   shipped and neither touches a level: `UAIAssistantToolset` with **2** `UFUNCTION`s
-   (`GetProjectContext`, `GetDockedContext` — read-only context getters) and `UAgentSkillToolset` with
-   **5**. That is **7 callable functions, none of which edits an asset.** Ours: **6 tools, 38 named
-   actions**, counted out of `SKILL.md`'s own table — `ue_world` 16, `ue_blueprint` 8, `ue_material` 6,
-   `ue_media` 6, `ue_vision` 2, and `ue_pipeline` which names none because it takes an array of those
-   actions as its input — and they do move, spawn, delete, compile and capture a live editor. So "ours
-   is more powerful" stops being an assertion, with the honest half attached: Epic ships a *framework*
-   whose toolsets other people will write, so what was compared is "what exists today on this machine",
-   not "what the architecture allows". Until this line was written the claim appeared nowhere as a
-   fact, and it should not have.
+1. **Measure before claiming** — **ANSWERED 2026-10-15, and the answer is the opposite of what I
+   first wrote.** The claim "ours is more powerful" is **refuted by the count**, and the count is
+   reproducible: `python3 tools/measure_epic_surface.py`.
+   Engine-wide, `UToolsetDefinition` subclasses on this install: **37 declarations, 25 shipped, 12
+   under `Tests/`, `Mocks/` or named `UFake*`/`UMock*`**. Those 25 declare **224 `UFUNCTION`s**
+   (`Experimental/Toolsets` 218, `ToolsetRegistry` 4, `AIAssistant` 2), and the top of that list is
+   exactly the territory this plugin does not enter: `UPCGToolset` 30, `UUMGToolSet` 23,
+   `UDataflowAgentToolset` 22, `UEditorAppToolset` 21, `UPhysicsAssetToolset` 17, `UPluginToolset` 17,
+   `USlateInspectorToolset` 14, `UMVVMToolset` 9, `UConfigSettingsToolset` 8, `UGameplayCueToolset` 8.
+   Ours: **6 tools, 38 named actions** counted from this pack's own `SKILL.md` table (`ue_world` 16,
+   `ue_blueprint` 8, `ue_material` 6, `ue_media` 6, `ue_vision` 2, `ue_pipeline` 0 — it takes an array
+   of the others as input). By surface area Epic is roughly six times ours and covers PCG, UMG,
+   Dataflow, physics assets, plugins, Slate, config and GAS.
+   The first version of this line said Epic ships two toolsets with seven functions, none of which
+   edits an asset. That was produced by `grep */Source */*/Source`, whose glob silently skipped
+   `Experimental/Toolsets/*` — where 23 of the 25 live. A glob that matches nothing does not report
+   "nothing found", it reports a smaller world, and the smaller world flattered the claim I wanted to
+   make. The audit found it by reading the raw grep output rather than the sentence.
+   What is still true, and what step 1 was actually for: the 224 figure counts `UFUNCTION`
+   declarations in toolset headers, which is an **upper bound on callable tools** — the registry
+   decides what is exposed, and some of those functions are helpers. The comparison that survives is
+   therefore about *surface*, not about quality. Whether ours has any capability Epic's set lacks
+   (the transaction sandbox and the Linux socket bridge are the candidates) is a separate measurement
+   and is **not claimed here**; it needs the same treatment: enumerate Epic's, look for the
+   equivalent, and report the absence as a search that found nothing rather than as a fact.
 
 2. **Test `ResolvePinFuzzy` on PCG Graph and GAS** — it exists (`IRSofkaBlueprintSubsystem.h:29`) and
    is proven on Blueprint graphs only. Gate: fuzzy-hit rate before/after on a fixed pin-name corpus.
