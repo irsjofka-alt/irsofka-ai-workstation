@@ -30,6 +30,34 @@ STATUS = ("PENDING", "CLAIMED", "WORKING", "BLOCKED", "HUMAN", "PARKED",
           "COMPLETED", "FAILED", "UNAVAILABLE")
 ALIAS = {"IN_PROGRESS": "CLAIMED", "DONE": "COMPLETED"}
 
+# Satu definisi untuk "status apa yang boleh diklaim", dibaca sama oleh Python dan SQL.
+#
+# Sebelum ini Python bertanya `norm(status) in (PENDING, CLAIMED, WORKING)` sementara SQL menulis
+# `status IN ('PENDING','CLAIMED','WORKING')` apa adanya. Untuk baris lama yang kolomnya masih
+# berisi 'IN_PROGRESS' — dan memang begitu ia disimpan, karena menulis ulang sejarah laporan
+# dilarang §12 — kedua pembacaan memberi jawaban BERLAWANAN: Python menyebutnya CLAIMED dan
+# boleh diklaim, SQL membandingkan teks mentah, tidak cocok, dan UPDATE-nya tidak menembus WHERE.
+# Hasilnya bukan error: baris itu tidak bisa diklaim SELAMANYA, dan alasan yang dikembalikan
+# menyalahkan status. Item #222 mati dengan tepat pesan itu.
+#
+# Daftarnya sekarang DITURUNKAN dari ALIAS, jadi menambah ejaan lama baru di satu tempat otomatis
+# berlaku di ketiga jalur SQL; daftar yang harus diingat orang adalah daftar yang salah minggu depan.
+CLAIMABLE = ("PENDING", "CLAIMED", "WORKING")
+
+
+def raw_statuses(canonical):
+    """Setiap ejaan mentah yang dinormalisasi menjadi salah satu status kanonik yang diberikan."""
+    canonical = tuple(canonical)
+    return sorted(set(canonical) | {raw for raw, to in ALIAS.items() if to in canonical})
+
+
+def sql_in_list(canonical):
+    """Fragmen literal untuk `status IN (...)`, dibangun dari sumber yang sama dengan norm()."""
+    return "(" + ",".join(f"'{s}'" for s in raw_statuses(canonical)) + ")"
+
+
+CLAIMABLE_SQL = sql_in_list(CLAIMABLE)
+
 LEASE_SECONDS = 900          # satu item tanpa perpanjangan lease 15 menit dianggap lepas
 MIN_SAMPLE_GAP = 1           # detik; di bawahnya "pane tidak berubah" bukan pembacaan apa pun
 MAX_RESUME = 3               # item yang butuh 4 sentuhan bukan tertidur, tapi macet
@@ -724,7 +752,7 @@ def ensure_idle_item(conn, backend, cli_engine=None, who=IDLE_HOLDER, emit=None,
     try:
         open_idle = run(conn, backend,
                         f"SELECT id FROM quest_tasks WHERE origin={ph} "
-                        f"AND status IN ('PENDING','CLAIMED','WORKING') LIMIT 1", (ORIGIN_IDLE,)) or []
+                        f"AND status IN {CLAIMABLE_SQL} LIMIT 1", (ORIGIN_IDLE,)) or []
     except Exception as exc:  # noqa: BLE001
         emit("IDLE_DEBT_UNKNOWN", why=f"antrean idle tidak terbaca ({str(exc)[:50]})")
         return None
@@ -1034,7 +1062,7 @@ def claim(conn, engine, item_id, who, dirty=_MEASURE, mode=None):
         q = (f"UPDATE quest_tasks SET status='WORKING', claimed_by={ph}, lease_epoch={ph}, "
              f"model_assigned={ph}, escalation_reason=NULL WHERE id={ph} "
              f"AND (claimed_by IS NULL OR claimed_by={ph} OR COALESCE(lease_epoch,0) <= {ph}) "
-             f"AND status IN ('PENDING','CLAIMED','WORKING')")
+             f"AND status IN {CLAIMABLE_SQL}")
         run(conn, engine, q, (who, now() + LEASE_SECONDS, who, item_id, who, now()))
         after = get_item(conn, engine, item_id)
         ok = after and after.get("claimed_by") == who and norm(after.get("status")) == "WORKING"
@@ -1257,7 +1285,7 @@ def queue_followup(conn, backend, cli_engine, emit=None):
     try:
         open_idle = run(conn, backend,
                         f"SELECT id FROM quest_tasks WHERE origin={ph} "
-                        f"AND status IN ('PENDING','CLAIMED','WORKING') LIMIT 1", (ORIGIN_IDLE,)) or []
+                        f"AND status IN {CLAIMABLE_SQL} LIMIT 1", (ORIGIN_IDLE,)) or []
         if open_idle:
             emit("IDLE_ALREADY_OPEN", item=int(open_idle[0]["id"]))
             return None
@@ -4542,6 +4570,31 @@ def selftest():
         ok_n, msg_n = claim(conn, "SQLITE", nul_id, "qoder", dirty=False, mode="ON")
         check("baris dengan claimed_by terisi tapi lease_epoch NULL TETAP BISA diklaim "
               "— tanpa COALESCE ia terkunci selamanya", ok_n, msg_n)
+        # --- ejaan lama yang hanya dikenali satu sisi pembaca ---
+        # Item #222 mati dengan pesan "status CLAIMED tidak bisa diklaim — UPDATE-nya tidak menembus
+        # WHERE". Penyebabnya bukan klaim ganda atau lease: Python menormalkan 'IN_PROGRESS' menjadi
+        # 'CLAIMED' lalu menyebut barisnya boleh diklaim, sementara SQL membandingkan teks MENTAH
+        # kolom itu dengan ('PENDING','CLAIMED','WORKING') dan tidak pernah cocok. Dua pembacaan atas
+        # satu data memberi jawaban berlawanan, dan yang kalah adalah barisnya — selamanya.
+        conn.execute("INSERT INTO quest_tasks (title,status,cli_engine,claimed_by,lease_epoch) "
+                     "VALUES ('ejaan-lama','IN_PROGRESS','qoder',NULL,NULL)")
+        conn.commit()
+        leg_id = int(run(conn, "SQLITE",
+                         "SELECT id FROM quest_tasks WHERE title='ejaan-lama'")[0]["id"])
+        ok_l, msg_l = claim(conn, "SQLITE", leg_id, "qoder", dirty=False, mode="ON")
+        check("baris legacy 'IN_PROGRESS' bisa diklaim — SQL dan Python harus melihat data yang sama",
+              ok_l, msg_l)
+        back_l = get_item(conn, "SQLITE", leg_id)
+        check("klaim legacy menulis WORKING dan ejaan aslinya tidak dipalsukan jadi kata lain",
+              norm(back_l["status"]) == "WORKING" and back_l["claimed_by"] == "qoder",
+              str(back_l["status"]))
+        check("daftar SQL diturunkan dari ALIAS, bukan ditulis ulang di tiga tempat",
+              all(f"'{r}'" in CLAIMABLE_SQL for r in raw_statuses(CLAIMABLE))
+              and "IN_PROGRESS" in raw_statuses(CLAIMABLE)
+              and norm("IN_PROGRESS") in CLAIMABLE, CLAIMABLE_SQL)
+        check("ejaan terminal tidak pernah ikut masuk daftar yang bisa diklaim",
+              not any(x in raw_statuses(CLAIMABLE) for x in ("COMPLETED", "DONE", "FAILED", "PARKED")),
+              str(raw_statuses(CLAIMABLE)))
         conn.execute("INSERT INTO quest_tasks (title,status,cli_engine,claimed_by,lease_epoch) "
                      "VALUES ('sudah-selesai','COMPLETED','qoder','pihak-x',0)")
         conn.commit()
