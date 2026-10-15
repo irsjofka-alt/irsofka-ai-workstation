@@ -1,0 +1,23 @@
+{
+  "_comment": "VRAM floors enforced by tools/gpu_gate.py at dispatch time, not left to whichever engine remembers to read them. Every number here is a measurement on THIS machine (RTX 3060, 12288 MiB total), with the source named in `measured`. A rule with a non-numeric or negative need_mib is skipped, never guessed: a threshold you cannot read is a gate that is open. Re-read on every call on purpose - a figure memorised at boot is the wrong figure by next week.",
+  "rules": [
+    {
+      "label": "3d-trellis",
+      "match": ["trellis", "pixal3d", "image-to-3d", "image_to_3d", "3d_pipeline", "voxel remesh"],
+      "need_mib": 9966,
+      "measured": "2026-10-15 F7: a TRELLIS.2 image-to-3d run needed 9.73 GiB while the machine had 6.38 GiB free; weights alone stage 5004 MB (brain/skills/comfyui/05). Refusing below this floor is what prevents the OOM that surfaces as connection-loss rather than as a node error."
+    },
+    {
+      "label": "image-diffusion",
+      "match": ["z-image", "flux", "sdxl", "txt2img", "checkpoint", "juggernaut"],
+      "need_mib": 5919,
+      "measured": "Z-Image-Turbo int8 = 5.78 GiB, the fp8 Juggernaut-Z row is 5.73 GiB (brain/skills/comfyui/08). bf16 12 GB variants do not fit beside a text encoder and are deliberately not given a floor here - they are not runnable on this card at any free figure."
+    },
+    {
+      "label": "vendor-cloud",
+      "match": ["tripo", "partner_generate", "seedream", "kling"],
+      "need_mib": 0,
+      "measured": "Runs on vendor infrastructure; zero local VRAM. Recorded as a rule with 0 so the gate is explicit about it instead of silent: the cost gate for these lives in tools/tripo.py cost_is_known(), not here."
+    }
+  ]
+}

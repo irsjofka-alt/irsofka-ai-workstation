@@ -36,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import notify  # noqa: E402
 import work_order as wo  # noqa: E402
+import gpu_gate  # noqa: E402
 
 REPO = Path.home() / ".ai-station"
 LOG_DIR = REPO / "logs"
@@ -374,7 +375,7 @@ def _as_path(text):
 
 def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
                   capture=None, busy=None, tab_project=None, pane_cwd=None, gap=MIN_PANE_GAP,
-                  sleeper=None, dirty=wo._MEASURE, for_item=None):
+                  sleeper=None, dirty=wo._MEASURE, for_item=None, gpu=None):
     """Serahkan satu item baru ke engine yang ditunjuk barisnya. Tidak pernah menebak tujuan.
 
     `for_item` adalah jalur perintah instan (operator baru saja menulis perintahnya dan jawabannya
@@ -451,6 +452,27 @@ def hand_new_work(conn, engine, mode, runner=None, sender=None, emit=None,
     verdict = gate_item(conn, engine, full, runner=runner, stage="before", emit=emit)
     if verdict.get("refused") or verdict.get("exit") == 0:
         return verdict
+    # --- gerbang VRAM -------------------------------------------------------------
+    # Alasan ia ada di jalur ini dan bukan di skill file: F7 mencatat sebuah run 3D butuh 9,73 GiB
+    # sementara mesin punya 6,38 GiB, dan satu-satunya yang menahan permintaannya adalah kalimat
+    # yang harus dibaca oleh engine yang sedang tidak membaca apa pun. Sekarang yang menahannya
+    # scheduler, pada saat klaim, dengan angka yang ditulis ke peristiwa.
+    # `gpu` bisa disuntik supaya selftest tidak membaca GPU operator — angka sampler asli dipakai
+    # hanya di jalur produksi.
+    gpu_txt = " ".join(str(full.get(k) or "") for k in ("title", "summary", "check_command"))
+    vres = (gpu or gpu_gate.gate)(gpu_txt)
+    if vres.get("state") in ("DENY", "UNKNOWN"):
+        return refuse(conn, engine, int(item["id"]), emit,
+                      "VRAM_DENIED" if vres["state"] == "DENY" else "VRAM_UNKNOWN",
+                      rule=vres.get("rule"), need_mib=vres.get("need_mib"),
+                      free_mib=vres.get("free_mib"), short_mib=vres.get("short_mib"),
+                      holders=vres.get("holders"),
+                      why=vres.get("why"),
+                      note="tidak ada yang diklaim dan tidak ada yang diketik — kerja GPU lain "
+                           "boleh lewat, aturan ini hanya menahan yang butuh VRAM")
+    if vres.get("rule"):
+        emit("VRAM_ALLOWED", item=int(item["id"]), rule=vres["rule"], need_mib=vres["need_mib"],
+             free_mib=vres.get("free_mib"), headroom_mib=vres.get("headroom_mib"))
     target = (full.get("cli_engine") or "").strip()
     if not target:
         # Ditolak SEBELUM ada klaim, bukan sesudahnya: baris WORKING tanpa pemegang adalah laporan
@@ -2165,6 +2187,88 @@ def selftest():
                   all(k in _env for k in ("exit-code", "proses:", "delta pane:")), _env[:200])
         except Exception as _e4:  # noqa: BLE001
             check("catatan antrean bisa diuji", False, f"{type(_e4).__name__}: {_e4}")
+
+        # --- gerbang VRAM: tiga keadaan, satu per pemeriksaan --------------------------
+        # Sampler DISUNTIK. Selftest yang memanggil nvidia-smi asli akan lulus atau merah
+        # menurut keadaan GPU operator pada detik itu — termasuk kemungkinan ia sedang memegang
+        # 4 GiB untuk Unreal, yang justru keadaan yang ingin kami bisa pastikan ditolak.
+        # Setiap pemeriksaan memakai `for_item` (barisnya ditunjuk sendiri), BUKAN kepala
+        # antrean: versi pertama mengandalkan `next_ready` dan yang terukur adalah baris sisa
+        # dari test sebelumnya, bukan baris gerbang ini — dua test pertama DISPATCH atas item
+        # yang judulnya tidak pernah mengandung kata GPU.
+        def _gpu_low(text):
+            return gpu_gate.gate(text, sampler=lambda: 6533, holders=[("ComfyUI", 2866)])
+
+        def _gpu_high(text):
+            return gpu_gate.gate(text, sampler=lambda: 12000, holders=[])
+
+        def _gpu_dead(text):
+            return gpu_gate.gate(text, sampler=lambda: None, holders=[])
+
+        # Engine harus benar-benar bebas dulu, kalau tidak yang terukur adalah aturan
+        # satu-perintah-aktif (yang sudah punya tes sendiri), bukan gerbang VRAM. Klaim yang
+        # dilepas dibaca dari ledger, bukan dari id yang diingat: id baris berubah setiap kali
+        # fixture lain ditambahkan, dan angka yang ditulis di sini akan suatu pagi melepaskan
+        # baris yang salah.
+        for _c in open_claims(conn, "SQLITE"):
+            wo.finish(conn, "SQLITE", int(_c["id"]), "COMPLETED",
+                      evidence="selftest: membebaskan engine sebelum uji gerbang VRAM")
+        _gv = make("selftest-vram-deny: jalankan TRELLIS.2 image-to-3d", gate="false",
+                   engine_key="qoder", origin="operator", ws=str(REPO))
+        sent.clear(); out = []
+        hand_new_work(conn, "SQLITE", "SEMI", runner=runner, sender=sender, emit=sink(out),
+                      capture=quiet_pane, busy=not_busy, tab_project=cwd_of,
+                      pane_cwd=lambda _t: str(REPO), gap=0, dirty=False, gpu=_gpu_low,
+                      for_item=wo.get_item(conn, "SQLITE", _gv))
+        check("item GPU ditahan gerbang VRAM sebelum ada klaim dan sebelum ada yang diketik — "
+              "dan penolakannya menyebut angka yang kurang serta siapa pemegangnya",
+              out and out[-1]["action"] == "VRAM_DENIED" and not sent
+              and out[-1]["item"] == _gv
+              and out[-1]["free_mib"] == 6533 and out[-1]["short_mib"] == 9966 - 6533
+              and "ComfyUI 2866MiB" in (out[-1].get("holders") or [])
+              and wo.get_item(conn, "SQLITE", _gv)["status"] == "PENDING", str(out[-1:])[:230])
+
+        # Penolakan yang menahan SEGALA sesuatu adalah pemutus, bukan gerbang. Item biasa harus
+        # tetap jalan di mesin yang VRAM-nya sama persis sedang penuh.
+        gn = make("selftest-vram-bukan-gpu: perbaiki selftest work_order", gate="false",
+                  engine_key="qoder", origin="operator", ws=str(REPO))
+        sent.clear(); out = []
+        hand_new_work(conn, "SQLITE", "SEMI", runner=runner, sender=sender, emit=sink(out),
+                      capture=quiet_pane, busy=not_busy, tab_project=cwd_of,
+                      pane_cwd=lambda _t: str(REPO), gap=0, dirty=False, gpu=_gpu_low,
+                      for_item=wo.get_item(conn, "SQLITE", gn))
+        check("kerja non-GPU tidak ditahan oleh VRAM yang penuh — aturan tidak cocok, bukan menebak",
+              out and out[-1]["action"] == "WORK_DISPATCHED" and sent
+              and not any(e["action"].startswith("VRAM_") for e in out), str(out[-1:])[:200])
+        wo.finish(conn, "SQLITE", gn, "COMPLETED", evidence="selftest: membebaskan engine")
+
+        gd = make("selftest-vram-allow: jalankan TRELLIS.2 image-to-3d", gate="false",
+                  engine_key="qoder", origin="operator", ws=str(REPO))
+        sent.clear(); out = []
+        hand_new_work(conn, "SQLITE", "SEMI", runner=runner, sender=sender, emit=sink(out),
+                      capture=quiet_pane, busy=not_busy, tab_project=cwd_of,
+                      pane_cwd=lambda _t: str(REPO), gap=0, dirty=False, gpu=_gpu_high,
+                      for_item=wo.get_item(conn, "SQLITE", gd))
+        check("dengan VRAM cukup gerbang mencatat VRAM_ALLOWED (aturan mana + marginnya) dan "
+              "pekerjaan berangkat — izin yang ditegakkan harus bisa dibuktikan pernah diberikan",
+              out and any(e["action"] == "VRAM_ALLOWED" and e.get("rule") == "3d-trellis"
+                          and e.get("headroom_mib") == 12000 - 9966 for e in out)
+              and out[-1]["action"] == "WORK_DISPATCHED" and sent, str(out)[:260])
+        wo.finish(conn, "SQLITE", gd, "COMPLETED", evidence="selftest: melepas klaim gerbang VRAM")
+
+        # Alat ukur mati bukan keadaan aman: sampler yang mengembalikan None harus menolak, dan
+        # menolaknya bernama VRAM_UNKNOWN supaya berbeda dari "kurang memori".
+        gu = make("selftest-vram-unknown: jalankan TRELLIS.2 image-to-3d", gate="false",
+                  engine_key="qoder", origin="operator", ws=str(REPO))
+        sent.clear(); out = []
+        hand_new_work(conn, "SQLITE", "SEMI", runner=runner, sender=sender, emit=sink(out),
+                      capture=quiet_pane, busy=not_busy, tab_project=cwd_of,
+                      pane_cwd=lambda _t: str(REPO), gap=0, dirty=False, gpu=_gpu_dead,
+                      for_item=wo.get_item(conn, "SQLITE", gu))
+        check("nvidia-smi tidak terbaca = VRAM_UNKNOWN = DITOLAK, dan ia bernama berbeda dari "
+              "VRAM_DENIED — ketidaktahuan menutup jalur, tidak membukanya",
+              out and out[-1]["action"] == "VRAM_UNKNOWN" and not sent
+              and wo.get_item(conn, "SQLITE", gu)["status"] == "PENDING", str(out[-1:])[:200])
 
         path = write_events([{"ts": 1, "action": "SELFTEST"}],
                             path=Path("/tmp/drainer_selftest.jsonl"))

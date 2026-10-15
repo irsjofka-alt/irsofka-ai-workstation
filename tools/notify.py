@@ -62,6 +62,12 @@ URGENT = {
     # ia tidak bisa MEMBACA apakah ada kerja. Itu bukan "nol", dan diam karena tidak terbaca
     # persis sama kelihatannya dengan diam karena selesai.
     "IDLE_DEBT_UNKNOWN",
+    # Gerbang VRAM menolak pekerjaan GPU: bukan rem yang dipatuhi (itu WINDOW_CLOSED/MODE_OFF di
+    # keranjang note) melainkan mesin yang kehabisan bahan bakar — sama seperti QUOTA_CLOSED.
+    # Peristiwa inilah yang menjawab "kenapa 3D tidak jalan tadi malam" sementara satu-satunya
+    # penolakan yang bisa diperbaiki orang adalah membebaskan memori atau menutup pemegangnya,
+    # dan peristiwa itu menyebut pemegangnya di badan banner.
+    "VRAM_DENIED", "VRAM_UNKNOWN",
 }
 # Peristiwa yang berarti "mesin bekerja": boleh pendek, tidak boleh berteriak.
 PROGRESS = {"WORK_DISPATCHED", "GATE_PASSED", "CONTINUE_SENT", "ANSWER_SENT", "CLAIMED",
@@ -99,6 +105,11 @@ NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD"
         # memeriksa ini di pemanggil; pemeriksaan kedua di `ensure_idle_item` melaporkan lewat sini
         # supaya pagar kedua tidak pernah diam-diam mengasumsikan yang pertama sudah jalan.
         "IDLE_HELD_BY_MODE",
+        # Gerbang VRAM yang Lolos adalah kejadian rutin: ia berarti scheduler memeriksa dan
+        # boleh lanjut. Yang harus terdengar adalah yang sebaliknya (VRAM_DENIED / VRAM_UNKNOWN
+        # di keranjang urgent) — melaporkan setiap izin berarti satu banner per item GPU, persis
+        # denyut yang operator minta dibungkam.
+        "VRAM_ALLOWED",
         # `CLOSED_NIGHT` pindah dari URGENT pada 2026-10-15 atas keluhan operator yang terukur:
         # cabangnya `return` di awal tick dan di-emit ULANG pada setiap tick selama jendela ON tidak
         # terbuka, jadi satu keadaan diam ("tidak ada jendela malam") menghasilkan banner yang sama

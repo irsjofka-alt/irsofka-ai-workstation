@@ -203,7 +203,7 @@ key. Measured on this pool:
 | `gemini-3.8-flash` | ✅ works — used to audit the held diff |
 | `gemini-4-argon` | ❌ 429 on **all three keys** including PRO, even after the plan was renewed; `-latest`/`-preview` are 404, so the base name is right |
 | `veo-3.1` (+fast/+lite) | ⚠️ route exists — `predictLongRunning` answers 429, not 404 — but this pool's `generateContent` path cannot call it. Video needs its own operation-polling client. |
-| `nano-banana-2.1`, `nano-banana-pro`, native-audio | ➖ visible in `ListModels` (63 models), never called |
+| `nano-banana-2.1`, `nano-banana-pro`, native-audio | ❌ image generation **called and refused** 2026-10-15: four image models (`nano-banana-2.1`, `3.1-flash-lite-image`, `3.1-flash-image`, `2.5-flash-image`) on two keys — non-PRO first, then PRO — all 429 `RESOURCE_EXHAUSTED` at `generate_content_free_tier_requests` / `..._input_token_count` with **limit 0**. The same PRO key answers 200 for `gemini-3.8-flash` seconds later, so this is a per-model entitlement wall, not a dead key. 0 images, 0 points spent. `ask()` has no image modality anyway, so a working image route here would be a new feature, not a new key. |
 | **music / Lyra** | ❌ 404 on every name tried, on non-PRO **and** PRO keys, and no `lyra`/`music` entry in the model list. The operator states it is available on the model side; that is recorded as a statement, not as a route this workstation can use. |
 
 Original plan: ComfyUI HTTP API (`:8188`) integration via a `comfy_workflow` MCP tool sharing the same
@@ -224,9 +224,28 @@ maps, not geometry. The claim written an hour earlier on this line ("the decimat
 bound what got saved") was inferred from node text without opening the file, and it was wrong.
 A headless decimate to 50,000 faces left `boundary_edges=0`, `nonmanifold=1`, `degenerate=0`
 unchanged, so the blanket rule that decimation worsens AI meshes does not apply to a watertight
-source — measure `boundary_pct` first. F7 stays 🟡 for what is still actually missing: nothing has
-entered UE, no UV/retopo pass has been visually reviewed, and the VRAM gate is still a rule an
-engine has to read rather than one a scheduler enforces.
+source — measure `boundary_pct` first. **Amended 2026-10-15 12:3x: that sentence is retracted, and
+the reason is the same trap this project has now hit twice.** `boundary_edges=0` was read from the
+mesh in memory, before export. Measured on the files, after positional welding (the only read that
+distinguishes a hole from a split vertex): the source rock is **0.02% open**, decimate to 0.05 is
+**65.88% open**, and my own 04:47 retopo-50k is **16.25% open** — worse than the thing it came
+from. Decimate does damage it; the in-memory read simply could not see the damage because it never
+left Blender. The order that works, measured with its cost: voxel remesh 0.02 (99,810 faces to
+3,950, **watertight at 0.00% open**, 0.10 s), then UV smart-project (remesh deletes the UV layer,
+0.29 s), then export (0.23 s) — and the 17.66 MB is two 4096² textures, not topology: geometry
+alone is 0.44 MB, and `image.scale(1024,1024)` takes the asset to **2.97 MB in 0.25 s**. Full
+numbers in `brain/skills/comfyui/06-game-ready-mesh.md`. F7 stays 🟡 for one thing that is still
+actually missing: **nothing has entered UE.** The VRAM half of the gap closed on 2026-10-15 12:4x —
+`tools/gpu_gate.py` is now called by the drainer inside `hand_new_work`, before any claim and before
+a single keystroke, and refuses by name (`VRAM_DENIED` / `VRAM_UNKNOWN`) stating the shortfall and
+the process holding the memory. Thresholds live in `config/gpu_budget.json` as numbers with their
+measurement cited (3D 9,966 MiB; image diffusion 5,919 MiB; vendor-cloud 0), re-read at use instead
+of remembered, and an unreadable `nvidia-smi` refuses rather than assuming. Measured against the
+live card the moment it shipped: 9,532 MiB free against 9,966 needed, so a TRELLIS.2 item is refused
+by 434 MiB right now — while ComfyUI itself holds 1,624 MiB, which is exactly the situation the gate
+was written for. `gpu_gate selftest 10/10`, `drainer 172/172` (four new checks: deny names the
+holder and leaves the row PENDING; non-GPU work still passes a full GPU; allow records its
+headroom; an unreadable meter refuses).
 
 ### Verified
 
