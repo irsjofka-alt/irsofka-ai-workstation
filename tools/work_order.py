@@ -3072,7 +3072,15 @@ ROADMAP_ITEMS = [
      # F11/STEP-0 di atas, dan `depends_on` menahannya di sana — memisahkan repo yang belum bisa
      # membuktikan posisi actor hanya membungkus kebohongan dengan struktur yang lebih rapi.
      "test -f ~/Apps/mcp/irsofka-workstation-mcp/README.md && "
-     "git -C ~/Apps/mcp/irsofka-workstation-mcp rev-parse origin/main"),
+     "git -C ~/Apps/mcp/irsofka-workstation-mcp rev-parse origin/main && "
+     # Dua klausa di atas hanya membuktikan sebuah README ada dan sebuah sha sampai ke remote —
+     # bentuk gerbang yang sudah ditolak reviewer untuk MCP-3 versi pertama. Yang ditanya sekarang
+     # adalah klaimnya: selftest server (24 pemeriksaan: framing, penolakan kelas, verifikasi
+     # tulis, parsial pipeline, UNAVAILABLE) dan pemasangan di KEDUA CLI, karena repo yang tidak
+     # terpasang bukan jembatan, cuma berkas.
+     "timeout 180 python3 ~/Apps/mcp/irsofka-workstation-mcp/server.py --selftest && "
+     "grep -q irsofka-workstation-mcp ~/.ai-station/engines/qoder/settings.json && "
+     "grep -q irsofka-workstation-mcp ~/.ai-station/engines/antigravity-cli/settings.json"),
     ("f109", "F10.9 push gate: push hanya setelah verdict verifier COMPLETED menyebut model yang "
              "meloloskan diff-nya; tanpa verdict, commit berhenti lokal dan masuk digest pagi",
      "build", ["f101", "f103"],
