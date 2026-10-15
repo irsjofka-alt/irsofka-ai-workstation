@@ -4560,6 +4560,17 @@ def selftest():
               and f'"sha": "{head}"' in line, line[:160])
         check("peristiwa mencatat kapan vonisnya diberikan, supaya izin basi bisa dilihat",
               w3 and w3[0].get("verified_at"), str(w3[:1]))
+        # Satu pemeriksa punya dua nama — kunci registry dan id model yang menjawab — dan catatan
+        # `action_log` hanya menyimpan yang kedua. Versi pertama membandingkan kunci dengan kolom
+        # `model`, jadi vonis SETUJU yang baru saja diberikan terbaca sebagai "tidak ada catatan
+        # verifikasi": tertutup di arah yang benar, tapi membuat engine mengira verifikasinya hilang
+        # dan mengulang dispatch yang sudah dibayar kuota.
+        ok4, why4, w4 = record_push_verified(conn, "SQLITE", "gemini-verify", [head],
+                                             events_path=_ev2)
+        check("kunci registry yang sama menemukan vonis yang ditulis dengan id model",
+              ok4 is True and len(w4) == 1, str(why4)[:150])
+        check("peristiwa mencatat id model yang menjawab, bukan kunci yang diketik",
+              w4 and w4[0].get("model") == "gemini-3.8-flash-high", str(w4[:1])[:160])
         # Pemalsuan lewat kutipan: ringkasan verification record menyimpan potongan jawaban model
         # setelah pemisah " :: ", dan potongan itu bisa memuat teks apa pun — termasuk baris vonis
         # yang dipetik dari prompt. Izin hanya boleh dibaca dari BIDANG vonis, bukan dari kutipan.
@@ -5324,10 +5335,18 @@ def record_push_verified(conn, engine, model_id: str, shas: list[str], events_pa
         return False, (f"{model_id!r} tidak terdaftar sebagai pemeriksa di config/engines.json — "
                        "izin hanya bisa datang dari mesin yang memang dipasang sebagai verifier/"
                        "reviewer/decider, bukan dari nama yang cocok"), []
-    clearance = push_clearance(conn, engine, model_id)
+    # Satu pemeriksa punya dua nama: kunci registry (`gemini-verify`) dan id model yang menjawab
+    # (`gemini-3.8-flash-high`). `cross_verify` menulis baris `action_log` dengan id model, jadi
+    # pencarian izin harus memakai nama itu — kalau tidak, vonis SETUJU yang baru saja dibaca
+    # manusia dilaporkan sebagai "tidak ada catatan verifikasi". Kegagalannya tertutup di arah yang
+    # benar (tidak ada izin), tapi harganya sebuah engine mengira verifikasinya hilang dan mengulang
+    # dispatch yang sudah bayar. Registry-lah yang memutuskan ejaan mana yang benar (§12).
+    logged_as = str(reg.get("model") or model_id)
+    clearance = push_clearance(conn, engine, logged_as)
     if not clearance:
+        named = logged_as if logged_as == model_id else f"{logged_as} (kunci {model_id!r})"
         return False, (f"tidak ada catatan verifikasi COMPLETED bervonis "
-                       f"{'/'.join(CLEARANCE_VERDICTS)} dari {model_id!r} dalam "
+                       f"{'/'.join(CLEARANCE_VERDICTS)} dari {named} dalam "
                        f"{CLEARANCE_WINDOW_MINUTES} menit terakhir — vonis tidak bisa ditulis dari "
                        "sini, hanya bisa dibaca dari action_log"), []
     covers, why_cover = clearance_covers(clearance, shas)
@@ -5364,11 +5383,11 @@ def record_push_verified(conn, engine, model_id: str, shas: list[str], events_pa
     with ev.open("a", encoding="utf-8") as fh:
         for sha in good:
             row = {"ts": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                   "kind": "push_verified", "sha": sha, "model": model_id,
+                   "kind": "push_verified", "sha": sha, "model": logged_as,
                    "verdict": "SETUJU", "verified_at": str(clearance.get("ts"))}
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             written.append(row)
-    return True, f"{len(written)} peristiwa ditulis atas vonis {model_id}", written
+    return True, f"{len(written)} peristiwa ditulis atas vonis {logged_as}", written
 
 
 def push_state() -> dict:
