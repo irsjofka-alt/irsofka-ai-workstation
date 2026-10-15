@@ -661,6 +661,11 @@ def idle_debt_menu(conn, engine, brain_root=None):
 
 
 PHASE_MARKS = ("✅", "🟡", "🟨", "⬜")
+# Kata yang boleh mengikuti penanda di blok `## Phases`. Ia daftar, bukan tebakan: hanya
+# pasangan penanda+kata yang dihitung sebagai status, jadi emoji di dalam keterangan tidak
+# bisa lagi menyamar sebagai status sebuah fase.
+PHASE_STATUS_WORDS = {"completed", "selesai", "done", "in", "berjalan", "partly",
+                    "sebagian", "planned", "belum", "not", "shipped"}
 
 
 def parse_phases(text):
@@ -683,7 +688,7 @@ def parse_phases(text):
         belum dinyatakan, dan memperlakukannya sebagai selesai adalah jalan pulang bagi keluhan
         operator malam ini.
     """
-    block = re.search(r"^## Phases\s*$.*?^```\s*$(.*?)^```\s*$", text, re.M | re.S)
+    block = re.search(r"^## Phases\s*$.*?^```[a-zA-Z]*\s*$\n(.*?)^```\s*$", text, re.M | re.S)
     if not block:
         raise ValueError("blok `## Phases` tidak ditemukan")
     body = block.group(1)
@@ -693,11 +698,24 @@ def parse_phases(text):
     open_phases = set()
     for ln in phase_lines:
         n = int(re.match(r"^F(\d+)", ln).group(1))
-        hits = [(ln.index(e), e) for e in PHASE_MARKS if e in ln]
-        if not hits:
-            open_phases.add(n)          # tidak dinyatakan = belum selesai
-            continue
-        if min(hits)[1] != "✅":
+        # Penanda status harus yang PERTAMA DI ANTARA PENANDA YANG DIKUTI KATA STATUS, bukan emoji
+        # pertama di baris mana pun. Dua kasus nyata membuatnya salah: `F8 ... ✅ ... 🟡 In Progress`
+        # (penanda pertama bukan penanda status) dan `F11 ... 🟨 Partly shipped (subsistem ✅ sudah)`
+        # (penanda selesai di dalam kurung). Pasangan penanda+kata memotong kedua keadaan itu:
+        # yang dicari adalah "penanda + kata status"-nya, dan kalau tidak ada sama sekali, fase
+        # dihitung TERBUKA.
+        # Kata status harus ikut dicocokkan, bukan cuma penandanya. Alasannya dua baris yang
+        # reviewer tulis dan keduanya lolos dari aturan "penanda + huruf pertama":
+        #   `F8 ... ✅ validation 🟡 In Progress`  -> "✅" diikuti kata yang bukan status
+        #   `F11 ... 🟨 Partly shipped (x ✅ done)` -> ✅ di dalam kurung datang setelah penanda asli
+        # Jadi yang dicari adalah pasangan penanda+kata status yang KNOWN, pada posisi paling awal.
+        # Tidak ada pasangan yang ketemu = fase dihitung TERBUKA (gagal ke arah menutup).
+        hit = None
+        for m in re.finditer(r"(✅|🟡|🟨|⬜)\s+([A-Za-zÀ-ÿ]+)", ln):
+            if m.group(2).lower() in PHASE_STATUS_WORDS:
+                hit = m.group(1)
+                break
+        if hit is None or hit != "✅":
             open_phases.add(n)
     return sorted(open_phases)
 
@@ -735,7 +753,7 @@ def roadmap_open(conn, backend):
         # {84, 108, 91, ...} dan setiap fase peta tampak "belum pernah bisa dipetakan" — pagar yang
         # kelihatannya longgar padahal diam-diam mengunci penajaman selamanya.
         mapped = {int(m.group(1)) for _k, title, *_ in ROADMAP_ITEMS
-                  if (m := re.match(r"^F(\d+)", str(title)))}
+                  if (m := re.search(r"^[\[\(]?F(\d+)", str(title)))}
         out["open_phases"] = phases
         out["unprojected"] = [f for f in phases if f not in mapped]
         out["projectable_open"] = [f for f in phases if f in mapped]
@@ -1829,7 +1847,7 @@ def work_rank(row):
 
     BATAS YANG DISENGAJA, ditulis karena reviewer menemukannya dan tidak bisa dibantah: peringkat ini
     buta terhadap urgensi. Sebuah baris `origin='idle'` yang isinya pemulihan kritis (disk habis,
-    integritas basis data, lease menggantung) akan berdiri di peringkat 3 dan bisa kelaparan di belakang
+    integritas basis data, lease menggantung) akan berdiri di peringkat 30 dan bisa kelaparan di belakang
     puluhan item roadmap yang santai. Itunya bukan "nanti ada flag mendesak" — ia aturan penulisan:
     pekerjaan yang harus dikerjakan dulu ditulis sebagai perintah operator (`queue`) atau sebagai item
     roadmap (`seed --roadmap`), bukan sebagai penajaman. Peringkat 3 adalah peringkat untuk hal yang
@@ -5345,6 +5363,21 @@ def idle_selftest(check):
               parse_phases(_ph_text) == [6, 11, 12], str(parse_phases(_ph_text)))
         check("baris fase tanpa penanda dihitung TERBUKA — belum dinyatakan bukan berarti selesai",
               12 in parse_phases(_ph_text), str(parse_phases(_ph_text)))
+        _tricky = ("## Phases\n\n```\n"
+                   "F8 Station  ✅ validation 🟡 In Progress\n"
+                   "F11 Bridge  🟨 Partly shipped (subsistem ✅ done)\n"
+                   "F12 Deprecated ❌ tidak ada di daftar penanda\n"
+                   "```\n")
+        check("penanda di dalam keterangan tidak bisa menyamar jadi status: ✅ di depan kata yang "
+              "bukan status diabaikan, fase tetap terbuka",
+              parse_phases(_tricky) == [8, 11, 12], str(parse_phases(_tricky)))
+        try:
+            parse_phases("## Phases\n\n```markdown\nF1 A ✅ Completed\nF2 B 🟡 In Progress\n```\n")
+            _tagged = [2]
+        except ValueError:
+            _tagged = None
+        check("blok berpagar dengan penanda bahasa (````markdown`) tetap terbaca, bukan dianggap tidak ada",
+              _tagged == [2], str(_tagged))
         try:
             parse_phases("# Roadmap\n\n## Phases\n\nteks tanpa blok berpagar\n")
             _raised = False

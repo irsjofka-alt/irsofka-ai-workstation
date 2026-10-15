@@ -37,11 +37,15 @@ So this ladder is not advice, and it is enforced in two places: `work_rank()` in
 | rank | what | real examples |
 |---|---|---|
 | 0 | a command the operator typed himself (`origin='operator'`) | `queue`, Human Decide answers, instructions written into SQL |
-| 1 | ROADMAP items (`origin='roadmap'`) | F11/MCP-1..3, F10.x, F9.x — anything in `ROADMAP_ITEMS` |
-| 2 | legacy rows still open (`origin='legacy'`) | old work from before this scheme; a row another session holds stays **visible** and `claim()` refuses it — being listed is not being allowed |
-| 3 | work the **machine wrote for itself** (`origin='idle'`) | skill sharpening, re-reading a decision note, `FOLLOWUP_CONTRACTS` |
+| 10 | ROADMAP items (`origin='roadmap'`) | F11/MCP-1..3, F10.x, F9.x — anything in `ROADMAP_ITEMS` |
+| 20 | legacy rows still open (`origin='legacy'`) | old work from before this scheme; a row another session holds stays **visible** and `claim()` refuses it — being listed is not being allowed |
+| 25 | a legacy row whose lease has died (`RANK_STALE_LEGACY`) | unfinished work nobody holds: offered, but never ahead of rank 0/10 |
+| 30 | work the **machine wrote for itself** (`origin='idle'`) | skill sharpening, re-reading a decision note, `FOLLOWUP_CONTRACTS` |
 
-A stale legacy row (working status, dead lease) sits at 25 — below roadmap, above idle. It is never hidden: the flag that used to hide it was **deleted**, because a flag that any caller can set gives one row two orders, and contract 12 forbids that.
+The numbers are spaced by tens on purpose: a scale of 1/2/3 forced a fraction the first time a level
+had to be inserted, and a fraction is an invitation.
+
+A stale legacy row (working status, dead lease) sits at 25 — below roadmap (10), above idle (30). It is never hidden: the flag that used to hide it was **deleted**, because a flag any caller can set gives one row two orders, and contract 12 forbids that.
 
 The rules that bind rank 3, and these are the ones that were broken:
 
