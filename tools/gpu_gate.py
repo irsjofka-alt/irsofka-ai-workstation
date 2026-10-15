@@ -22,6 +22,7 @@ pemanggilan — ambang yang dihafal adalah ambang yang salah minggu depan.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -38,17 +39,57 @@ if str(TOOLS) not in sys.path:
 from local_llm import gpu_holders, vram_free_mib  # noqa: E402
 
 
+# Cadangan yang dipakai HANYA kalau config tidak terbaca. Bukan pengganti config — ia ada supaya
+# "berkas hilang" tidak pernah berarti "GPU aman". Versi pertama mengembalikan [] saat config gagal
+# dibaca, lalu classify menyimpulkan need 0, lalu check meloloskannya sebagai NOT_GPU_WORK: gerbang
+# yang terbuka persis ketika pengamannya hilang, dan selftest-nya mengunci perilaku itu karena
+# testnya ditulis dari asumsi yang sama. Ditemukan audit 2026-10-15, dibalik di sini.
+FALLBACK_RULES = [
+    {"label": "3d-trellis", "need_mib": 9966,
+     "match": ["trellis", "pixal3d", "image-to-3d", "image_to_3d", "3d_pipeline"]},
+]
+
+
+def _word_match(word: str) -> str:
+    """Pencocokan berbatas kata, bukan substring mentah.
+
+    `flux` sebagai substring cocok di "reflux"/"confusing"; `checkpoint` dan `sdxl` di dalam judul
+    item biasa akan menahan pekerjaan yang tidak menyentuh GPU sama sekali. Yang ditolak di sini
+    adalah kerja GPU yang salah ukur, bukan kerja lain kebetulan mengandung huruf yang sama.
+    """
+    w = re.escape(word.strip().lower())
+    return rf"(?<![a-z0-9]){w}(?![a-z0-9])"
+
+
 def rules(path=None) -> list:
-    """Daftar aturan dari config, dibaca pada saat dipakai. Berkas hilang = tidak ada aturan."""
+    """Daftar aturan dari config, dibaca pada saat dipakai.
+
+    Berkas hilang/rusak TIDAK menghasilkan "tidak ada aturan": yang menghasilkan daftar cadangan,
+    dan keputusan berikutnya menandai dirinya `degraded` supaya pembaca tahu ambang mana yang
+    sebenarnya dipakai malam itu.
+    """
     try:
         cfg = json.loads(Path(path or CONFIG).read_text(encoding="utf-8"))
+        raw = cfg.get("rules")
+        assert isinstance(raw, list) and raw, "rules kosong"
     except Exception:  # noqa: BLE001 — tidak ada config bukan berarti GPU aman
-        return []
+        return [dict(r, degraded=True) for r in FALLBACK_RULES]
     out = []
-    for r in cfg.get("rules") or []:
+    for r in raw:
         need = r.get("need_mib")
-        if not isinstance(need, int) or isinstance(need, bool) or need < 0:
-            continue          # aturan tanpa angka bukan ambang; ia dilewati, tidak ditebak
+        if not isinstance(need, int) or isinstance(need, bool):
+            # Ambang yang tidak bisa dibaca BUKAN nol. Aturan tetap dipakai, dengan need None,
+            # dan `check(None)` menjawab UNKNOWN — menolak. Ini bedanya penting: versi pertama
+            # melewati aturan, sehingga item yang cocok dengannya jatuh ke need 0 dan jalan.
+            out.append({"label": str(r.get("label") or "?"), "need_mib": None,
+                        "match": [str(m).lower() for m in (r.get("match") or [])],
+                        "bad_threshold": True})
+            continue
+        if need < 0:
+            out.append({"label": str(r.get("label") or "?"), "need_mib": None,
+                        "match": [str(m).lower() for m in (r.get("match") or [])],
+                        "bad_threshold": True})
+            continue
         out.append({"label": str(r.get("label") or "?"), "need_mib": int(need),
                     "match": [str(m).lower() for m in (r.get("match") or [])]})
     return out
@@ -57,14 +98,23 @@ def rules(path=None) -> list:
 def classify(text, path=None) -> dict:
     """Aturan mana yang berlaku untuk sepenggal teks (judul item + perintah + ringkasan)."""
     blob = " ".join(str(text or "").split()).lower()
-    for r in rules(path):
-        if any(m and m in blob for m in r["match"]):
-            return {"matched": r["label"], "need_mib": r["need_mib"]}
+    rs = rules(path)
+    for r in rs:
+        if any(m and re.search(_word_match(m), blob) for m in r["match"]):
+            return {"matched": r["label"], "need_mib": r.get("need_mib"),
+                    "bad_threshold": r.get("bad_threshold", False),
+                    "degraded": any(x.get("degraded") for x in rs)}
     return {"matched": None, "need_mib": 0}
 
 
 def check(need_mib, sampler=None, holders=None) -> dict:
     """Satu keputusan: ALLOW / DENY / UNKNOWN, dengan angka yang membuktikannya."""
+    if need_mib is None:
+        # Aturan cocok tapi ambangnya tidak terbaca. Menolak adalah satu-satunya jawaban yang
+        # tidak mengarang angka: "mungkin 0" akan mengizinkan, dan itu persis kegagalan yang
+        # gerbang ini dipasang untuk cegah.
+        return {"ok": False, "state": "UNKNOWN", "need_mib": None, "free_mib": None,
+                "why": "aturan GPU cocok tapi ambangnya bukan angka — menolak, tidak menebak"}
     need = int(need_mib or 0)
     if need <= 0:
         return {"ok": True, "state": "NOT_GPU_WORK", "need_mib": need, "free_mib": None}
@@ -88,6 +138,10 @@ def gate(text, sampler=None, holders=None, config_path=None) -> dict:
     cls = classify(text, config_path)
     res = check(cls["need_mib"], sampler=sampler, holders=holders)
     res["rule"] = cls["matched"]
+    if cls.get("degraded"):
+        res["degraded"] = True      # ambang yang dipakai malam ini berasal dari cadangan, bukan config
+    if cls.get("bad_threshold"):
+        res["bad_threshold"] = True
     return res
 
 
@@ -97,7 +151,7 @@ def status(config_path=None) -> dict:
     yang tidak terbaca dilaporkan sebagai tidak terbaca."""
     free = vram_free_mib()
     out = {"free_mib": free, "readable": free is not None,
-           "holders": [f"{n} {m}MiB" for n, m in sorted(gpu_holders(), key=lambda h: -h[1])[:6]],
+           "holders": [f"{n} {m}MiB" for n, m in sorted(gpu_holders() or [], key=lambda h: -h[1])[:6]],
            "rules": []}
     for r in rules(config_path):
         out["rules"].append({"label": r["label"], "need_mib": r["need_mib"],
@@ -146,21 +200,42 @@ def selftest() -> int:
                                          {"label": "y", "match": ["y"], "need_mib": -5},
                                          {"label": "z", "match": ["z"], "need_mib": 100}]}),
                    encoding="utf-8")
-    check_("ambang non-angka atau negatif dilewati, tidak dijadikan tebakan — dan aturan yang "
-           "sah tetap dipakai",
-          [r["label"] for r in rules(bad)] == ["z"]
-          and gate("z work", sampler=lambda: 10, config_path=bad)["state"] == "DENY",
-          str(rules(bad)))
-    check_("config tidak ada = tidak ada aturan = kerja dianggap bukan GPU, BUKAN GPU yang dianggap aman",
-          gate("apa saja", sampler=lambda: None, config_path=bad.parent / "tiada.json")["state"]
-          == "NOT_GPU_WORK")
+    # Dua pemeriksaan di bawah ini PERNAH menyatakan sebaliknya. Yang lama menulis "ambang
+    # non-angka dilewati" dan "config tidak ada = kerja dianggap bukan GPU" — dan keduanya mengunci
+    # gerbang yang TERBUKA saat pengamannya hilang: item TRELLIS yang cocok dengan aturan rusak
+    # menjadi need 0, lalu lolos sebagai bukan-kerja-GPU. Audit 2026-10-15 menemukannya; testnya
+    # tidak, karena testnya ditulis dari asumsi yang sama. Arah gagalnya sekarang dibalik:
+    # aturan rusak MENAHAN, config hilang memakai cadangan yang menahan.
+    check_("ambang rusak MENAHAN, tidak meloloskan: aturan yang cocok tapi need-nya bukan angka "
+           "atau negatif keluar sebagai UNKNOWN dengan ok False",
+          [r["label"] for r in rules(bad)] == ["x", "y", "z"]
+          and gate("x job", sampler=lambda: 99999, config_path=bad)["state"] == "UNKNOWN"
+          and gate("x job", sampler=lambda: 99999, config_path=bad)["ok"] is False
+          and gate("y job", sampler=lambda: 99999, config_path=bad)["state"] == "UNKNOWN"
+          and gate("z job", sampler=lambda: 10, config_path=bad)["state"] == "DENY",
+          str(rules(bad))[:220])
+    missing = gate("jalankan TRELLIS.2 image-to-3d", sampler=lambda: 100,
+                   config_path=bad.parent / "tiada.json")
+    check_("config hilang BUKAN berarti GPU aman: cadangan menahan kerja 3D dan menandai dirinya "
+           "degraded supaya laporan jujur tentang ambang mana yang sebenarnya dipakai",
+          missing["state"] == "DENY" and missing["rule"] == "3d-trellis"
+          and missing.get("degraded") is True, str(missing)[:200])
+    check_("dan kerja yang memang bukan GPU tetap jalan saat config hilang — cadangan menahan "
+           "yang mirip GPU, bukan seluruh antrean",
+          gate("perbaiki selftest work_order", sampler=lambda: 1,
+               config_path=bad.parent / "tiada.json")["state"] == "NOT_GPU_WORK")
+    check_("pencocokan berbatas kata: 'reflux' tidak memicu aturan 'flux', dan 'git checkpoint' "
+           "tidak lagi ditahan ambang difusi (istilah itu dibuang dari config karena itu)",
+          gate("perbaiki reflux test", sampler=lambda: 1)["state"] == "NOT_GPU_WORK"
+          and gate("tambah git checkpoint hook", sampler=lambda: 1)["state"] == "NOT_GPU_WORK"
+          and gate("flux txt2img poster", sampler=lambda: 1)["state"] == "DENY")
     # Bukan `or True`: aturan produksi harus sungguh ada, karena gerbang tanpa aturan adalah
-    # gerbang yang terbuka. Berkas config nyata dibaca, jadi kalaunomornya hilang dari repo,
+    # gerbang yang terbuka. Berkas config nyata dibaca, jadi kalau nomornya hilang dari repo,
     # test ini yang merah — bukan run 3D jam tiga pagi.
     prod = rules(None)
     check_("config produksi punya setidaknya satu ambang GPU bernomor dan menyebut TRELLIS.2",
-           any(r["need_mib"] >= 9000 for r in prod) and len(prod) >= 2,
-           str(prod)[:200])
+           any(isinstance(r["need_mib"], int) and r["need_mib"] >= 9000 for r in prod)
+           and len(prod) >= 2, str(prod)[:200])
     check_("ambang produksi terbaca sebagai angka, bukan kalimat",
            all(isinstance(r["need_mib"], int) for r in prod), str(prod)[:160])
     for name, ok, detail in checks:

@@ -9,9 +9,11 @@
     },
     {
       "label": "image-diffusion",
-      "match": ["z-image", "flux", "sdxl", "txt2img", "checkpoint", "juggernaut"],
+      "match": ["z-image", "flux", "sdxl", "txt2img", "juggernaut", "nanobanana"],
       "need_mib": 5919,
-      "measured": "Z-Image-Turbo int8 = 5.78 GiB, the fp8 Juggernaut-Z row is 5.73 GiB (brain/skills/comfyui/08). bf16 12 GB variants do not fit beside a text encoder and are deliberately not given a floor here - they are not runnable on this card at any free figure."
+      "removed_terms": ["checkpoint"],
+      "measured": "Z-Image-Turbo int8 = 5.78 GiB, the fp8 Juggernaut-Z row is 5.73 GiB (brain/skills/comfyui/08). bf16 12 GB variants do not fit beside a text encoder and are deliberately not given a floor here - they are not runnable on this card at any free figure.",
+      "why_removed": "'checkpoint' matched git/database checkpoint items as much as model checkpoints, so a full GPU would have refused non-GPU work on a word collision. Matching is also word-bounded now, so 'flux' no longer hits 'reflux'."
     },
     {
       "label": "vendor-cloud",
