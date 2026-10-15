@@ -78,8 +78,26 @@ CAPABILITIES = {
                                           "+ polling operation.",
               "veo-3.1-fast-generate-preview": "ADA DI DAFTAR, belum dipanggil",
               "veo-3.1-lite-generate-preview": "ADA DI DAFTAR, belum dipanggil"},
-    "image": {"gemini-nano-banana-2.1": "ADA DI DAFTAR, belum dipanggil",
-              "nano-banana-pro-preview": "ADA DI DAFTAR, belum dipanggil"},
+    "image": {"MEASURED": "DITOLAK UKUR 2026-10-15 11:2x: 0 gambar, 0 titik. Empat nama × dua kunci "
+                          "semuanya 429 RESOURCE_EXHAUSTED dengan metrik "
+                          "`generate_content_free_tier_requests` dan "
+                          "`generate_content_free_tier_input_token_count` pada `limit: 0` — kunci "
+                          "dibaca sebagai free tier untuk model gambar, bukan kunci mati: kunci PRO "
+                          "yang SAMA menjawab 200 untuk `gemini-3.8-flash` beberapa detik "
+                          "sebelumnya. Nama yang diukur: gemini-nano-banana-2.1, "
+                          "gemini-3.1-flash-lite-image, gemini-3.1-flash-image, "
+                          "gemini-2.5-flash-image (layanan memetakannya sebagai "
+                          "gemini-2.5-flash-preview-image). Pro-image (nano-banana-pro-preview, "
+                          "gemini-3-pro-image) TIDAK dipanggil — operator melarang uji berbiaya "
+                          "besar, dan nama non-pro sudah membuktikan pagarnya.",
+              "reset": "Semua jawaban menyebut 'Please retry in 19h45m' dan hitungan mundurnya "
+                       "sama antar kunci sampai di bawah satu detik. Itu cocok baik untuk satu "
+                       "bucket bersama maupun batas harian tetap di semua proyek: datanya tidak "
+                       "memutuskan mana yang benar, jadi jangan dijual sebagai 'kolamnya satu'.",
+              "module": "ask() hanya mengirim `parts:[{text}]` tanpa responseModalities, jadi "
+                        "jalur gambar memang TIDAK ADA di modul ini — walau pagarnya terbuka, "
+                        "yang keluar tetap teks. Gambar mesin ini jalurnya ComfyUI lokal (F7, "
+                        "terbukti dan gratis), bukan BYOK."},
     "audio": {"gemini-2.5-flash-native-audio-latest": "ADA DI DAFTAR, belum dipanggil",
               "gemini-3.5-transcribe-live": "ADA DI DAFTAR, belum dipanggil"},
 }

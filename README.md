@@ -176,12 +176,37 @@ ollama ps        # must be empty following verification
 
 Three of the workstation's roles can be served by the operator's Google AI Studio keys instead of
 the CLI subscriptions: an independent verifier that does not draw on the same quota as the engine
-writing the code, a resolver rung for decisions that would otherwise wake a human, and the design
-surface for image/video/audio work. It is configured from **Station → Gemini BYOK**, not by an
-agent editing files, and the screen shows fingerprints rather than secrets. What the pool can
-call today is measured in `ROADMAP.md` under
-*Gemini BYOK as a collaboration surface* — including the two things it cannot: `gemini-4-argon`
-(quota refused on every key) and music generation (no route through this API at all).
+writing the code, a resolver rung for decisions that would otherwise wake a human, and a design
+surface for **text** work. It is configured from **Station → Gemini BYOK**, not by an agent editing
+files, and the screen shows fingerprints rather than secrets.
+
+What the pool can actually call is measured, not assumed — see `ROADMAP.md` under
+*Gemini BYOK as a collaboration surface* and
+`brain/memory/reference-byok-design-capabilities.md`. Proven: `gemini-3.8-flash` answers 200.
+Refused on every key: `gemini-4-argon` (429), image generation (`limit: 0` free-tier quota on all
+four measured image models), and music (no model name in the pool's own list of 63). Video exists
+in the list but on an endpoint this module does not call. Do not plan asset generation onto this
+pool until a measurement says otherwise.
+
+## Tripo3D — prepared route, no spend
+
+`tools/tripo.py` wraps the official `tripo-cli` (0.6.1, API **V3**) as the workstation's paid 3D
+half: text/image → model, texture, conversion. It is deliberately a *gate*, not a faucet.
+
+- Every command that spends points (`make`, `ai`, `redo`) is `--dry-run` unless `--spend` is passed
+  explicitly, and `--spend` is refused when the endpoint's point cost is not yet recorded in
+  `cost_notes`. Unknown cost means no call, never an estimate guessed at runtime.
+- The module never adds `--yes`: the vendor CLI enables it automatically when it detects a
+  non-TTY, which is exactly the state an unattended tick runs in.
+- Keys never travel through argv, stdout or git. `config/tripo.json` is gitignored; credentials come
+  from `tripo login`, whose owner is the operator, not an agent.
+- The three API paths in `ENDPOINTS` were read off the installed CLI's own requests, not from
+  documentation, after the V2 guesses in the first draft returned 404.
+
+`ai-station tripo status` reports what is installed and whether a credential exists. Live calls are
+still pending: the Studio wallet (500 points, browser session) and the API wallet have not been shown
+to be the same balance, and that has to be measured with `tripo whoami --json` before any run is
+allowed to spend.
 
 ## MCP Servers — the workstation's hands
 

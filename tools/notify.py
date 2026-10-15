@@ -20,6 +20,7 @@ Aturan yang menahan modul ini tetap jujur:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -41,7 +42,7 @@ MAX_ACTIONS_SHOWN = 4
 # Ini yang harus terlihat dari kejauhan, karena kegagalan yang operator takutkan bukan item sulit
 # — melainkan auto yang berhenti dan komputer yang lalu diam sampai pagi.
 URGENT = {
-    "CLOSED_NIGHT", "CLOSED_UNKNOWN", "HELD_BY_LEVEL", "HELD_BY_MODE",
+    "CLOSED_UNKNOWN", "HELD_BY_LEVEL", "HELD_BY_MODE",
     "MODE_UNKNOWN", "NO_TARGET", "SEND_FAILED", "GATE_FAILED",
     "ANSWER_DELIVER_REFUSED", "PANE_DIR_UNKNOWN", "PANE_WRONG_DIR", "DELIVER_REFUSED",
     # "QUEUED_NOT_DELIVERED" ditulis `work_order.queue_command` saat perintah orang sudah di ledger
@@ -97,7 +98,18 @@ NOTE = {"SEMI_HAND_FLAT", "OBSERVED", "GATE_BASELINE", "GATE_NO_COMMAND", "HELD"
         # Mode tersimpan bukan ON: rem yang dipatuhi, bukan mesin macet. `hand_new_work` sudah
         # memeriksa ini di pemanggil; pemeriksaan kedua di `ensure_idle_item` melaporkan lewat sini
         # supaya pagar kedua tidak pernah diam-diam mengasumsikan yang pertama sudah jalan.
-        "IDLE_HELD_BY_MODE"}
+        "IDLE_HELD_BY_MODE",
+        # `CLOSED_NIGHT` pindah dari URGENT pada 2026-10-15 atas keluhan operator yang terukur:
+        # cabangnya `return` di awal tick dan di-emit ULANG pada setiap tick selama jendela ON tidak
+        # terbuka, jadi satu keadaan diam ("tidak ada jendela malam") menghasilkan banner yang sama
+        # tiap 10-30 menit selama mesin berjalan SEMI+observe. Bentuknya sama dengan WINDOW_CLOSED dan
+        # MODE_OFF di atas: rem yang dipatuhi, bukan mesin yang macet — dan penyebab yang membuat
+        # perintah operator tidak sampai sudah berbanner sendiri lewat QUEUED_NOT_DELIVERED, jadi yang
+        # dibungkam di sini hanya pengulangan, bukan kabarnya. Yang TIDAK ikut turun: CLOSED_UNKNOWN,
+        # MODE_UNKNOWN, QUOTA_CLOSED — ketiganya adalah mesin yang tidak bisa membaca atau kehabisan
+        # bahan bakar, dan itu tetap darurat walau berulang (berulang sekarang dibatasi
+        # `REPEAT_WINDOW_S`, bukan dengan membuat keadaan darurat jadi diam).
+        "CLOSED_NIGHT"}
 # `CLOSED_OFF` pernah ada di daftar ini dan dibuang dengan alasan "OFF bukan lagi sebuah mode".
 # Alasan itu tidak berlaku sejak 2026-10-09: OFF kembali menjadi state yang disimpan, dan nama
 # kejadiannya `MODE_OFF` (lihat keranjang NOTE di atas). Yang tetap benar dari komentar lama:
@@ -129,12 +141,76 @@ def muted_classes(path=None) -> set:
     return m - {"unknown"}
 
 
+STATE_PATH = Path.home() / "runtime" / "notify_last.json"
+# Seberapa lama satu keadaan yang SAMA boleh mengulangi bannernya. Enam jam dipilih karena batas
+# bawahnya adalah apa yang dikeluhkan operator ("10/30 menit sekali") dan batas atasnya adalah
+# keadaan yang masih darurat: jendela ON yang ditutup kuota harus tetapingatkan orang sebelum
+# pagi, tapi tidak setiap lima menit.
+REPEAT_WINDOW_S = 6 * 3600
+
+
+def signature(events) -> str:
+    """Sidik keadaan yang banner kabarkan — bukan sekadar daftar nama peristiwa.
+
+    `item` dan `why` ikut masuk supaya kegagalan baru pada item lain tidak dianggap pengulangan,
+    dan supaya satu kegagalan yang penyebabnya berubah (mis. "Pane tidak bisa dibaca" menjadi
+    "quota window 5h kosong") tetap boleh berbanner lagi.
+    """
+    parts = []
+    for e in (events or []):
+        if not isinstance(e, dict):
+            continue
+        parts.append(f"{e.get('action')}|{e.get('item', e.get('id', ''))}|"
+                     f"{str(e.get('why', ''))[:120]}")
+    return hashlib.sha256(";".join(sorted(parts)).encode()).hexdigest()[:16]
+
+
+def last_sent(path=None) -> dict:
+    try:
+        return json.loads(Path(path or STATE_PATH).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — tidak ada state = belum pernah dikirim
+        return {}
+
+
+def is_repeat(sig, now=None, path=None, window=REPEAT_WINDOW_S) -> bool:
+    """Banner dengan sidik yang sama sudah dikirim kurang dari `window` detik lalu?
+
+    Arah gagalnya sengaja MEMBUNYIKAN, bukan membungkam: berkas state yang tidak terbaca atau
+    bertimestamp rusak mengembalikan False (bukan pengulangan), sama seperti pemotong call-worker
+    yang menolak memotong saat daftar pane tidak bisa dibaca. Absence of evidence bukan izin untuk
+    membungkam alarm.
+    """
+    st = last_sent(path)
+    if st.get("sig") != sig:
+        return False
+    try:
+        age = (time.time() if now is None else now) - float(st.get("ts"))
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age < window
+
+
+def record_sent(sig, now=None, path=None) -> None:
+    p = Path(path or STATE_PATH)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"sig": sig, "ts": time.time() if now is None else now}),
+                     encoding="utf-8")
+    except Exception:  # noqa: BLE001 — gagal mencatat hanya berarti tick berikutnya tidak tertahan
+        pass
+
+
 def worth_notifying(events, mute=None) -> tuple[bool, str]:
     """Hanya tick yang BERGERAK, BERTANYA, atau GAGAL yang boleh menyentuh desktop.
 
     Aturan ini bukan kenyamanan: operator menyetujui notifikasi per kejadian justru supaya
     notifikasi tidak menjadi noise yang dia matikan. Tick yang hanya melihat (OBSERVED) adalah
     keadaan normal mesin yang sehat dan harus tetap berada di log malam saja.
+
+    Kelas `note` sengaja TIDAK ada di perulangan bawah: ada persis satu jalur yang boleh mengangkat
+    suara untuk sebuah keadaan, dan itu jalur ini. Kalau `note` juga bisa naik (misalnya lewat
+    mute yang salah tulis), satu kejadian bisa menghasilkan dua banner — dan dua banner untuk satu
+    keadaan adalah cara orang berhenti membaca banner mana pun.
     """
     acts = [str((e or {}).get("action") or "?") for e in (events or []) if isinstance(e, dict)]
     # `mute` bisa diserahkan: selftest harus menguji kedua sisi tanpa bergantung pada apakah
@@ -153,9 +229,20 @@ def worth_notifying(events, mute=None) -> tuple[bool, str]:
             if c == "urgent" and "urgent" in mute:
                 continue
             return True, a
-    if mute:
-        return False, f"MUTED:{','.join(sorted(mute))}:" + (",".join(acts) or "tanpa peristiwa")
-    return False, ",".join(acts) or "tanpa peristiwa"
+    # Alasan diam harus menyebut penyebab yang sebenarnya. Bentuk sebelumnya selalu menulis
+    # `MUTED:<kelas>` selama ada config mute apa pun, jadi tick yang isinya hanya `note`
+    # (CLOSED_NIGHT, OBSERVED) tercatat sebagai "dibungkam progress" padahal tidak ada satu pun
+    # peristiwa berkelas progress di situ. Operator membaca baris ini untuk memutuskan apakah
+    # mesin diam karena disuruh atau karena rusak — label yang salah menjawab pertanyaan itu.
+    dropped = []
+    for a in acts:
+        c = classify(a)
+        if (c == "progress" and "progress" in mute) or (c == "urgent" and "urgent" in mute):
+            dropped.append(f"{a}:{c}")
+    base = ",".join(acts) or "tanpa peristiwa"
+    if dropped:
+        return False, "MUTED:" + ",".join(sorted({d.split(":")[1] for d in dropped})) + ":" + base
+    return False, "NOTHING_WORTHY:" + base
 
 
 def classify(action: str) -> str:
@@ -288,12 +375,20 @@ def send(title: str, body: str, urgent: bool = False, timeout: float = SEND_TIME
         return {"ok": False, "rc": None, "err": f"{type(exc).__name__}: {exc}"}
 
 
-def notify_tick(events, mode=None, level=None, runner=None, mute=None) -> dict:
-    """Jalur yang dipakai tick: hanya kejadian yang layak yang menyentuh desktop."""
+def notify_tick(events, mode=None, level=None, runner=None, mute=None,
+                 now=None, state_path=None) -> dict:
+    """Jalur yang dipakai tick: hanya kejadian yang layak, dan hanya sekali per keadaan."""
     want, reason = worth_notifying(events, mute=mute)
     if not want:
         return {"sent": False, "skipped": True, "reason": reason, "ok": True}
-    return notify_events(events, mode=mode, level=level, runner=runner)
+    sig = signature(events)
+    if is_repeat(sig, now=now, path=state_path):
+        return {"sent": False, "skipped": True, "reason": f"REPEAT:{reason}", "ok": True,
+                "sig": sig}
+    out = notify_events(events, mode=mode, level=level, runner=runner)
+    if out.get("ok"):
+        record_sent(sig, now=now, path=state_path)
+    return {**out, "sig": sig}
 
 
 def notify_events(events, mode=None, level=None, runner=None) -> dict:
@@ -324,11 +419,25 @@ def selftest() -> int:
         checks.append((name, bool(cond), detail))
 
     check("tick yang mendedikasikan pekerjaan dilaporkan sebagai progress, bukan darurat",
-          classify("WORK_DISPATCHED") == "progress" and classify("CLOSED_NIGHT") == "urgent")
-    s = summarize([{"action": "CLOSED_NIGHT", "why": "jendela ON lewat"}], mode="ON", level="resume")
+          classify("WORK_DISPATCHED") == "progress" and classify("CLOSED_NIGHT") == "note")
+    # Dua sisi dari satu perubahan: jendela yang tertutup adalah rem yang dipatuhi (note, diam),
+    # sementara gerbang yang TIDAK BISA DIBACA tetap darurat. Kalau yang kedua ikut turun, operator
+    # kehilangan satu-satunya tanda bahwa loop berhenti bekerja — itu bukan kenyamanan, itu buta.
+    check("jendela ON yang tertutup tidak lagi berbanner, tapi gerbang yang tidak terbaca MASIH",
+          classify("CLOSED_NIGHT") == "note" and classify("CLOSED_UNKNOWN") == "urgent"
+          and classify("MODE_UNKNOWN") == "urgent" and classify("QUOTA_CLOSED") == "urgent")
+    s = summarize([{"action": "CLOSED_UNKNOWN", "why": "level tidak terbaca"}], mode="ON", level="resume")
     check("gerbang tertutup mengangkat suara dan menyebut alasannya",
-          s["urgent"] and "⚠" in s["title"] and "CLOSED_NIGHT" in s["title"]
-          and "jendela ON lewat" in s["body"], json.dumps(s))
+          s["urgent"] and "⚠" in s["title"] and "CLOSED_UNKNOWN" in s["title"]
+          and "level tidak terbaca" in s["body"], json.dumps(s))
+    s_cn = summarize([{"action": "CLOSED_NIGHT", "why": "jendela ON lewat"}], mode="SEMI",
+                     level="observe")
+    check("CLOSED_NIGHT tidak mengangkat suara dan tidak dapat tanda ⚠ — tapi tetap bernama di judul",
+          not s_cn["urgent"] and "⚠" not in s_cn["title"] and "CLOSED_NIGHT" not in s_cn["title"],
+          json.dumps(s_cn))
+    w_cn, _r_cn = worth_notifying([{"action": "CLOSED_NIGHT", "why": "jendela ON lewat"}], mute=set())
+    check("tick yang hanya melaporkan jendela tertutup TIDAK menyentuh desktop, walau tanpa mute",
+          w_cn is False, _r_cn)
     s2 = summarize([{"action": "WORK_DISPATCHED", "item": 88, "target": "qoder"},
                     {"action": "GATE_PASSED", "item": 91}], mode="SEMI", level="dispatch")
     check("isi banner menyebut item dan engine dari peristiwa, tidak mengarang",
@@ -349,13 +458,41 @@ def selftest() -> int:
     def runner(title, body, urgent=False):
         calls.append((title, body, urgent))
         return fake
-    out = notify_tick([{"action": "CLOSED_NIGHT", "why": "jendela ON lewat"}], mode="ON",
-                      runner=runner)
+    # Kejadian yang dipilih harus yang MASIH layak berbanner sesudah `CLOSED_NIGHT` turun ke note,
+    # dan state pengulangan harus berkas sementara: kalau tidak, dua tes di bawah mengukur
+    # pengulangan tes sebelumnya, bukan gerbangnya.
+    import tempfile
+    _st = Path(tempfile.mkdtemp()) / "notify_last.json"
+    out = notify_tick([{"action": "SEND_FAILED", "why": "pane tidak bisa dibaca"}], mode="ON",
+                      runner=runner, state_path=_st)
     check("satu kejadian layak = satu banner", len(calls) == 1, str(calls))
     check("banner yang gagal kirim dilaporkan sebagai gagal, bukan sebagai tick yang berhasil",
           out["sent"] is False and out["ok"] is False and "tidak ditemukan" in (out.get("err") or ""),
           json.dumps(out, default=str))
     check("kegagalan kirim tidak mengubah isi rangkuman", out["title"] == calls[0][0])
+    # Pengulangan hanya boleh menahan banner yang SUNGGUH terkirim. Kegagalan kirim tidak boleh
+    # dihitung sebagai "sudah pernah memberi tahu" — akibatnya adalah alarm yang dibungkam
+    # justru karena ia tidak sampai.
+    check("banner yang GAGAL terkirim tidak dicatat sebagai pengulangan",
+          not _st.exists(), str(_st))
+    _ok_calls = []
+    okrunner = lambda title, body, urgent=False: (_ok_calls.append(title), {"ok": True, "rc": 0, "err": ""})[1]
+    a = notify_tick([{"action": "SEND_FAILED", "why": "pane tidak bisa dibaca"}], mode="ON",
+                    runner=okrunner, state_path=_st)
+    b = notify_tick([{"action": "SEND_FAILED", "why": "pane tidak bisa dibaca"}], mode="ON",
+                    runner=okrunner, state_path=_st)
+    c = notify_tick([{"action": "SEND_FAILED", "why": "disk penuh"}], mode="ON",
+                    runner=okrunner, state_path=_st)
+    check("keadaan yang sama persis hanya berbanner sekali dalam jendela enam jam",
+          len(_ok_calls) == 2 and a.get("sent") and b.get("skipped")
+          and str(b.get("reason")).startswith("REPEAT:") and c.get("sent"),
+          f"{len(_ok_calls)} panggilan · b={b.get('reason')}")
+    check("penghitung mundur yang kedaluwarsa membangunkan banner lagi",
+          is_repeat(signature([{"action": "SEND_FAILED", "why": "pane tidak bisa dibaca"}]),
+                    now=time.time() + REPEAT_WINDOW_S + 1, path=_st) is False, str(_st))
+    check("berkas state yang tidak terbaca TIDAK membungkam alarm (arah gagal = berbunyi)",
+          is_repeat("deadbeefdeadbeef", path=_st) is False
+          and last_sent(path=_st.parent / "tidak-ada.json") == {})
     check("fallback bus menunjuk socket user yang nyata atau None",
           bus_address() is None or bus_address().startswith("unix:path="), str(bus_address()))
     # Bentuk argv diuji TANPA mengirim. Tiga percobaan pertama format hint `a{sv}` salah dan satu-
@@ -416,6 +553,12 @@ def selftest() -> int:
     m_yes, m_why = worth_notifying([{"action": "WORK_DISPATCHED", "item": 88}], mute={"progress"})
     check("denyut yang dibungkam TIDAK menyentuh desktop, dan alasannya menyebut kelas yang dibungkam",
           m_yes is False and m_why.startswith("MUTED:progress"), m_why)
+    check("tick yang diam karena tidak ada yang layak berbanner menyebut NOTHING_WORTHY, "
+          "bukan berpura-pura ada yang dibungkam",
+          worth_notifying([{"action": "CLOSED_NIGHT", "why": "x"}], mute={"progress"})[1]
+          .startswith("NOTHING_WORTHY:")
+          and worth_notifying([{"action": "OBSERVED"}], mute=set())[1].startswith("NOTHING_WORTHY:"),
+          worth_notifying([{"action": "CLOSED_NIGHT", "why": "x"}], mute={"progress"})[1])
     check("pertanyaan manusia tetap berbunyi walau denyut dibungkam — yang boleh mati adalah noise, "
           "bukan jalur yang memanggil orang",
           worth_notifying([{"action": "ESCALATED", "id": 9}], mute={"progress"})[0] is True)
