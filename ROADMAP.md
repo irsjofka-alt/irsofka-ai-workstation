@@ -17,7 +17,7 @@ F7 Creative Studio (ComfyUI/UE5)  ✅ Completed (scope: studio wired + producing
 F8 Station — System of Record     🟡 In Progress (F8.2, F8.3 shipped)
 F9 Refleks — Closed Sense-Act Loop ⬜ Planned
 F10 Autopilot — Improvement Unattended ⬜ Planned
-F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP written independently — no code copied: 61/61 selftest + live DENY and live ALLOW**; UE plugin: BYOK path fix + new Blueprint->C++ exporter **compile verified** via RunUAT BuildPlugin (runtime still unverified; deploy blocked on IRSofkaCore module-name collision); license chosen: BSL 1.1)
+F11 Unreal bridge & MCP ownership  🟨 Partly shipped (mcp/ map shipped; **IRSofka ComfyUI MCP written independently — no code copied: 61/61 selftest + live DENY and live ALLOW**; UE plugin: BYOK path fix + new Blueprint->C++ exporter **compile verified** via RunUAT BuildPlugin (runtime still unverified; deployment is an open decision — see the module-name collision under step 0); license chosen: BSL 1.1)
 ```
 
 ## F1–F4 — Foundation (Completed & Re-verified Oct 6)
@@ -1204,18 +1204,39 @@ the binary, not merely accepted by a compiler. The method is stated because the 
 to a plain `grep -o` count: three of those are *undefined references* from other translation units, not
 exports. A number without its measuring rule is a number someone else will contradict.
 
-What that first real compile found is the reason this section exists. Five APIs in new exporter code
-were wrong for 5.8 (`CPF_EditAnywhere`/`CPF_EditInstanceOnly`/`CPF_BlueprintReadWrite` do not exist;
-`UEdGraphPin::PinDisplayName` is `PinFriendlyName`; `UBlueprint::EventGraph` is an `EventGraphs` array;
-`FText` has no `IsNone()`), and **three were in the BYOK path fix recorded above as "fixed pending
-rebuild"** — `GetEnvVariable`/`HomeDir` are `FPlatformMisc::GetEnvironmentVariable`/`UserHomeDir()`,
-and the include I wrote as `HAL/PlatformFilemanager.h` has the wrong capitalisation, meaning nothing
-had ever compiled that file. The fix was real but unverified; "pending rebuild" was doing a lot of
-work in that sentence, and the rebuild disagreed with it.
+What that first real compile found is the reason this section exists, and the counts are from the
+three failing build logs, not from memory: **six distinct errors in the new exporter** —
+`CPF_EditAnywhere`, `CPF_EditInstanceOnly`, `CPF_BlueprintReadWrite` (none exist in 5.8; the real
+combination is `CPF_Edit` plus `CPF_DisableEditOnTemplate`/`CPF_DisableEditOnInstance`, and
+BlueprintReadWrite is `CPF_BlueprintAssignable`), `UEdGraphPin::PinDisplayName` (it is
+`PinFriendlyName`), `UBlueprint::EventGraph` (it is an `EventGraphs` array), and `FText::IsNone()`
+(only `IsEmpty()` exists) — and **four in the BYOK path fix recorded above as "fixed pending
+rebuild"**: `FPlatformProcess::GetEnvVariable` and `HomeDir()` (5.8: `FPlatformMisc::GetEnvironment-
+Variable` and `FPlatformProcess::UserHomeDir()`), the include written as `HAL/PlatformFilemanager.h`
+(wrong capitalisation, so nothing had ever compiled that file), and then a second wrong include of my
+own, `Misc/PlatformMisc.h` for `HAL/PlatformMisc.h`. The fix was real but unverified; "pending rebuild"
+was doing a lot of work in that sentence, and the rebuild disagreed with it.
 
 Also caught by reading rather than building: my first `EditAnywhere`/`EditInstanceOnly` condition was
 inverted, and it compiled happily. A build proves a file parses; it does not prove the flags mean what
 the code says.
+
+#### The rebrand collision, stated as a decision with two open answers
+
+`projects/IRSofka-UE-AIStation` (`IRSofkaStation.uplugin`, 26 modules) and the installed
+`IRSofkaStationCore` (7 modules) both declare a module named **`IRSofkaCore`** — measured by parsing the
+two `.uplugin` files, intersection `{IRSofkaCore}`. UE requires unique module names, so the two cannot be
+loaded together as they stand. That is a collision to resolve, not a dead end, and both real answers are
+open: rename one module, or retire the installed plugin and deploy the rebrand in its place. Each changes
+what the operator's live editor has loaded (pid 532402 holds the port-9877 binary), so neither is an
+engine's call.
+
+A second finding belongs to the same decision and must not ride along silently: the rebrand's
+`IRSofkaCore::StartupModule` calls `AutoEnableCompanionPlugins()`, which force-enables **17** companion
+plugins through `IProjectManager::SetPluginEnabled` in *whatever project loads the plugin* (the 17 names
+are in its source; the call is absent from the installed copy). Item 225 records that behaviour as a
+success. Whether a plugin should rewrite a project's configuration on load is the operator's answer, not
+a default to inherit.
 
 ### Ordered work, each with a numeric gate
 
