@@ -387,14 +387,16 @@ impl RunManager {
             prompt.push_str(&system);
             prompt.push_str("\n\n");
         }
+        // Indeks tool stabil dan murah; detail skema tidak ikut sampai dipanggil.
+        // Ditempatkan sebelum knowledge & riwayat agar prefix caching penyedia
+        // (Gemini/Claude/OpenAI) tetap utuh dan menghasilkan cache hit lintas putaran.
+        if !tool_index.is_empty() {
+            prompt.push_str(&tool_index);
+            prompt.push_str("\n\n");
+        }
         if !knowledge.is_empty() {
             prompt.push_str("Konteks pengetahuan yang mungkin relevan:\n");
             prompt.push_str(&knowledge);
-            prompt.push_str("\n\n");
-        }
-        // Indeks tool stabil dan murah; detail skema tidak ikut sampai dipanggil.
-        if !tool_index.is_empty() {
-            prompt.push_str(&tool_index);
             prompt.push_str("\n\n");
         }
         if !history.is_empty() {
@@ -507,8 +509,9 @@ impl RunManager {
         }
         if params.save_message {
             if let Some(chat) = conversation.as_deref() {
+                let saved_content = crate::history::clean_user_content(&params.prompt);
                 self.store
-                    .save_message(chat, "user", &params.prompt, Some(&id))
+                    .save_message(chat, "user", saved_content, Some(&id))
                     .await;
             }
         }

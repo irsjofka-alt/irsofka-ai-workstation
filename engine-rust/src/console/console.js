@@ -7977,24 +7977,32 @@ function wakeyTruncate(text, limit) {
 }
 
 function wakeyContextString() {
-  const data = state.wakey;
-  const title = (TITLES[state.view] || ["Console"])[0];
-  const decisions = (data.decisions || []).slice(0, 5).map(
-    (decision) => `#${decision.id} ${wakeyTruncate(decision.question, 110)}`
+  const data = state.wakey || {};
+  const decisions = (data.decisions || []).filter(
+    (d) => d.state === "OPEN" || d.state === "PENDING"
   );
-  const runs = (data.runs || []).slice(0, 5).map(
+  const runs = (data.runs || []).filter(
+    (r) => r.status === "running" || r.status === "queued"
+  );
+  // Jangan kirim prefix jika tidak ada task atau keputusan yang aktif/mendesak
+  if (!decisions.length && !runs.length) {
+    return "";
+  }
+  const title = (TITLES[state.view] || ["Console"])[0];
+  const decisionLines = decisions.slice(0, 3).map(
+    (decision) => `#${decision.id} ${wakeyTruncate(decision.question, 90)}`
+  );
+  const runLines = runs.slice(0, 3).map(
     (run) => `${wakeyWorkerName(run)} [${run.status || "running"}]`
   );
   return [
     "[KONTEKS AI STATION]",
     `Halaman: ${title} (${state.view})`,
-    `Human Decide menunggu: ${(data.decisions || []).length}${decisions.length ? " — " + decisions.join("; ") : " — tidak ada"}`,
-    `Worker berjalan: ${(data.runs || []).length}${runs.length ? " — " + runs.join("; ") : " — tidak ada"}`,
-    `Automation aktif: ${data.automations || 0}`,
-    `Auto Pilot: ${data.autoPilotOn ? "ON" : "OFF"}`,
+    decisionLines.length ? `Human Decide: ${decisionLines.join("; ")}` : "",
+    runLines.length ? `Worker aktif: ${runLines.join("; ")}` : "",
     "[/KONTEKS]",
     "",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function ensureWakeyLauncher() {
@@ -8364,8 +8372,9 @@ async function sendWakeyText(text) {
     return;
   }
   if (state.runBusy[worker.id]) return;
+  const ctx = wakeyContextString();
   return sendMessage(worker, text, "wakey", {
-    contextPrefix: `${wakeyContextString()}Pertanyaan operator:\n`,
+    contextPrefix: ctx ? `${ctx}\nPertanyaan operator:\n` : "",
   });
 }
 

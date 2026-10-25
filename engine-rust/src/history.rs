@@ -39,8 +39,32 @@ fn role_label(role: &str) -> &'static str {
     }
 }
 
+/// Menghapus prefix konteks UI konsol stasiun jika ada, agar riwayat percakapan
+/// tetap murni dan tidak memboroskan token dengan snapshot status yang sudah usang.
+pub(crate) fn clean_user_content(content: &str) -> &str {
+    if let Some(start) = content.find("[KONTEKS AI STATION]") {
+        if let Some(end) = content[start..].find("[/KONTEKS]") {
+            let after = &content[start + end + "[/KONTEKS]".len()..];
+            let trimmed = after.trim_start();
+            if let Some(question_idx) = trimmed.find("Pertanyaan operator:\n") {
+                return trimmed[question_idx + "Pertanyaan operator:\n".len()..].trim();
+            }
+            if let Some(question_idx) = trimmed.find("Pertanyaan operator:") {
+                return trimmed[question_idx + "Pertanyaan operator:".len()..].trim();
+            }
+            return trimmed;
+        }
+    }
+    content.trim()
+}
+
 fn render_message(message: &StoredMessage, max_chars: usize) -> Option<String> {
-    let body = compress::compact(&message.content, max_chars);
+    let clean = if message.role == "user" {
+        clean_user_content(&message.content)
+    } else {
+        message.content.trim()
+    };
+    let body = compress::compact(clean, max_chars);
     if body.trim().is_empty() {
         return None;
     }
@@ -374,5 +398,17 @@ mod tests {
         let text = format!("Thinking Process:\n\n1. Analyze...\n\n**Final Answer:**\n{answer}");
         let summary = sanitize_summary(&text).expect("final answer");
         assert_eq!(summary, answer);
+    }
+
+    #[test]
+    fn clean_user_content_strips_console_context() {
+        let raw = "[KONTEKS AI STATION]\nHalaman: Console (console)\nHuman Decide menunggu: 0\nWorker berjalan: 0\n[/KONTEKS]\n\nPertanyaan operator:\nhalo apa kabar?";
+        assert_eq!(clean_user_content(raw), "halo apa kabar?");
+
+        let raw_without_prefix = "[KONTEKS AI STATION]\nHalaman: Console\n[/KONTEKS]\ntolong bantu ini";
+        assert_eq!(clean_user_content(raw_without_prefix), "tolong bantu ini");
+
+        let regular = "pertanyaan biasa tanpa konteks UI";
+        assert_eq!(clean_user_content(regular), "pertanyaan biasa tanpa konteks UI");
     }
 }
