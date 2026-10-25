@@ -344,8 +344,8 @@ impl RunManager {
         }
 
         // Kontrak, peta folder, dan pekerjaan terakhir dari brain ikut ke setiap
-        // run: setelah context di-refresh, agent tidak memulai dari nol.
-        let context_pack = crate::context::pack();
+        // run secara adaptif berdasarkan intent prompt.
+        let context_pack = crate::context::pack_for(&params.prompt);
         if !context_pack.trim().is_empty() {
             if !system.is_empty() {
                 system.push_str("\n\n");
