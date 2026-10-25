@@ -1,0 +1,131 @@
+# .gitignore — Irsofka AI Workstation
+# Repo ini PUBLIC. Aturan main: HANYA kode yang boleh masuk.
+# Ingatan, data, kredensial, log, dan artefak mesin tetap di lokal.
+
+# ============================================================
+# 1. KREDENSIAL — tidak boleh masuk repo dalam bentuk apa pun
+# ============================================================
+config/db_local.json
+# BYOK keys for the Unreal in-engine chat (Gemini/Claude/OpenAI). Real values, repo is public.
+config/byok.json
+# penanda sekali-pakai "start this tab without --continue", ditulis daemon, dihapus run_tab.sh
+config/fresh.*
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*credentials*
+*secret*
+# templat sudoers: membocorkan nama pengguna lokal + pola NOPASSWD
+config/sudo-*.example
+
+# ============================================================
+# 2. INGATAN & DATA — sengaja di sini, bukan di GitHub
+#    (memory, skills, identitas, save-state, dokumen pribadi)
+# ============================================================
+brain/
+logs/
+cache-workspaces/
+models/
+# state runtime station (wakers.json, artifacts) — dibuat ulang oleh daemon
+data/
+# symlink toolset -> tools (jejak jalur absolut, tidak berguna di repo)
+toolset
+
+# ============================================================
+# 3. BASIS DATA — PostgreSQL dump maupun SQLite, apapun itu
+# ============================================================
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sql
+# Migrasi skema adalah kode, bukan dump: berkas di bawah ini harus ikut di-commit.
+!engine-rust/migrations/*.sql
+
+# ============================================================
+# 4. LOG, JEJAK SESI, CADANGAN
+# ============================================================
+*.log
+*.jsonl
+*.jsonl.*
+*.bak
+*.bak-*
+*.tmp
+*.swp
+*~
+# Cadangan & dump hasil mesin (SQL/tar/bak) — bukan sumber, dan bisa memuat data pribadi.
+backups/
+config/backups/
+*.dump
+*.sql.gz
+*.tar.gz
+
+# ============================================================
+# 5. ARTEFAK BUILD & DEPENDENSI MESIN (bukan tulisan manusia)
+# ============================================================
+engine-rust/target/
+tools/venv/
+**/__pycache__/
+node_modules/
+*.py[cod]
+
+# Biner hasil compile bukan sumber. Biner produksi lama bahkan masih memuat
+# kredensial PostgreSQL yang sudah dicabut dari main.rs.
+irsofka-station-core
+*.exe
+*.so
+*.dll
+
+# CLI pihak ketiga & direktori rumah (ratusan MB, bukan kode kita)
+engines/
+
+# ============================================================
+# 6. HASIL GENERATE DAEMON — dibuat ulang saat startup
+# ============================================================
+config/run_tab.sh
+config/cli_profiles.json
+
+# ============================================================
+# 7. Repo git bersarang yang dipindah saat penggabungan
+# ============================================================
+.git.bak-*
+.gitignore.bak-*
+
+# Catatan kerja internal (rencana paritas): sengaja tidak dipublikasikan.
+docs/QODERWAKE-PARITY-PLAN.md
+
+# ============================================================
+# 8. SITUS PLAYGROUND — konten, media, dan HTML adalah hasil mesin.
+#    Hanya panduan pemasangan yang ikut repo.
+# ============================================================
+site/*
+!site/README.md
+config/site_projects.json
+config/auto_pilot.json
+config/site_ingest.json
+
+# ============================================================
+# 9. KODE MATI — prototipe & server lama yang sudah digantikan mesin Rust.
+#    Tidak dirujuk siapa pun (tidak oleh systemd, tidak oleh bin/ai-station,
+#    tidak oleh daemon), jadi tidak ikut dipublish supaya repo berisi kode hidup.
+#    Berkasnya tetap ada di lokal, hanya tidak masuk riwayat git.
+# ============================================================
+tools/pty_station_server.py
+tools/static/
+tools/archive/
+# cadangan berkas yang dipindah dari $HOME (bukan kode, hanya jejak lokal)
+/archive/
+
+# ============================================================
+# YANG SENGAJA IKUT TERLACAK (aset yang dibutuhkan build)
+# ============================================================
+# engine-rust/assets/fonts/*.woff2  -> font UI, ~500 KB
+# icon.png                          -> ikon aplikasi desktop
+# Tripo3D API key (prepared path, no credits spent). Real value; repo is public.
+config/tripo.json
+# Kunci Nvidia untuk worker endpoint (mode 0600, tidak pernah dikembalikan ke UI)
+config/nvidia.json

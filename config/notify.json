@@ -1,0 +1,4 @@
+{
+  "_comment": "Banner desktop workstation. Kelas yang tercantum di `muted` tidak pernah menyentuh desktop. Yang TIDAK bisa dibungkam adalah `unknown` dan `urgent` — keduanya dicabut dari daftar ini di tools/notify.py, jadi menuliskan `urgent` di sini tidak akan membungkam satu pun alarm dengan sengaja. Ditulis 2026-10-15 atas permintaan operator yang terganggu banner autopilot tiap 10-30 menit; penyebab sebenarnya `CLOSED_NIGHT` (keadaan diam yang di-emit ulang tiap tick) dan itu sudah dipindah ke keranjang note, jadi yang dibungkam di sini hanya denyut pekerjaan, bukan kabar yang memanggil orang.",
+  "muted": ["progress"]
+}

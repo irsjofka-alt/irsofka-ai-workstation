@@ -1,0 +1,2099 @@
+<!DOCTYPE html>
+<!--
+  station.html — the human-facing record of the workstation: what was asked, what was done, what came out.
+  Read-only by design. Every number here is derived by PostgreSQL from the action log, so nothing on this
+  page was typed by an AI describing its own work. Data comes from /api/station; the console stays at /.
+  Layout borrows from a game wiki: grouped sidebar, tabbed feed, cards that open into evidence.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Irsofka AI Station</title>
+<style>
+  :root {
+    --bg: #0a0e13;
+    --rail: #0d131b;
+    --panel: #121a24;
+    --panel-2: #17212e;
+    --line: #202d3c;
+    --ink: #e6edf3;
+    --ink-dim: #8b9bb0;
+    --ink-faint: #5b6a7f;
+    --accent: #4fd1c5;
+    --amber: #f0b429;
+    --rose: #f2617a;
+    --violet: #a78bfa;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    /* Spacing scale. Before this file had colour and type variables but every gap was a literal,
+       which is how one view ends up tighter than the next for no reason anyone can name. */
+    --sp-1: 6px;
+    --sp-2: 10px;
+    --sp-3: 14px;
+    --sp-4: 22px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: grid; grid-template-columns: 236px 1fr;
+  }
+
+  /* ---------- sidebar ---------- */
+  aside {
+    background: linear-gradient(180deg, #101823 0%, var(--rail) 100%);
+    border-right: 1px solid var(--line);
+    padding: 22px 0 28px; position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  }
+  .brand { padding: 0 20px 18px; border-bottom: 1px solid var(--line); }
+  .brand h1 { margin: 0; font: 600 17px/1.2 var(--serif); letter-spacing: 2.4px; text-transform: uppercase; }
+  .brand p { margin: 6px 0 0; font-size: 10.5px; letter-spacing: 1.6px; text-transform: uppercase; color: var(--ink-faint); }
+  .group { padding: 20px 12px 0; }
+  .group > h2 {
+    margin: 0 8px 8px; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  .nav {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    background: none; border: 0; border-left: 2px solid transparent; border-radius: 0 8px 8px 0;
+    color: var(--ink-dim); padding: 8px 12px; font: inherit; font-size: 14px; cursor: pointer;
+  }
+  .nav:hover { color: var(--ink); background: #141d29; }
+  .nav.on { color: var(--ink); background: #16212e; border-left-color: var(--accent); }
+  .nav.soon { color: var(--ink-faint); cursor: default; }
+  .nav.soon:hover { background: none; color: var(--ink-faint); }
+  .nav i { font-style: normal; width: 18px; text-align: center; opacity: .85; }
+  .nav em {
+    margin-left: auto; font-style: normal; font-size: 9.5px; letter-spacing: .8px;
+    text-transform: uppercase; color: var(--ink-faint); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 5px;
+  }
+
+  /* ---------- main ---------- */
+  main { padding: 0 30px 70px; min-width: 0; }
+  header { padding: 30px 0 16px; border-bottom: 1px solid var(--line); }
+  .crumb { font-size: 12px; color: var(--ink-faint); letter-spacing: .4px; }
+  .crumb b { color: var(--ink-dim); font-weight: 500; }
+  h2.title { margin: 12px 0 4px; font: 600 26px/1.15 var(--serif); letter-spacing: .3px; }
+  .sub { margin: 0; color: var(--ink-dim); font-size: 13px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 7px 13px; min-width: 76px; }
+  .stat span { display: block; font-size: 10px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .7px; }
+  .stat strong { display: block; font-size: 18px; font-weight: 600; font-family: var(--mono); }
+  .stat.bad strong { color: var(--rose); }
+  .stat.good strong { color: var(--accent); }
+
+  nav.tabs {
+    display: flex; flex-wrap: wrap; gap: 7px; align-items: center; padding: 16px 0 18px;
+    position: sticky; top: 0; z-index: 5;
+    background: rgba(10,14,19,.93); backdrop-filter: blur(8px);
+  }
+  .chip {
+    background: var(--panel); color: var(--ink-dim); border: 1px solid var(--line);
+    border-radius: 999px; padding: 5px 13px; font-size: 13px; cursor: pointer;
+  }
+  .chip:hover { color: var(--ink); border-color: var(--ink-faint); }
+  .chip.on { background: var(--accent); border-color: var(--accent); color: #06202a; font-weight: 600; }
+  #q {
+    margin-left: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    color: var(--ink); padding: 6px 11px; font-size: 13px; min-width: 210px;
+  }
+  #q:focus { outline: none; border-color: var(--accent); }
+
+  /* ---------- cards ---------- */
+  #feed { display: flex; flex-direction: column; gap: 11px; }
+  article {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; display: grid; grid-template-columns: 74px 1fr; gap: 16px; cursor: pointer;
+  }
+  article:hover { border-color: #2e4054; background: var(--panel-2); }
+  article.live { border-left: 2px solid var(--accent); }
+  article.fail { border-left: 2px solid var(--rose); }
+  .when { font-family: var(--mono); font-size: 11.5px; color: var(--ink-faint); }
+  .when em { display: block; font-style: normal; color: var(--ink-dim); margin-top: 3px; }
+  .ask { margin: 0 0 9px; font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .tag { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); background: #0d141d;
+         border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; }
+  .tag.state { color: var(--accent); border-color: #1d4b48; }
+  .tag.state.open { color: var(--amber); border-color: #4a3a13; }
+  .tag.bad { color: var(--rose); border-color: #4d2230; }
+  .tag.model { color: var(--violet); border-color: #322a4d; }
+  .hint { color: var(--ink-faint); font-size: 11px; margin-left: auto; }
+  .files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  .file { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); background: #0d141d;
+          border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
+  .file.media { color: var(--amber); border-color: #4a3a13; }
+  .file i { font-style: normal; color: var(--ink-faint); }
+
+  .detail { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+  article.open { background: var(--panel-2); }
+  article.open .detail { display: block; }
+  .detail h4 {
+    margin: 0 0 7px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 1.1px;
+    color: var(--ink-faint); font-weight: 700;
+  }
+  .answer { font-size: 14px; background: #0d141d; border-left: 2px solid var(--accent);
+            border-radius: 0 8px 8px 0; padding: 10px 13px; margin: 0 0 14px; white-space: pre-wrap; word-break: break-word; }
+  .answer i { display: block; font-style: normal; color: var(--ink-faint); font-size: 11px; margin-top: 7px; }
+  .step { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); padding: 2.5px 0;
+          white-space: pre-wrap; word-break: break-word; }
+  .step b { color: var(--ink-faint); font-weight: 400; margin-right: 9px; }
+  .more { color: var(--ink-faint); font-size: 12px; margin-top: 5px; }
+
+  /* ---------- artefacts view ---------- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 11px; }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 12px 14px; }
+  .box h3 { margin: 0 0 3px; font: 500 14px/1.35 var(--mono); word-break: break-all; }
+  .box p { margin: 0; font-size: 12px; color: var(--ink-faint); }
+  .box .bar { height: 3px; border-radius: 3px; background: #1b2836; margin-top: 10px; overflow: hidden; }
+  .box .bar > i { display: block; height: 100%; background: var(--accent); }
+  .box .bar > i.low { background: var(--amber); }
+  .box .bar > i.none { background: var(--rose); }
+  .box .num { font: 600 20px/1.2 var(--mono); color: var(--ink); margin: 6px 0 2px; }
+  .box .num.muted { color: var(--ink-faint); font-size: 15px; font-weight: 500; }
+  .box .why { font-size: 11.5px; color: var(--ink-faint); margin-top: 8px; line-height: 1.45; }
+  .box .reset { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); margin-top: 8px; }
+
+  /* Roles & verifier (F8.3). Form fields are deliberately narrow: the only values an
+     operator may type here are ones the validator can check against a real CLI or meter. */
+  .erow { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 12px 14px; }
+  .erow h3 { margin: 0 0 2px; font: 500 14px/1.3 var(--mono); }
+  .erow .kind { font-size: 11px; color: var(--ink-faint); margin: 0 0 10px; }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); gap: 9px; }
+  .field label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .7px;
+                 color: var(--ink-faint); margin-bottom: 4px; }
+  .field input, .field select {
+    width: 100%; box-sizing: border-box; background: #0d141d; border: 1px solid var(--line);
+    color: var(--ink); font-family: var(--mono); font-size: 12.5px; padding: 6px 8px; border-radius: 7px;
+  }
+  .field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+  /* Antrean yang bisa dijawab. Pilihan adalah radio karena bentuknya memang satu keputusan;
+     kolom teks dibiarkan bebas karena jawaban manusia tidak selalu salah satu label kita. */
+  .field textarea {
+    width: 100%; box-sizing: border-box; background: #0d141d; border: 1px solid var(--line);
+    color: var(--ink); font-family: var(--mono); font-size: 12.5px; padding: 6px 8px;
+    border-radius: 7px; min-height: 54px; resize: vertical;
+  }
+  .field textarea:focus { outline: none; border-color: var(--accent); }
+  .opts { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 2px; }
+  .opts label { font-family: var(--mono); font-size: 12px; color: var(--ink); display: flex;
+                gap: 7px; align-items: baseline; }
+  .wins { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-top: 3px; }
+  .wins label { font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); display: flex; gap: 5px; align-items: center; }
+  .savebar { display: flex; gap: 10px; align-items: center; margin: 4px 0 2px; flex-wrap: wrap; }
+  .btn { background: #0d141d; border: 1px solid var(--line); color: var(--ink-dim); border-radius: 8px;
+         padding: 7px 14px; font: 500 12.5px var(--mono); cursor: pointer; }
+  .btn:hover { color: var(--ink); border-color: var(--ink-faint); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #06202a; font-weight: 600; }
+  .btn[disabled] { opacity: .45; cursor: default; }
+  .note { font-size: 12px; color: var(--ink-faint); }
+  .findings { display: flex; flex-direction: column; gap: 6px; }
+  .finding { border-left: 2px solid var(--rose); background: #0d141d; padding: 8px 11px; border-radius: 0 8px 8px 0;
+             font-size: 12.5px; color: var(--ink-dim); line-height: 1.5; }
+  .finding.warn { border-left-color: var(--amber); }
+  .finding b { font-family: var(--mono); font-weight: 500; color: var(--ink); display: block; font-size: 11.5px;
+               margin-bottom: 3px; word-break: break-all; }
+  .rtable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .rtable th { text-align: left; font-family: var(--serif); font-size: 10px; font-weight: 500;
+               text-transform: uppercase; letter-spacing: .7px;
+               color: var(--ink-faint); padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); }
+  .rtable td { padding: 7px 10px 7px 0; border-bottom: 1px solid #101a24; vertical-align: top; }
+  .rtable td.mono { font-family: var(--mono); font-size: 12px; }
+  .rtable td .why { display: block; font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
+
+  /* ---------- Dashboard: kokpit proyek (3 kolom) ----------
+     `.card` sebelumnya dibangun di delapan tempat di JavaScript dan tidak punya satu aturan CSS
+     pun — itu sebabnya tab ini terlihat "berantakan": setiap kartu adalah div transparan dengan
+     heading ukuran browser di atas latar gelap. Akar masalahnya warna dan ritme, bukan isinya. */
+  #dash, .dash { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+  .dash-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .dash-head { display: flex; align-items: baseline; gap: 8px; margin: 0; padding: 0 2px;
+               font: 700 10px/1 var(--serif); letter-spacing: 1.4px; text-transform: uppercase;
+               color: var(--ink-faint); }
+  .dash-head b { color: var(--ink-dim); font-weight: 700; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 13px 15px; min-width: 0;
+  }
+  .card:hover { border-color: #2b3d51; }
+  .card > h3 { margin: 0 0 2px; font: 500 13.5px/1.35 var(--serif); letter-spacing: .2px; }
+  .card > p { margin: 0; font-size: 12px; color: var(--ink-dim); line-height: 1.5; }
+  .card .kv { display: flex; justify-content: space-between; gap: 10px; font-size: 12px;
+              padding: 3px 0; border-bottom: 1px dashed #16212e; }
+  .card .kv:last-child { border-bottom: 0; }
+  .card .kv span { color: var(--ink-faint); }
+  .card .kv strong { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--ink);
+                     text-align: right; word-break: break-word; }
+  /* Sakelar satu kata, tiga keadaan. Tiga checkbox terpisah adalah tiga laporan tentang satu hal. */
+  .seg.seg-2 { grid-template-columns: repeat(2, 1fr); }
+  .stopbtn {
+    margin-top: 8px; width: 100%; padding: 7px 10px; border-radius: 8px; cursor: pointer;
+    border: 1px solid #4a2020; background: #1b1211; color: #c88a8a; font: inherit; font-size: 12px;
+  }
+  .stopbtn:hover { color: var(--red, #e0736b); background: #241615; }
+  .stopbtn[disabled] { opacity: .4; cursor: default; }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px;
+         background: #0c1218; border: 1px solid var(--line); border-radius: 10px; }
+  .seg button {
+    background: none; border: 0; border-radius: 7px; color: var(--ink-faint); cursor: pointer;
+    font: 600 11.5px/1 var(--mono); letter-spacing: .6px; padding: 8px 4px; text-transform: uppercase;
+  }
+  .seg button:hover { color: var(--ink); background: #131d28; }
+  .seg button.on { background: var(--panel-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+  .seg button.on[data-mode="SEMI"] { color: var(--amber); box-shadow: inset 0 0 0 1px #4a3a13; }
+  .seg button.on[data-mode="OFF"] { color: var(--ink-faint); box-shadow: inset 0 0 0 1px var(--line); }
+  .seg button.on[data-mode="ON"] { color: var(--accent); box-shadow: inset 0 0 0 1px #1d4b48; }
+  .seg button[disabled] { opacity: .4; cursor: default; }
+  .ledger { margin-top: 9px; font-size: 11px; color: var(--ink-faint); font-family: var(--mono); }
+  /* Header proyek: judul, subjek, dan pedoman — bagian "station" dari kalimat operator. */
+  .proj { border-left: 2px solid var(--accent); }
+  .proj .path { font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
+                word-break: break-all; margin-top: 3px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+  .guide {
+    font-family: var(--mono); font-size: 11px; color: var(--ink-dim); background: #0d141d;
+    border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; cursor: pointer;
+  }
+  .guide:hover { color: var(--ink); border-color: var(--ink-faint); }
+  .guide.on { color: var(--accent); border-color: #1d4b48; background: #10201f; }
+  .guide.can { color: var(--violet); border-color: #322a4d; }
+  /* Terkunci: tidak ada pointer, tidak ada hover — benda ini tidak bisa diklik, dan layar tidak
+     boleh berpura-pura bisa. */
+  .guide.locked { cursor: default; color: var(--violet); border-color: #322a4d; background: #10131f; }
+  .guide.locked:hover { color: var(--violet); border-color: #322a4d; }
+  .compose textarea { min-height: 74px; }
+  .reply { font-size: 11.5px; font-family: var(--mono); margin-top: 8px; color: var(--ink-faint);
+           word-break: break-word; white-space: pre-wrap; }
+  .reply.bad { color: var(--rose); }
+  .reply.good { color: var(--accent); }
+  /* Kartu keputusan: satu-satunya tempat halaman ini meminta sesuatu dari manusia.
+     Tidak ada nomor kolom di sini, dan itu disengaja — kolomnya dipindah pada 2026-10-08, dan
+     satu fakta posisi yang disimpan di dua tempat akan berhenti benar di salah satunya. */
+  .card.decision { border-left: 2px solid var(--amber); }
+  .card.span { grid-column: 1 / -1; }
+  .card.qrow { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; }
+  .card.qrow .t { font-size: 12.5px; color: var(--ink); min-width: 0; word-break: break-word; }
+  .card.qrow .who { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); white-space: nowrap; }
+  .card.decision .q { margin: 0 0 9px; font-size: 13.5px; line-height: 1.5; white-space: pre-wrap;
+                      word-break: break-word; }
+  .card.decision .why { font-size: 11.5px; color: var(--ink-faint); margin: 0 0 9px; line-height: 1.5; }
+  .card.answered { border-left: 2px solid var(--accent); opacity: .92; }
+  .fold { border: 1px solid var(--line); border-radius: 11px; background: #0d1319; }
+  .fold > summary { cursor: pointer; list-style: none; padding: 9px 13px; font-size: 11.5px;
+                    color: var(--ink-faint); font-family: var(--mono); letter-spacing: .3px; }
+  .fold > summary::-webkit-details-marker { display: none; }
+  .fold > summary:hover { color: var(--ink-dim); }
+  .fold[open] > summary { border-bottom: 1px solid var(--line); }
+  .fold .body { padding: 11px 13px; display: flex; flex-direction: column; gap: 11px; }
+  @media (max-width: 1180px) {
+    body { grid-template-columns: 200px 1fr; }
+    #dash { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 780px) {
+    body { grid-template-columns: 1fr; }
+    aside { position: static; height: auto; }
+    #dash { grid-template-columns: 1fr; }
+  }
+
+  .empty { color: var(--ink-faint); text-align: center; padding: 56px 0; font-size: 14px; }
+  footer { margin-top: 24px; padding-top: 13px; border-top: 1px solid var(--line);
+           color: var(--ink-faint); font-size: 12px; display: flex; justify-content: space-between; gap: 16px; }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">
+    <h1>Irsofka</h1>
+    <p>AI Station</p>
+  </div>
+  <div class="group">
+    <h2>Workspace</h2>
+    <button class="nav on" data-view="dashboard"><i>▦</i> Dashboard</button>
+  </div>
+  <div class="group">
+    <h2>Today</h2>
+    <button class="nav" data-view="feed"><i>≡</i> Activity feed</button>
+    <button class="nav" data-view="files"><i>▤</i> Artefacts</button>
+    <button class="nav" data-view="treasury"><i>¤</i> Treasury</button>
+  </div>
+  <div class="group">
+    <h2>Team</h2>
+    <button class="nav" data-view="roles"><i>◎</i> Roles &amp; verifier</button>
+    <button class="nav" data-view="byok"><i>⚿</i> Gemini BYOK</button>
+    <button class="nav soon" data-soon="models"><i>◈</i> Models &amp; VRAM<em>soon</em></button>
+  </div>
+  <div class="group">
+    <h2>System</h2>
+    <button class="nav soon" data-soon="engines"><i>⚙</i> Engines<em>soon</em></button>
+    <button class="nav soon" data-soon="backup"><i>↺</i> Backups<em>soon</em></button>
+    <a class="nav" href="/" style="text-decoration:none"><i>▸</i> Open console</a>
+  </div>
+</aside>
+
+<main>
+  <header>
+    <div class="crumb">AI Station / <b id="crumb">Activity feed</b></div>
+    <h2 class="title" id="title">What happened</h2>
+    <p class="sub" id="sub">Loading…</p>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="chip on" data-f="all">All</button>
+    <button class="chip" data-f="work">Did work</button>
+    <button class="chip" data-f="talk">Talk only</button>
+    <button class="chip" data-f="fail">Had failures</button>
+    <button class="chip" data-f="open">In progress</button>
+    <input id="q" type="search" placeholder="search commands and files…">
+  </nav>
+
+  <div id="feed"></div>
+
+  <footer>
+    <span>Derived from PostgreSQL. No number on this page was typed by an AI.</span>
+    <span id="stamp"></span>
+  </footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var filter = "all", query = "", view = "dashboard", data = { posts: [], totals: {} };
+
+  // Setiap view adalah halaman yang berbeda secara mental. Tanpa ini, reload atau deep link
+  // (#roles) melanjutkan posisi scroll view sebelumnya dan operator mendarat di tengah
+  // laporan tanpa tahu ada apa di atasnya.
+  if (window.history && "scrollRestoration" in window.history) {
+    window.history.scrollRestoration = "manual";
+  }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+  function clock(iso) { return iso ? String(iso).slice(11, 16) : ""; }
+  var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  // The feed holds the last 80 entries, which crosses days. Showing a bare clock made
+  // yesterday evening read like it had not happened yet.
+  function when(iso) {
+    var s = String(iso || "");
+    if (!s) return "";
+    var t = new Date();
+    var now = t.getFullYear() + "-" + String(t.getMonth() + 1).padStart(2, "0") +
+              "-" + String(t.getDate()).padStart(2, "0");
+    if (s.slice(0, 10) === now) return clock(s);
+    var mon = MONTHS[(parseInt(s.slice(5, 7), 10) || 1) - 1];
+    return (mon || s.slice(5, 7)) + " " + parseInt(s.slice(8, 10), 10) + " · " + clock(s);
+  }
+  function human(seconds) {
+    var s = Number(seconds) || 0;
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.round(s / 60) + "m";
+    return (s / 3600).toFixed(1) + "h";
+  }
+  function base(path) { return String(path).split("/").pop() || path; }
+
+  function passes(post) {
+    var worked = post.commands > 0 || post.tool_calls > 0;
+    if (filter === "work" && !worked) return false;
+    if (filter === "talk" && worked) return false;
+    if (filter === "fail" && !post.failed) return false;
+    if (filter === "open" && post.state !== "IN_PROGRESS") return false;
+    if (query) {
+      var hay = post.command + " " + (post.artifacts || []).map(function (a) { return a.path; }).join(" ");
+      if (hay.toLowerCase().indexOf(query) === -1) return false;
+    }
+    return true;
+  }
+
+  function renderStats() {
+    var t = data.totals || {};
+    var box = document.getElementById("stats");
+    box.textContent = "";
+    [["posts", t.posts, ""], ["commands", t.commands, ""], ["tool calls", t.tool_calls, ""],
+     ["artefacts", t.artifacts, "good"], ["failed", t.failed, t.failed ? "bad" : ""],
+     ["time on task", human(t.work_seconds), ""]].forEach(function (r) {
+      var card = el("div", "stat " + r[2]);
+      card.appendChild(el("span", null, r[0]));
+      card.appendChild(el("strong", null, r[1] === undefined ? "—" : r[1]));
+      box.appendChild(card);
+    });
+  }
+
+  function renderPost(post) {
+    var card = el("article", post.state === "IN_PROGRESS" ? "live" : (post.failed ? "fail" : ""));
+    var stamp = el("div", "when", when(post.opened_at));
+    stamp.appendChild(el("em", null, post.closed_at ? "→ " + when(post.closed_at) : "running"));
+    stamp.appendChild(el("em", null, human(post.duration_s)));
+    card.appendChild(stamp);
+
+    var body = el("div");
+    body.appendChild(el("p", "ask", post.command || "(no text recorded)"));
+
+    var row = el("div", "row");
+    row.appendChild(el("span", "tag state " + (post.state === "IN_PROGRESS" ? "open" : ""),
+                       post.state === "IN_PROGRESS" ? "in progress" : "done"));
+    row.appendChild(el("span", "tag", (post.steps || []).length + " commands"));
+    row.appendChild(el("span", "tag", post.tool_calls + " tool"));
+    if (post.failed) row.appendChild(el("span", "tag bad", post.failed + " failed"));
+    if (post.tab) row.appendChild(el("span", "tag", post.tab));
+    if (post.model) row.appendChild(el("span", "tag model", post.model));
+    if ((post.steps || []).length || post.outcome) {
+      row.appendChild(el("span", "hint", "click to open the evidence"));
+    }
+    body.appendChild(row);
+
+    var files = post.artifacts || [];
+    if (files.length) {
+      var box = el("div", "files");
+      files.forEach(function (f) {
+        var node = el("span", "file " + (f.kind === "media" ? "media" : ""), base(f.path));
+        node.title = f.path + "  (" + f.at + (f.edits > 1 ? "…" + f.last + ", " + f.edits + " edits" : "") + ")";
+        if (f.edits > 1) node.appendChild(el("i", null, " ×" + f.edits));
+        box.appendChild(node);
+      });
+      body.appendChild(box);
+    }
+
+    var detail = el("div", "detail");
+    if (post.outcome && post.outcome.text) {
+      detail.appendChild(el("h4", null, "What the AI said when it finished"));
+      var ans = el("div", "answer", post.outcome.text);
+      ans.appendChild(el("i", null, "recorded answer — the transcript holds the rest"));
+      detail.appendChild(ans);
+    }
+    if ((post.steps || []).length) {
+      detail.appendChild(el("h4", null, "Commands actually run"));
+      post.steps.slice(0, 14).forEach(function (s) {
+        var line = el("div", "step");
+        line.appendChild(el("b", null, s.at));
+        line.appendChild(document.createTextNode(s.cmd));
+        detail.appendChild(line);
+      });
+      if (post.steps.length > 14) {
+        detail.appendChild(el("div", "more", "… " + (post.steps.length - 14) + " more in this entry"));
+      }
+    }
+    body.appendChild(detail);
+    card.appendChild(body);
+
+    card.addEventListener("click", function (e) {
+      if (e.target.closest("a")) return;
+      card.classList.toggle("open");
+    });
+    return card;
+  }
+
+  function renderFiles() {
+    var seen = {}, list = [];
+    (data.posts || []).forEach(function (p) {
+      (p.artifacts || []).forEach(function (a) {
+        if (!seen[a.path]) { seen[a.path] = { path: a.path, edits: 0, kind: a.kind, last: a.at }; list.push(seen[a.path]); }
+        seen[a.path].edits += a.edits || 1;
+        if (a.last > seen[a.path].last) seen[a.path].last = a.last;
+      });
+    });
+    list.sort(function (a, b) { return b.edits - a.edits; });
+    if (query) list = list.filter(function (f) { return f.path.toLowerCase().indexOf(query) !== -1; });
+
+    var feed = document.getElementById("feed");
+    feed.textContent = "";
+    if (!list.length) { feed.appendChild(el("p", "empty", "No file was touched in this window.")); return; }
+    var grid = el("div", "grid");
+    var top = list[0].edits || 1;
+    list.slice(0, 60).forEach(function (f) {
+      var box = el("div", "box");
+      box.appendChild(el("h3", null, base(f.path)));
+      box.appendChild(el("p", null, f.edits + (f.edits > 1 ? " edits" : " edit") + " · last " + f.last));
+      box.appendChild(el("p", null, f.path.replace(/^\/home\/[^/]+/, "~")));
+      var bar = el("div", "bar"), fill = el("i");
+      fill.style.width = Math.max(6, Math.round(f.edits / top * 100)) + "%";
+      if (f.kind === "media") fill.style.background = "var(--amber)";
+      bar.appendChild(fill);
+      box.appendChild(bar);
+      grid.appendChild(box);
+    });
+    feed.appendChild(grid);
+  }
+
+  var tre = null, treBusy = false;
+
+  function pct(v) { return (Math.round(v * 1000) / 10).toFixed(1) + "%"; }
+
+  function stateTag(state) {
+    var cls = state === "REPORTED" ? "tag state" : (state === "UNSUPPORTED" ? "tag" : "tag bad");
+    return el("span", cls, state);
+  }
+
+  function head(text) {
+    var h = el("h4", null, text);
+    h.style.cssText = "margin:18px 0 9px;font-size:10.5px;text-transform:uppercase;" +
+                      "letter-spacing:1.1px;color:var(--ink-faint);font-weight:700";
+    return h;
+  }
+
+  /* Satu kartu per pembacaan meter. Baris yang tidak REPORTED justru paling penting:
+     kartu itu harus tetap muncul dan menyebut alasannya, karena menghilangkan barisnya
+     sama dengan membuat laporan terlihat bersih padahal angkanya tidak ada. */
+  function meterBox(r, kind, value, unit) {
+    var box = el("div", "box");
+    box.appendChild(el("h3", null, kind));
+    var row = el("div", "row");
+    row.appendChild(el("span", "tag", r.engine));
+    row.appendChild(stateTag(r.state));
+    box.appendChild(row);
+
+    var num = el("div", "num" + (r.state === "REPORTED" ? "" : " muted"), value);
+    box.appendChild(num);
+    if (unit) box.appendChild(el("p", null, unit));
+    if (r.reset_at) box.appendChild(el("p", "reset", "resets " + when(r.reset_at)));
+    if (r.detail) box.appendChild(el("p", "why", r.detail));
+    if (r.source) box.appendChild(el("p", "why", "source: " + r.source));
+    if (r.ts) box.appendChild(el("p", "why", "read " + clock(r.ts)));
+    return box;
+  }
+
+  function renderTreasury() {
+    var feed = document.getElementById("feed");
+    var quota = (tre.quota || []).filter(function (r) {
+      if (!query) return true;
+      return (r.engine + " " + r.scope + " " + r.limit_window).toLowerCase().indexOf(query) !== -1;
+    });
+    if (quota.length) {
+      feed.appendChild(head("Remaining quota — as the CLI reported it"));
+      var grid = el("div", "grid");
+      quota.forEach(function (r) {
+        var left = r.remaining_fraction;
+        /* Baris "probe/probe" bukan jendela kuota: itu catatan bahwa sebuah meter dicoba.
+           Menampilkannya sebagai "probe · probe" membuat laporan terlihat seperti ada
+           jendela bernama probe, padahal yang dilaporkan hanyalah ketidakmampuan baca. */
+        var kind = r.limit_window === "probe" ? "meter availability"
+                 : r.scope + (r.limit_window && r.limit_window !== "balance" ? " · " + r.limit_window : "");
+        var value, unit = null;
+        if (r.state !== "REPORTED") {
+          value = r.state === "UNSUPPORTED" ? "no meter on this engine" : "no reading";
+        } else if (left !== null && left !== undefined) {
+          value = pct(left) + " left";
+        } else if (r.used !== null && r.used !== undefined && r.total) {
+          /* Angka yang CLI cetak sendiri didahulukan di atas selisih yang dihitung halaman:
+             "451 / 1500" tetap benar bahkan kalau halaman ini salah menafsirkan satuannya. */
+          value = r.used + " / " + r.total; unit = "used of the allowance the meter printed";
+        } else if (r.remaining !== null && r.remaining !== undefined) {
+          value = r.remaining + " left"; unit = "balance in the meter's own unit";
+        } else {
+          value = "reported without a number";
+        }
+        grid.appendChild(meterBox(r, kind, value, unit));
+      });
+      feed.appendChild(grid);
+    }
+
+    var cons = tre.consumption || [];
+    if (cons.length) {
+      feed.appendChild(head("Consumed today — first reading vs last reading"));
+      var g2 = el("div", "grid");
+      cons.forEach(function (c) {
+        var kind = c.scope + (c.limit_window === "balance" ? "" : " · " + c.limit_window);
+        var value = c.state === "REPORTED"
+          ? ((c.consumed >= 0 ? "" : "−") + Math.abs(Math.round(c.consumed * 1e4) / 1e4))
+          : "not enough readings";
+        g2.appendChild(meterBox({ engine: c.engine, state: c.state, detail: c.detail,
+                                  source: c.source, reset_at: null, ts: c.to },
+                                kind, value, c.unit));
+      });
+      feed.appendChild(g2);
+    }
+
+    var cost = tre.ledger_cost || [];
+    if (cost.length) {
+      feed.appendChild(head("Daily cost — counted from the action log"));
+      var g3 = el("div", "grid");
+      cost.forEach(function (c) {
+        var value = c.state === "REPORTED" ? (c.credits + " credits")
+          : (c.state === "TOKENS_ONLY" ? "tokens only" : "unavailable");
+        g3.appendChild(meterBox({ engine: c.engine, state: c.state, detail: c.reason,
+                                  source: "action_log", reset_at: null, ts: null },
+                                "today", value, c.transactions + " transaction rows"));
+      });
+      feed.appendChild(g3);
+    }
+  }
+
+  function loadTreasury() {
+    if (treBusy) return;
+    treBusy = true;
+    fetch("/api/treasury", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (json) {
+        treBusy = false;
+        if (json.error) { tre = { error: json.error }; } else { tre = json; }
+        if (view === "treasury") render();
+      })
+      .catch(function () { treBusy = false; tre = { error: "daemon unreachable" }; if (view === "treasury") render(); });
+  }
+
+  function renderTreasuryView() {
+    document.getElementById("title").textContent = "What it costs";
+    document.getElementById("crumb").textContent = "Treasury";
+    document.getElementById("tabs").style.display = "none";
+    var box = document.getElementById("stats");
+    box.textContent = "";
+    var feed = document.getElementById("feed");
+    feed.textContent = "";
+
+    if (!tre) {
+      feed.appendChild(el("p", "empty", treBusy ? "reading the meters…" : "no reading yet"));
+      loadTreasury();
+      return;
+    }
+    if (tre.error) {
+      document.getElementById("sub").textContent = "the meters could not be read";
+      feed.appendChild(el("p", "empty", tre.error));
+      return;
+    }
+
+    [["quota rows", (tre.quota || []).length, ""],
+     ["engines with a meter", Object.keys(tre.registry || {}).length, ""],
+     ["meter refresh", human(tre.interval_s), ""],
+     ["day", tre.day, ""]].forEach(function (r) {
+      var card = el("div", "stat " + r[2]);
+      card.appendChild(el("span", null, r[0]));
+      card.appendChild(el("strong", null, r[1]));
+      box.appendChild(card);
+    });
+    document.getElementById("sub").textContent =
+      "every number below is a CLI reading or a count over the action log — " +
+      "a meter that has nothing to say is shown as UNAVAILABLE, never as zero";
+    renderTreasury();
+    if (!(tre.quota || []).length && !(tre.ledger_cost || []).length) {
+      feed.appendChild(el("p", "empty",
+        "no meter has written a reading yet: python3 tools/session_ingestor.py treasury --probe"));
+    }
+  }
+
+  var master = null, masterBusy = false, masterMsg = null, masterBlocked = null;
+
+  function loadMaster() {
+    if (masterBusy) return;
+    masterBusy = true;
+    fetch("/api/master", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (json) {
+        masterBusy = false;
+        master = json;
+        masterBlocked = null;
+        if (json.error) { masterMsg = { kind: "bad", text: json.error }; }
+        else if (!masterMsg) { masterMsg = { kind: "note", text: "read from config/engines.json and config/slots.yaml just now" }; }
+        if (view === "roles") render();
+      })
+      .catch(function () {
+        masterBusy = false;
+        master = { error: "daemon unreachable — is irsofka-ai-workstation running?" };
+        if (view === "roles") render();
+      });
+  }
+
+  function saveMaster() {
+    if (!master || !master.document) return;
+    masterBusy = true;
+    masterMsg = { kind: "wait", text: "validating against the CLI's own model list and the live meter…" };
+    render();
+    fetch("/api/master", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(master.document)
+    }).then(function (r) {
+      return r.json().then(function (j) { return { code: r.status, body: j }; });
+    }).then(function (res) {
+      masterBusy = false;
+      var b = res.body || {};
+      if (res.code === 200 && b.ok) {
+        masterMsg = { kind: "good", text: "saved " + (b.written || []).join(", ") +
+          " · previous copy kept as " + (b.backups || []).join(", ") };
+        masterBlocked = null;
+        loadMaster();
+      } else if (b.errors && b.errors.length) {
+        masterMsg = { kind: "bad", text: "refused — not one byte was written" };
+        masterBlocked = b;
+        render();
+      } else {
+        masterMsg = { kind: "bad", text: b.error || ("daemon answered " + res.code) };
+        render();
+      }
+    }).catch(function () {
+      masterBusy = false;
+      masterMsg = { kind: "bad", text: "save failed: daemon unreachable" };
+      render();
+    });
+  }
+
+  function field(labelText, node) {
+    var f = el("div", "field");
+    f.appendChild(el("label", null, labelText));
+    f.appendChild(node);
+    return f;
+  }
+
+  function textInput(value, onset, listId) {
+    var i = el("input");
+    i.type = "text";
+    i.value = value === undefined || value === null ? "" : String(value);
+    if (listId) i.setAttribute("list", listId);
+    i.addEventListener("input", function () { onset(i.value); });
+    return i;
+  }
+
+  function numberInput(value, onset, step) {
+    var i = el("input");
+    i.type = "number";
+    i.step = step || "1";
+    i.value = value === undefined || value === null ? "" : String(value);
+    i.addEventListener("input", function () {
+      onset(i.value === "" ? null : Number(i.value));
+    });
+    return i;
+  }
+
+  function windowPicker(gate, available) {
+    var box = el("div", "wins");
+    available.forEach(function (w) {
+      var lab = el("label");
+      var cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = (gate.windows || []).indexOf(w) !== -1;
+      cb.addEventListener("change", function () {
+        var cur = gate.windows || [];
+        var at = cur.indexOf(w);
+        if (cb.checked && at === -1) { cur.push(w); }
+        if (!cb.checked && at !== -1) { cur.splice(at, 1); }
+        gate.windows = cur;
+      });
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(w));
+      box.appendChild(lab);
+    });
+    if (!available.length) {
+      box.appendChild(el("span", "note", "the meter reported no windows it could read"));
+    }
+    return box;
+  }
+
+  function engineEditor(key, spec, evidence) {
+    var row = el("div", "erow");
+    row.appendChild(el("h3", null, key));
+    row.appendChild(el("p", "kind", "kind " + (spec.kind || "?") +
+      (spec.binary ? " · binary " + spec.binary : "") +
+      (spec.tab ? " · tab " + spec.tab : "") +
+      (spec.template ? " · spawns a fresh process" : " · types into a live pane")));
+
+    var agy = spec.binary === "agy" || (spec.kind === "pane" && spec.tab === "antigravity");
+    var qoder = spec.binary === "qoder" || (spec.kind === "pane" && spec.tab === "qoder");
+    var list = agy ? (evidence.model_lists || {}).agy
+             : qoder ? (evidence.model_lists || {}).qoder
+             : (spec.kind === "ollama" ? evidence.ollama_pulled : null);
+    var listId = "dl-" + (agy ? "agy" : qoder ? "qoder" : "ollama");
+    var fields = el("div", "fields");
+
+    if (!document.getElementById(listId)) {
+      var dl = el("datalist");
+      dl.id = listId;
+      (list || []).forEach(function (m) {
+        var o = el("option");
+        o.value = m;
+        dl.appendChild(o);
+      });
+      document.body.appendChild(dl);
+    }
+    fields.appendChild(field("model", textInput(spec.model, function (v) { spec.model = v; }, listId)));
+    fields.appendChild(field("role", textInput(spec.role, function (v) { spec.role = v; })));
+    if (spec.kind === "ollama") {
+      fields.appendChild(field("min free MiB", numberInput(spec.min_free_mib, function (v) {
+        if (v === null || isNaN(v)) { delete spec.min_free_mib; } else { spec.min_free_mib = v; }
+      })));
+    }
+    if (spec.quota_gate || agy) {
+      if (!spec.quota_gate) {
+        /* Menambah gate adalah satu-satunya cara mesin ini boleh diberangkatkan;
+           validator menolak registry agy tanpa gate, jadi jangan buat operator
+           mengetik JSON mentah untuk memenuhinya. */
+        spec.quota_gate = { engine: "antigravity", scope: "Claude and GPT models",
+                            windows: ["5h", "weekly"] };
+      }
+      var gate = spec.quota_gate;
+      fields.appendChild(field("quota scope (meter)", textInput(gate.scope, function (v) {
+        gate.scope = v;
+      })));
+      fields.appendChild(field("minimum fraction left", numberInput(gate.min_fraction || 0,
+        function (v) {
+          if (v === null || isNaN(v)) { delete gate.min_fraction; } else { gate.min_fraction = v; }
+        }, "0.01")));
+      var pairs = evidence.meter_pairs || {};
+      var available = pairs[(gate.engine || "antigravity") + "/" + (gate.scope || "")] || [];
+      if (!available.length) {
+        var union = {};
+        Object.keys(pairs).forEach(function (k) { pairs[k].forEach(function (w) { union[w] = 1; }); });
+        available = Object.keys(union).sort();
+      }
+      var wf = field("windows the meter reports", windowPicker(gate, available));
+      fields.appendChild(wf);
+    }
+    row.appendChild(fields);
+    if (spec.note) row.appendChild(el("p", "note", spec.note));
+    return row;
+  }
+
+  function findings(list, cls, emptyText) {
+    if (!list || !list.length) {
+      return el("p", "note", emptyText);
+    }
+    var box = el("div", "findings");
+    list.forEach(function (f) {
+      var n = el("div", "finding" + (cls || ""));
+      n.appendChild(el("b", null, f.path));
+      n.appendChild(document.createTextNode(f.message));
+      box.appendChild(n);
+    });
+    return box;
+  }
+
+  /* Human Decide — muka dari tools/work_order.py.
+   *
+   * Bagiannya: Python memegang kosakata (siapa yang menjawab, apa statusnya, apakah baris ini
+   * boleh ditimpa), Rust memegang HTTP, dan halaman ini hanya mengirim bentuk yang diminta dan
+   * menampilkan balasannya apa adanya. Angka pemutus, batas lease dan isi antrean datang dari
+   * /api/autopilot tanpa satu pun dihitung di JavaScript.
+   *
+   * Halaman ini dulu tidak punya tombol, dan itu salah baca atas kontrak §12: kokpit/station
+   * membagi *perintah* dan *catatan*, tapi antrean yang tidak bisa dijawab dari tempat ia dilihat
+   * bukan catatan — ia kemacetan yang rapi. Karena itu di sini ada dua hal: sakelar, dan kolom
+   * jawaban. Yang tetap tidak ada di sini adalah tombol "kerjakan apa pun atas namaku": menaiki
+   * tangga tangan (`arm`) hanya bisa dari terminal manusia.
+   */
+  var ap = null, apBusy = false, apError = null;
+  var drafts = {};      /* draf jawaban per decision, supaya render ulang tidak menghapus ketikan */
+
+  function postJson(url, body) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.text().then(function (t) {
+        var json;
+        try { json = JSON.parse(t); } catch (e) { json = { raw: t }; }
+        return { status: r.status, json: json };
+      });
+    });
+  }
+
+  /* Balasan daemon dicetak seperti adanya. Yang ditulis ulang di sini bukan laporan:
+     "dikirim" dan "tercatat, pengiriman ditunda" adalah dua keadaan berbeda, dan menyatukannya
+     menjadi satu pesan sukses adalah cara halaman ini berbohong. */
+  function showReply(box, res) {
+    box.textContent = "";
+    /* Judulnya diturunkan dari field yang daemon kirim, bukan dikarang di sini: `ok`/`why`/`refused`
+       adalah kata work_order sendiri. Raw payload tetap dicetak penuh di bawahnya. Yang hilang
+       hanyalah keharusan membaca `null` untuk tahu perintahnya ditolak — seorang operator tidak
+       perlu tahu bentuk JSON sebuah tabel untuk membaca penolakan atasannya sendiri. */
+    var j = res.json || {};
+    var head = el("div");
+    head.style.fontWeight = "600";
+    head.textContent = (j.ok === true ? "recorded"
+                      : (j.ok === false ? "refused" : "no ok field"))
+      + " · " + (j.why || j.refused || j.error || "(no reason given)");
+    box.appendChild(head);
+    var pre = el("pre");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = "HTTP " + res.status + "\n" + JSON.stringify(res.json, null, 1);
+    box.appendChild(pre);
+  }
+
+  /* Satu bidang angka berlabel. Rentangnya dijaga di sini HANYA supaya nilai yang dikirim tidak
+     kosong/non-dasar; kerja keras validasi bentuk ada di Rust dan keputusannya ada di Python. */
+  function numField(labelText, value, min, max) {
+    var box = el("div", "field");
+    var input = el("input");
+    input.type = "number";
+    input.value = value;
+    input.min = min;
+    input.max = max;
+    var lab = el("label", null, labelText);
+    box.appendChild(lab);
+    box.appendChild(input);
+    return { box: box, input: input };
+  }
+
+  function loadAutopilot() {
+    if (apBusy) return;
+    apBusy = true;
+    fetch("/api/autopilot", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (json) {
+        apBusy = false;
+        ap = json;
+        apError = null;
+        if (view === "decide" || view === "dashboard") render();
+      })
+      .catch(function () {
+        apBusy = false;
+        /* Yang gagal adalah SATU pembacaan, bukan seluruh isi halaman. Versi lama menimpa `ap`
+           dengan objek error, jadi renderDashboard menghapus feed dan menyisakan satu kalimat —
+           Command center "ngeblank tiba-tiba" setiap kali daemon sedang sibuk atau satu respons
+           bukan JSON. Sekarang kegagalan dicatat terpisah dan data terakhir yang masih hidup tetap
+           dipakai: halaman boleh menyebut dirinya basi, tapi tidak boleh hilang. */
+        apError = "daemon unreachable — is irsofka-ai-workstation running? "
+          + "yang ditampilkan di bawah adalah pembacaan terakhir yang berhasil.";
+        if (view === "decide" || view === "dashboard") render();
+      });
+  }
+
+  function timeLeft(epoch) {
+    if (!epoch) return "no window set";
+    var sec = Number(epoch) - Math.floor(Date.now() / 1000);
+    if (sec <= 0) return "expired " + Math.floor(-sec / 60) + "m ago";
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    return (h ? h + "h " : "") + m + "m left";
+  }
+
+  function listOrNull(parent, items, make) {
+    if (!items || !items.length) {
+      parent.appendChild(el("p", "note", "empty — which is the normal state of this queue"));
+      return;
+    }
+    items.forEach(function (it) { parent.appendChild(make(it)); });
+  }
+
+  /* ---------- Dashboard: kokpit proyek (F10.10) ----------
+     Tiga kolom, satu layar, dan satu aturan yang dipegang seluruh isinya: halaman ini tidak
+     menghitung apa pun. Angka pemutus, jendela ON, dan antrean dibaca dari /api/autopilot apa
+     adanya — handler-nya sendiri cuma meneruskan byte milik work_order.py. Sebuah tombol yang
+     keputusannya dihitung di JavaScript adalah salinan kedua dari aturan itu, dan dua salinan
+     akan berbeda (§12.3). */
+  function dashCard(title, sub) {
+    var c = el("div", "card");
+    if (title) c.appendChild(el("h3", null, title));
+    if (sub) c.appendChild(el("p", null, sub));
+    return c;
+  }
+
+  function kvRows(card, pairs) {
+    pairs.forEach(function (p) {
+      var row = el("div", "kv");
+      row.appendChild(el("span", null, p[0]));
+      row.appendChild(el("strong", null, p[1] === null || p[1] === undefined ? "—" : p[1]));
+      card.appendChild(row);
+    });
+    return card;
+  }
+
+  function fold(title, build) {
+    var f = el("details", "fold");
+    var s = el("summary", null, title);
+    f.appendChild(s);
+    var body = el("div", "body");
+    build(body);
+    f.appendChild(body);
+    return f;
+  }
+
+  function switchCard(host) {
+    var a = ap.autopilot || {};
+    var mode = ((a.mode || "").toUpperCase()) || "—";
+    // Dua posisi, bukan tiga. OFF dibuang dari kosakata mesin atas perintah operator ("OFF dibuang
+    // saja, hanya SEMI dan FULL AUTO"), dan halaman ini tidak menyimpan salinan kosakata itu
+    // sendiri — kata yang berlaku ditetapkan `work_order.MODES`, dan penolakan datang dari sana
+    // dalam field `refused` yang ditampilkan apa adanya di bawah.
+    // Rem tidak hilang: ia tombol "berhenti", yang menulis kata berhenti ke jalur yang sama dan
+    // tidak butuh persetujuan engine mana pun (invarian 6).
+    var card = dashCard("Autopilot", "Siapa yang memegang mesin, dan jawabannya sekarang satu dari "
+      + "tiga kata yang tersimpan di kolom yang sama. SEMI = otomatis dengan kamu di meja: yang "
+      + "dikerjakan hanya perintah yang kamu tulis sendiri. OFF = tidak ada yang bergerak; ini keadaan, "
+      + "bukan sisa mode. FULL AUTO = mesin ini milik engine, termasuk antrean ROADMAP.");
+    var seg = el("div", "seg");
+    /* Tiga posisi, bukan dua-plus-sebuah-efek-samping. Versi sebelumnya membuang OFF atas perintah
+       operator 2026-10-08, dan `berhenti` hanya menulis jendela ke masa lalu sambil MEMBIARKAN mode
+       seperti adanya. Hasilnya terukur 2026-10-09: orang menekan berhenti, kolom mode masih berisi
+       "SEMI", dan halaman ini menulis `tercatat: SEMI` di atas mesin yang sudah mati. Operator
+       membalik perintahnya sendiri pagi itu — "buat 3 panel saja (SEMI) (OFF) (FULL AUTO) agar tidak
+       ambigu, jadi jelas OFF ya off" — dan yang menahan perubahan ini adalah `work_order.MODES`,
+       bukan daftar yang disalin ke halaman ini. */
+    [["SEMI", "SEMI"], ["OFF", "OFF"], ["ON", "FULL AUTO"]].forEach(function (pair) {
+      var b = el("button", pair[0] === mode ? "on" : null, pair[1]);
+      b.dataset.mode = pair[0];
+      b.disabled = !!apBusySend;
+      b.addEventListener("click", function () { dashSwitch(pair[0], b); });
+      seg.appendChild(b);
+    });
+    card.appendChild(seg);
+    /* Tombol berhenti TETAP ada. Empat jalan mati yang tidak butuh AI adalah aturan §6, dan sebuah
+       alias yang menulis OFF tidak menambah kata keempat — ia menulis keadaan yang sama dengan yang
+       ditampilkan panel di atasnya. */
+    var stop = el("button", "stopbtn", "berhenti");
+    stop.disabled = !!apBusySend;
+    stop.title = "Menurunkan tangan dan menutup jendela. Tidak butuh TTY, tidak butuh AI.";
+    stop.addEventListener("click", function () { dashSwitch("off", stop); });
+    card.appendChild(stop);
+    var parts = ["tercatat: " + mode, "oleh " + (a.changed_by || "—"),
+      "tangan: " + ((ap.drain || {}).level || "—")];
+    if (a.until_epoch) { parts.push("jendela " + timeLeft(a.until_epoch)); }
+    if (a.off_reason) { parts.push("alasan berhenti: " + a.off_reason); }
+    card.appendChild(el("div", "ledger", parts.join(" · ")));
+    var box = el("div", "reply");
+    box.id = "switch-reply";
+    card.appendChild(box);
+    if (ap.off_paths) {
+      card.appendChild(fold("jalan mati yang tidak butuh AI", function (host2) {
+        (ap.off_paths || []).forEach(function (p) { host2.appendChild(el("div", "step", "· " + p)); });
+      }));
+    }
+    host.appendChild(card);
+  }
+
+  var apBusySend = false;
+  /* Dinamai bukan `sendSwitch`: renderDecideView punya fungsi lokal dengan nama itu, dan dua
+     pengirim sakelar dengan satu nama adalah cara membuat yang mana yang berjalan tergantung
+     pada siapa mendeklarasikan terakhir. */
+  function dashSwitch(mode, btn) {
+    var box = document.getElementById("switch-reply");
+    if (box) { box.textContent = "mengirim " + mode + "…"; box.className = "reply"; }
+    apBusySend = true;
+    var body = { mode: mode.toLowerCase(), by: "operator-gui" };
+    if (mode === "SEMI") body.reason = "SEMI dari Dashboard — operator mengawasi";
+    postJson("/api/autopilot", body).then(function (res) {
+      apBusySend = false;
+      if (!box) { render(); return; }
+      showReply(box, res);
+      // HTTP 200 dengan `refused` di dalamnya BUKAN keberhasilan. Rust meneruskan apa yang
+      // dikatakan work_order apa adanya, dan halaman ini membacanya sebagai penolakan — kalau yang
+      // diperiksa hanya status, tombol yang ditolak kosakata akan menyala hijau dan orang akan
+      // mengira mesinnya sudah berpindah mode.
+      var j = res.json || {};
+      var refused = !!j.refused || !!j.error || !!(j.result && j.result.refused);
+      box.className = "reply " + ((res.status === 200 && !refused) ? "good" : "bad");
+      loadAutopilot();
+    }).catch(function () { apBusySend = false; if (box) { box.textContent = "gagal"; box.className = "reply bad"; } });
+  }
+
+  function summaryCard(host) {
+    var n = ap.night || {}, d = ap.drain || {}, a = ap.autopilot || {}, w = ap.workspace || {};
+    var card = dashCard("Ringkasan", "Semuanya turunan dari PostgreSQL — tidak ada satu angka pun yang halaman ini hitung.");
+    kvRows(card, [
+      ["mode", a.mode],
+      ["tangan (level)", d.level + (d.allows_dispatch ? " · dispatch" : "") + (d.allows_resume ? " · resume" : "")],
+      ["item selesai di jendela", a.items_done],
+      ["kegagalan beruntun", n.failures_run + " (tanpa satu pun keberhasilan, dalam " + Math.round((n.lookback_seconds || 0) / 3600) + " jam terakhir)"],
+      ["working tree", n.tree_dirty === true ? "kotor — klaim tertutup" : (n.tree_dirty === false ? "bersih" : "UNKNOWN")],
+      ["antrean perintahmu", w.operator_pending + " menunggu"],
+      ["engine yang memegang klaim", (w.engines_with_a_claim || []).join(", ") || "tidak ada"],
+      ["gerbang malam", n.ok ? "terbuka" : "tertutup"]
+    ]);
+    if (!n.ok && (n.why || []).length) {
+      var why = el("p", null);
+      why.style.marginTop = "9px";
+      why.style.color = "var(--amber)";
+      why.textContent = "kenapa tertutup: " + n.why.join(" · ");
+      card.appendChild(why);
+    }
+    if (!d.readable) {
+      card.appendChild(el("p", "note", "level tidak terbaca — UNKNOWN, dan UNKNOWN tidak pernah berarti boleh bergerak."));
+    }
+    host.appendChild(card);
+  }
+
+  function postWork(body, box, done) {
+    if (box) { box.textContent = "mengirim…"; box.className = "reply"; }
+    postJson("/api/work", body).then(function (res) {
+      if (box) {
+        showReply(box, res);
+        box.className = "reply " + (res.json && res.json.ok ? "good" : "bad");
+      }
+      if (done) { done(res); }
+      loadAutopilot();
+    }).catch(function () {
+      if (box) { box.textContent = "jalur kirim gagal — daemon tidak menjawab"; box.className = "reply bad"; }
+    });
+  }
+
+  function projectCard(host) {
+    var w = ap.workspace || {};
+    var card = dashCard("Proyek yang sedang dibuka", "Station adalah kokpit per proyek; konsol "
+      + "Workstation tetap global. Fokus dibaca dari symlink brain/workspaces — tabel registry "
+      + "tidak pernah mengklaimnya.");
+    card.classList.add("proj");
+    if (w.focus_readable) {
+      card.appendChild(el("div", "path", w.focus));
+    } else {
+      card.appendChild(el("p", null, "fokus tidak terbaca — symlink current_project tidak bisa dibaca, jadi tidak ada yang dipilihkan."));
+    }
+    var list = w.workspaces || [];
+    if (!list.length) {
+      card.appendChild(el("p", null, "belum ada proyek terdaftar — daftarkan satu di bawah ini."));
+    } else {
+      var rows = el("div");
+      list.forEach(function (x) {
+        var r = el("div", "kv");
+        var left = el("span", null, x.display_name + (x.is_focus ? " · fokus" : ""));
+        r.appendChild(left);
+        var btn = el("button", "btn", x.is_focus ? "sedang aktif" : "Fokuskan");
+        btn.disabled = !!x.is_focus;
+        btn.addEventListener("click", function () { postWork({ action: "focus", workspace: String(x.id) }, out); });
+        r.appendChild(btn);
+        rows.appendChild(r);
+      });
+      card.appendChild(rows);
+    }
+    var name = el("input"); name.placeholder = "nama proyek baru";
+    var path = el("input"); path.placeholder = "/path/ke/proyek";
+    name.style.width = "100%"; path.style.width = "100%";
+    var mk = el("div", "fields");
+    [name, path].forEach(function (i) { var f = el("div", "field"); f.appendChild(i); mk.appendChild(f); });
+    card.appendChild(mk);
+    var out = el("div", "reply");
+    var bar = el("div", "savebar");
+    var mkBtn = el("button", "btn", "Daftarkan proyek");
+    mkBtn.addEventListener("click", function () {
+      postWork({ action: "create", name: name.value, path: path.value }, out);
+    });
+    bar.appendChild(mkBtn);
+    card.appendChild(bar);
+    card.appendChild(out);
+    host.appendChild(card);
+  }
+
+  function guidesCard(host) {
+    var w = ap.workspace || {};
+    /* TERKUNCI. Operator mengunci daftar ini 2026-10-08 11:05: kontrak Ai-Workstation tidak boleh
+       diganggu gugat dari layar yang iaikatinya. Karena itu tidak ada kotak centang dan tidak ada
+       tombol simpan di sini — sebuah kontrol yang bisa mematikan AGENTS.md adalah tombol
+       "jadilah tidak disiplin" yang kebetulan disediakan, dan §12.3 melarang kontrol yang
+       menghitung kebijakannya sendiri. Yang dirender hanyalah apa yang dikembalikan Python. */
+    var card = dashCard("Pedoman (handler) — terkunci",
+      "MD yang mengikat setiap perintah, sama di semua proyek. Tidak bisa dipilih, disimpan, "
+      + "atau dimatikan dari halaman ini.");
+    var bound = w.guidelines_binding || [];
+    if (!bound.length) {
+      card.appendChild(el("p", null, "daftar terkunci tidak terbaca — dilaporkan kosong, tidak ditebak."));
+    } else {
+      var chips = el("div", "chips");
+      bound.forEach(function (g) {
+        var c = el("span", "guide can locked", "🔒 " + g.path);
+        c.title = g.abs + " — " + g.size + " byte";
+        chips.appendChild(c);
+      });
+      card.appendChild(chips);
+      var kb = bound.reduce(function (n, g) { return n + (g.size || 0); }, 0);
+      card.appendChild(el("div", "ledger",
+        "didefinisikan di tools/work_order.py · LOCKED_GUIDES · " + bound.length + " berkas, "
+        + Math.round(kb / 1024) + " KB di disk"));
+    }
+    host.appendChild(card);
+  }
+
+  function composeCard(host) {
+    var w = ap.workspace || {};
+    var card = dashCard("Generate perintah", "Tulis satu perintah. Ia masuk ke PostgreSQL dan "
+      + "menunggu di antrean yang sama dengan pekerjaan roadmap — tidak ada yang diketik ke CLI "
+      + "dari halaman ini.");
+    card.classList.add("compose");
+    var ta = el("textarea");
+    ta.placeholder = "contoh: rapikan UI Dashboard lalu screenshot untuk verifikasi visual";
+    ta.value = drafts.cmd || "";
+    ta.addEventListener("input", function () { drafts.cmd = ta.value; });
+    card.appendChild(ta);
+    var eng = el("select");
+    (w.known_engines || []).forEach(function (e) { eng.appendChild(el("option", null, e)); });
+    /* Pilihan mesin hidup di `drafts`, bukan di DOM. Poll 10 detik membangun ulang elemen ini dari
+       nol, dan <select> yang dibangun ulang tanpa nilai yang diingat selalu jatuh ke baris pertama
+       — yang berarti antigravity. `change` adalah satu-satunya tempat yang tahu apa yang operator
+       pilih, jadi di situlah pilihan itu ditahan, sama seperti `input` menahan isi textarea. */
+    eng.addEventListener("change", function () { drafts.engine = eng.value; });
+    if (drafts.engine && (w.known_engines || []).indexOf(drafts.engine) >= 0) {
+      eng.value = drafts.engine;
+    } else {
+      drafts.engine = eng.value;
+    }
+    var feng = el("div", "field");
+    feng.appendChild(el("label", null, "mesin tujuan"));
+    feng.appendChild(eng);
+    var gate = el("input");
+    gate.placeholder = "opsional: perintah gerbang penerimaan";
+    var fgate = el("div", "field");
+    fgate.appendChild(el("label", null, "gerbang"));
+    fgate.appendChild(gate);
+    var mk = el("div", "fields");
+    mk.appendChild(feng); mk.appendChild(fgate);
+    card.appendChild(mk);
+    var out = el("div", "reply");
+    var bar = el("div", "savebar");
+    var qBtn = el("button", "btn primary", "Kirim ke SQL");
+    qBtn.addEventListener("click", function () {
+      if (!ta.value.trim()) { out.textContent = "perintah kosong ditolak"; out.className = "reply bad"; return; }
+      postWork({ action: "queue", title: ta.value, engine: eng.value,
+                 gate: gate.value, ws: w.focus || "" }, out);
+    });
+    bar.appendChild(qBtn);
+    bar.appendChild(el("span", "note", "kalau engine-mu diam, backend yang memanggil"));
+    card.appendChild(bar);
+    card.appendChild(out);
+    host.appendChild(card);
+  }
+
+  function queueCard(host) {
+    var w = ap.workspace || {};
+    var held = w.operator_held || [];
+    var card = dashCard("Antrean perintahmu", (w.operator_pending || 0) + " menunggu, "
+      + (w.operator_working || []).length + " sedang dikerjakan."
+      + (held.length ? " · " + held.length + " ditahan cooldown" : ""));
+    listOrNull(card, w.operator_queue, function (q) {
+      var r = el("div", "card qrow");
+      r.appendChild(el("span", "t", "#" + q.id + " · " + (q.title || "").slice(0, 90)));
+      r.appendChild(el("span", "who", (q.cli_engine || "?") + (q.ws_path ? " · " + q.ws_path.split("/").pop() : " · ~/.ai-station")));
+      /* Alasan penolakan ditampilkan apa adanya dari kolom yang sama yang dibaca mesin. Yang
+         berubah di sini hanya tempatnya: tidak perlu lagi membuka console untuk tahu kenapa
+         perintah sendiri belum sampai. */
+      if (q.escalation_reason) {
+        r.appendChild(el("span", "note", "not delivered: " + q.escalation_reason));
+      }
+      return r;
+    });
+    /* Baris yang sedang cooldown dulu tidak muncul di mana pun, tepat pada detik sesudah
+       perintah orang ditolak. "Hilang" adalah keadaan yang tidak boleh dilaporkan oleh sebuah
+       ledger, jadi ia dinamai dan dihitung mundur. */
+    if (held.length) {
+      card.appendChild(el("div", "ledger", "held until the retry window opens again"));
+      held.forEach(function (q) {
+        var r = el("div", "card qrow");
+        r.appendChild(el("span", "t", "#" + q.id + " · " + (q.title || "").slice(0, 90)));
+        r.appendChild(el("span", "who", (q.cli_engine || "?") + " · retry in " + timeLeft(q.due_epoch)));
+        r.appendChild(el("span", "note", "not delivered: " + (q.reason || "no reason recorded")));
+        card.appendChild(r);
+      });
+    }
+    (w.operator_working || []).forEach(function (q) {
+      var r = el("div", "card qrow");
+      r.appendChild(el("span", "t", "#" + q.id + " · " + (q.title || "").slice(0, 90)));
+      r.appendChild(el("span", "who", "dikerjakan " + (q.claimed_by || "?")));
+      card.appendChild(r);
+    });
+    host.appendChild(card);
+  }
+
+  function renderDashboard() {
+    /* Poll 10 detik tidak boleh merebut apa yang sedang diketik. `select` ikut dijaga karena
+       composer membangun ulang <select> dari nol setiap render: tanpa ini, memilih mesin tujuan
+       lalu membiarkan halaman diam sepuluh detik sudah cukup untuk memindahkan pilihan ke
+       baris pertama known_engines — dan baris pertama itu adalah antigravity. */
+    if (document.querySelector("#feed textarea:focus, #feed input:focus, #feed select:focus")) { return; }
+    if (!ap) { return; }
+    /* Satu pembacaan yang gagal tidak boleh menghapus halaman. Yang boleh menghapusnya hanyalah
+       ketiadaan data sama sekali — itu keadaan "belum pernah terbaca", bukan "tadi terbaca lalu
+       daemon sedang sibuk". Sebelum ini, satu catch membuat seluruh Command center berganti menjadi
+       satu kalimat dan data baik sebelumnya ikut dibuang, jadi tidak ada yang tersisa untuk
+       ditampilkan sampai poll berikutnya kebetulan berhasil. */
+    var hasData = !!(ap.workspace || ap.autopilot);
+    var errText = apError || ap.error;
+    if (errText && !hasData) {
+      var f0 = document.getElementById("feed");
+      f0.textContent = "";
+      f0.appendChild(el("p", "empty", errText));
+      return;
+    }
+    var feed = document.getElementById("feed");
+    feed.textContent = "";
+    if (errText && hasData) {
+      var stale = el("p", "note");
+      stale.style.color = "var(--accent-amber)";
+      stale.textContent = errText;
+      feed.appendChild(stale);
+    }
+    var grid = el("div", "dash");
+    grid.id = "dash";
+    feed.appendChild(grid);
+
+    var c1 = el("div", "dash-col"), c2 = el("div", "dash-col"), c3 = el("div", "dash-col");
+    /* Urutan kolom adalah urutan kerja, bukan urutan kode. Operator membalik ketiganya pada
+       2026-10-08: yang paling sering dipakai — proyek, pedoman, dan tempat menulis perintah —
+       sekarang berdiri paling kiri tempat mata mulai, antrean keputusan di tengah, dan Ringkasan
+       plus sakelar Autopilot pindah ke kanan karena "summary autopilot ini jarang di klik".
+       Yang tidak berubah adalah ISI tiap kolom: tidak ada kartu yang dipisah dari kelompoknya atau
+       diganti pembangunnya. Perintahnya adalah permutasi tiga kelompok, dan `bin/check_dash_order.sh`
+       menahan keadaan itu dengan menjalankan fungsi ini, bukan dengan mencari string di halaman. */
+    projectCard(c1);
+    guidesCard(c1);
+    composeCard(c1);
+    queueCard(c1);
+    decisionsCards(c2);
+    switchCard(c3);
+    summaryCard(c3);
+    c3.appendChild(diagnosticFold());
+    grid.appendChild(c1); grid.appendChild(c2); grid.appendChild(c3);
+  }
+
+  function diagnosticFold() {
+    return fold("diagnostik (riwayat, kandidat, tawaran berikutnya)", function (host) {
+      var a = ap.autopilot || {};
+      var rec = dashCard("Sakelar sebagaimana tercatat");
+      kvRows(rec, [["changed_by", a.changed_by], ["on_epoch", a.on_epoch], ["until_epoch", a.until_epoch],
+                   ["item_budget", a.item_budget], ["items_done tersimpan", a.items_done_stored],
+                   ["items_done diturunkan", a.items_done], ["level_until", a.level_until]]);
+      host.appendChild(rec);
+      var st = el("div", "card");
+      st.appendChild(el("h3", null, "Kandidat yang macet"));
+      listOrNull(st, ap.stalled, function (r) { return el("div", "step", "#" + r.id + " " + (r.title || "").slice(0, 70) + " · " + (r.state || "")); });
+      host.appendChild(st);
+      var nx = el("div", "card");
+      nx.appendChild(el("h3", null, "Tawaran berikutnya"));
+      nx.appendChild(el("p", null, ap.next ? "#" + ap.next.id + " · " + ap.next.title : "antrean kosong"));
+      host.appendChild(nx);
+      var hq = el("div", "card");
+      hq.appendChild(el("h3", null, "Antrean HUMAN"));
+      listOrNull(hq, ap.human_queue, function (r) { return el("div", "step", "#" + r.id + " " + (r.title || "").slice(0, 70)); });
+      host.appendChild(hq);
+    });
+  }
+
+  function decisionsCards(host) {
+    var open = ap.decisions_open || [];
+    host.appendChild(el("h3", "dash-head", "Human Decide · " + open.length + " menunggu"));
+    if (!open.length) {
+      var quiet = dashCard("Tidak ada yang menunggu kamu", "Kosong adalah keadaan normal antrean ini. "
+        + "Kalau tab ini mulai penuh, yang salah adalah ambangnya, bukan engine-nya.");
+      host.appendChild(quiet);
+    }
+    open.forEach(function (d) { host.appendChild(decisionCard(d)); });
+    var done = ap.decisions_answered || [];
+    if (done.length) {
+      host.appendChild(fold("sudah dijawab (" + done.length + ")", function (inner) {
+        done.forEach(function (d) {
+          var c = el("div", "card answered");
+          c.appendChild(el("h3", null, "#" + d.id + " " + (d.question || "").slice(0, 90)));
+          c.appendChild(el("p", null, (d.answer || "").slice(0, 400)));
+          c.appendChild(el("div", "ledger", "oleh " + (d.answered_by || d.model_id || "—") + " · " + (d.state || "")));
+          inner.appendChild(c);
+        });
+      }));
+    }
+  }
+
+  function decisionCard(d) {
+    var card = el("div", "card decision");
+    card.appendChild(el("h3", null, "#" + d.id + (d.item_id ? " · item #" + d.item_id : "") + " · " + (d.weight || "")));
+    card.appendChild(el("p", "q", d.question || ""));
+    if (d.note) card.appendChild(el("p", "why", "catatan: " + d.note));
+    var opts;
+    try { opts = Array.isArray(d.options) ? d.options : JSON.parse(d.options || "[]"); } catch (e) { opts = []; }
+    if (opts.length) {
+      var box = el("div", "opts");
+      opts.forEach(function (o, i) {
+        var obj = (o && typeof o === "object") ? o : { label: String(o || "?") };
+        var label = obj.label || String(i);
+        var lab = el("label");
+        var r = el("input");
+        r.type = "radio";
+        r.name = "dec" + d.id;
+        r.value = label;
+        r.addEventListener("change", function () {
+          drafts["d" + d.id] = label;
+          var t = card.querySelector("textarea");
+          if (t) { t.value = label; }
+        });
+        lab.appendChild(r);
+        lab.appendChild(document.createTextNode(label + (obj.evidence ? " — " + obj.evidence : "")));
+        if (obj.recommended) {
+          var rec = el("span", "rec", "Recommended");
+          rec.style.cssText = "margin-left:6px;color:#7bd88f;font:600 10px/1 var(--mono);"
+            + "text-transform:uppercase;letter-spacing:.5px";
+          lab.appendChild(rec);
+          if (obj.recommended_reason) {
+            lab.appendChild(document.createTextNode(" — " + obj.recommended_reason));
+          }
+        }
+        box.appendChild(lab);
+      });
+      card.appendChild(box);
+    } else {
+      card.appendChild(el("p", "why", "tanpa pilihan — pertanyaan ini diajukan mesin karena ia melewati ambang, dan ia tidak mengarang opsi untuk ambang yang baru saja dilanggarnya."));
+    }
+    var ta = el("textarea");
+    ta.placeholder = "tulis jawabanmu…";
+    ta.value = drafts["d" + d.id] || "";
+    ta.addEventListener("input", function () { drafts["d" + d.id] = ta.value; });
+    card.appendChild(ta);
+    var bar = el("div", "savebar");
+    var save = el("button", "btn primary", "Simpan jawaban");
+    var out = el("div", "reply");
+    save.addEventListener("click", function () {
+      if (!ta.value.trim()) { out.textContent = "jawaban kosong ditolak — pertanyaannya tetap menunggu"; out.className = "reply bad"; return; }
+      save.disabled = true;
+      out.textContent = "menulis ke PostgreSQL…";
+      out.className = "reply";
+      postJson("/api/decide", { id: d.id, answer: ta.value, by: "operator-gui" }).then(function (res) {
+        save.disabled = false;
+        showReply(out, res);
+        out.className = "reply " + (res.status === 200 ? "good" : "bad");
+        loadAutopilot();
+      });
+    });
+    bar.appendChild(save);
+    bar.appendChild(el("span", "note", "mencatat dulu, mengantar kemudian"));
+    card.appendChild(bar);
+    card.appendChild(out);
+    return card;
+  }
+
+  function renderDecideView() {
+    /* Poll 10 detik tidak boleh merebut formulir yang sedang diketik: operator yang kehilangan
+       jawabannya di tengah kalimat akan menulisnya dua kali, dan yang kedua masuk ke baris yang
+       sudah dijawab — menolak itu benar, tapi penyebabnya tidak perlu ada di sini. */
+    if (document.querySelector("#feed input:focus, #feed textarea:focus, #feed select:focus")) {
+      return;
+    }
+    document.getElementById("title").textContent = "What waits for a person";
+    document.getElementById("crumb").textContent = "Human Decide";
+    document.getElementById("tabs").style.display = "none";
+    var box = document.getElementById("stats");
+    var feed = document.getElementById("feed");
+
+    if (!ap) {
+      box.textContent = "";
+      feed.textContent = "";
+      document.getElementById("sub").textContent = "reading the work order…";
+      feed.appendChild(el("p", "empty", apBusy ? "asking work_order.py for the current state…" : "not loaded yet"));
+      loadAutopilot();
+      return;
+    }
+    if (ap.error) {
+      box.textContent = "";
+      feed.textContent = "";
+      document.getElementById("sub").textContent = "the daemon could not answer";
+      feed.appendChild(el("p", "empty", ap.error));
+      if (ap.off_paths) {
+        ap.off_paths.forEach(function (p) { feed.appendChild(el("p", "note", "still works: " + p)); });
+      }
+      return;
+    }
+
+    var state = ap.autopilot || {}, night = ap.night || {}, limits = ap.limits || {};
+    var drain = ap.drain || {};
+    var waiting = (ap.decisions_open || []).length + (ap.human_queue || []).length;
+    var on = state.mode === "ON";
+
+    box.textContent = "";
+    [["switch", state.mode || "UNKNOWN", on ? "good" : (state.mode ? "" : "bad")],
+     ["window", state.mode === "ON" ? timeLeft(state.until_epoch) : "not running", ""],
+     ["items this run", (state.items_done || 0) + " / " + (state.item_budget || "—"), ""],
+     ["breaker", night.ok ? "closed" : "TRIPPED", night.ok ? "" : "bad"],
+     ["waiting for you", waiting, waiting ? "bad" : ""]].forEach(function (r) {
+      var card = el("div", "stat " + r[2]);
+      card.appendChild(el("span", null, r[0]));
+      card.appendChild(el("strong", null, String(r[1])));
+      box.appendChild(card);
+    });
+
+    document.getElementById("sub").textContent =
+      (night.ok
+        ? "the loop may claim the next item"
+        : "the loop will not claim anything: " + (night.why || []).join(", ")) +
+      " · read from " + (ap.engine || "the work order") + " just now";
+
+    feed.textContent = "";
+    feed.appendChild(head("The switch, as recorded"));
+    var switchBox = el("div", "card");
+    switchBox.appendChild(el("h3", null, "Autopilot is " + (state.mode || "UNKNOWN")));
+    [["changed by", state.changed_by || "—"],
+     ["ON since", state.on_epoch ? new Date(Number(state.on_epoch) * 1000).toLocaleString() : "—"],
+     ["ends", state.mode === "ON" ? timeLeft(state.until_epoch) : "—"],
+     ["item budget", String(state.item_budget || "—") + " · items done " + (state.items_done || 0)],
+     ["last off reason", state.off_reason || "—"],
+     ["hard limits", "failures " + limits.max_failures + " · items " + limits.max_items +
+       " · lease " + limits.lease_seconds + "s · resumes " + limits.max_resume]].forEach(function (r) {
+      var p = el("p", null);
+      p.appendChild(el("b", null, r[0] + ": "));
+      p.appendChild(document.createTextNode(r[1]));
+      switchBox.appendChild(p);
+    });
+    feed.appendChild(switchBox);
+
+    /* Kontrol sakelar. `mode` menjawab siapa yang memegang mesin dan boleh diklik dari sini;
+       `level` menjawab seberapa jauh tangan boleh bergerak dan tidak punya tombol di sini —
+       menaiki tangga butuh terminal manusia (`arm` menolak tanpa /dev/tty, itu diukur, bukan
+       gaya). Menulis CONTINUE ke pane karena seseorang menekan Save adalah jalur lain, dan ia
+       hanya lahir dari satu klik, bukan dari timer. */
+    feed.appendChild(head("The switch, as control"));
+    var ctl = el("div", "card");
+    ctl.appendChild(el("h3", null,
+      "mode " + (state.mode || "UNKNOWN") + " · hand at " + (drain.level || "UNKNOWN")));
+    var win = numField("window minutes", 240, 1, 1440);
+    var bud = numField("item budget", Number(state.item_budget) || 12, 1, 200);
+    var whyIn = el("input");
+    whyIn.type = "text";
+    whyIn.placeholder = "reason (written into the ledger, optional)";
+    var whyField = el("div", "field");
+    whyField.appendChild(el("label", null, "reason"));
+    whyField.appendChild(whyIn);
+    [win.box, bud.box, whyField].forEach(function (f) { ctl.appendChild(f); });
+    var reply = el("div");
+    var btnOn = el("button", "btn primary", state.mode === "ON" ? "Renew the window" : "Turn ON");
+    var btnOff = el("button", "btn", "Turn OFF");
+    function sendSwitch(mode, button) {
+      button.disabled = true;
+      var body = { mode: mode, by: "operator-gui", reason: whyIn.value || null };
+      if (mode === "on") {
+        body.minutes = Number(win.input.value);
+        body.budget = Number(bud.input.value);
+      }
+      postJson("/api/autopilot", body).then(function (res) {
+        button.disabled = false;
+        showReply(reply, res);
+        ap = null;
+        loadAutopilot();
+      }).catch(function (e) {
+        button.disabled = false;
+        reply.textContent = "tidak ada balasan dari daemon: " + e;
+      });
+    }
+    btnOn.addEventListener("click", function () { sendSwitch("on", btnOn); });
+    btnOff.addEventListener("click", function () { sendSwitch("off", btnOff); });
+    var row = el("div", "row");
+    row.appendChild(btnOn);
+    row.appendChild(btnOff);
+    ctl.appendChild(row);
+    ctl.appendChild(reply);
+    ctl.appendChild(el("p", "note",
+      "OFF works without the AI's cooperation, and so does this button: " +
+      (ap.off_paths || ["tombol ini",
+        "ai-station autopilot off",
+        "systemctl --user stop irsofka-autopilot.timer",
+        "python3 ~/.ai-station/tools/work_order.py disarm"]).join(" · ")));
+    ctl.appendChild(el("p", "note",
+      "ON does not raise the hand. Nothing types CONTINUE into a pane until the ladder is armed from " +
+      "a terminal — `ai-station drain arm resume`, which refuses to run without a controlling TTY, and " +
+      "this page has no button for it on purpose. Answering a question below is the one keystroke that " +
+      "comes from you, not from the loop."));
+    feed.appendChild(ctl);
+
+    if (!night.ok && (night.why || []).length) {
+      feed.appendChild(head("Why the breaker is open"));
+      var whyCard = el("div", "card");
+      (night.why || []).forEach(function (w) {
+        var p = el("p", null);
+        p.appendChild(el("b", null, "· "));
+        p.appendChild(document.createTextNode(w));
+        whyCard.appendChild(p);
+      });
+      if (night.tree_dirty === true) {
+        whyCard.appendChild(el("p", "note",
+          "the fix is to name the files and commit or revert them by hand — never a wholesale discard: " +
+          "an uncommitted change belongs to whichever engine was mid-way through writing it."));
+      }
+      if (night.tree_dirty === null) {
+        whyCard.appendChild(el("p", "note",
+          "git could not be read. UNKNOWN is not clean — the same asymmetry that makes the call-worker cut safe."));
+      }
+      feed.appendChild(whyCard);
+    }
+
+    feed.appendChild(head("Decisions waiting on you"));
+    listOrNull(feed, ap.decisions_open, function (d) {
+      var c = el("div", "card");
+      var esc = d.state !== "OPEN";
+      c.appendChild(el("h3", null, d.question || "untitled question"));
+      c.appendChild(el("p", esc ? "note" : null,
+        esc ? "every resolver rung was tried and none of them settled this — it is here because "
+              + "the machines could not, not because someone chose to skip you"
+            : "no engine has dispatched this yet"));
+      var opts = [];
+      try { opts = Array.isArray(d.options) ? d.options : JSON.parse(d.options || "[]"); } catch (e) { opts = []; }
+      var draft = drafts[d.id] || (drafts[d.id] = { choice: null, text: "" });
+      var group = "dec" + d.id;
+      if (opts.length) {
+        var optBox = el("div", "opts");
+        opts.forEach(function (o) {
+          var label = (o && typeof o === "object") ? (o.label || "(no label)") : String(o);
+          var lab = el("label");
+          var rb = el("input");
+          rb.type = "radio";
+          rb.name = group;
+          rb.value = label;
+          rb.checked = draft.choice === label;
+          rb.addEventListener("change", function () { draft.choice = label; });
+          lab.appendChild(rb);
+          lab.appendChild(document.createTextNode(label));
+          optBox.appendChild(lab);
+          if (o && typeof o === "object") {
+            optBox.appendChild(el("p", "note", "   evidence: " + (o.evidence || "not measured") +
+                                  " · cost: " + (o.cost || "not measured")));
+            if (o.recommended) {
+              var rec = el("p", "note", "   recommended: yes"
+                + (o.recommended_reason ? " — " + o.recommended_reason : ""));
+              rec.style.color = "#7bd88f";
+              optBox.appendChild(rec);
+            }
+          }
+        });
+        c.appendChild(optBox);
+      } else {
+        c.appendChild(el("p", "note", "no options were recorded — answer in the box below"));
+      }
+      var ansField = el("div", "field");
+      ansField.appendChild(el("label", null, "your answer"));
+      var ta = el("textarea");
+      ta.placeholder = draft.choice ? "chosen: " + draft.choice + " — or write your own"
+                                   : "what you decide, in your own words";
+      ta.value = draft.text;
+      ta.addEventListener("input", function () { draft.text = ta.value; });
+      ansField.appendChild(ta);
+      c.appendChild(ansField);
+      var aReply = el("div");
+      var save = el("button", "btn primary", "Save answer");
+      save.addEventListener("click", function () {
+        var answer = (ta.value || "").trim() || (draft.choice || "");
+        if (!answer) {
+          aReply.textContent = "nothing sent: pick an option or write the answer";
+          return;
+        }
+        save.disabled = true;
+        postJson("/api/decide", { id: d.id, answer: answer, by: "operator-gui" })
+          .then(function (res) {
+            save.disabled = false;
+            showReply(aReply, res);
+            if (res.json && res.json.ok) {
+              delete drafts[d.id];
+              ap = null;
+              loadAutopilot();
+            }
+          })
+          .catch(function (e) { save.disabled = false; aReply.textContent = "tidak ada balasan: " + e; });
+      });
+      var bar = el("div", "savebar");
+      bar.appendChild(save);
+      bar.appendChild(el("span", "note",
+        d.item_id ? ("unblocks item #" + d.item_id + " · delivered to its own engine when that pane is provably resting")
+                  : "this question names no item · answering it records the decision but wakes nothing"));
+      c.appendChild(bar);
+      c.appendChild(aReply);
+      c.appendChild(el("p", "note",
+        "weight " + (d.weight || "—") + " · state " + d.state +
+        (d.rung_used ? " · rung " + d.rung_used : "") + " · opened " +
+        new Date(Number(d.created_epoch) * 1000).toLocaleString() +
+        " · nothing was answered by a substitute engine"));
+      return c;
+    });
+
+    /* Riwayat jawaban. Baris yang sudah dijawab memang keluar dari antrean menunggu — tapi kalau
+       ia hilang sama sekali, operator tidak bisa membedakan "sudah saya jawab" dari "tidak pernah
+       ada", dan itu mengundang jawaban kedua pada pertanyaan yang sama. */
+    feed.appendChild(head("Answered — and by whom"));
+    listOrNull(feed, ap.decisions_answered, function (d) {
+      var c = el("div", "card");
+      c.appendChild(el("h3", null, d.question || "untitled question"));
+      c.appendChild(el("p", null, "→ " + (d.answer || "(no answer recorded)")));
+      c.appendChild(el("p", "note",
+        (d.state || "—") + " by " + (d.answered_by || d.model_id || "—") +
+        (d.rung_used ? " · rung " + d.rung_used : "") +
+        (d.item_id ? " · item #" + d.item_id : "") +
+        " · " + new Date(Number(d.resolved_epoch) * 1000).toLocaleString()));
+      return c;
+    });
+
+    feed.appendChild(head("Items that crossed a measured threshold"));
+    listOrNull(feed, ap.human_queue, function (h) {
+      var c = el("div", "card");
+      c.appendChild(el("h3", null, "#" + h.id + " — " + h.title));
+      c.appendChild(el("p", null, h.escalation_reason || "no reason recorded"));
+      c.appendChild(el("p", "note",
+        "phase " + (h.phase || "—") + " · waiting because a threshold is a number read when the item runs, " +
+        "not a number remembered from the conversation that motivated it"));
+      return c;
+    });
+
+    feed.appendChild(head("Engines that may be stalled"));
+    listOrNull(feed, ap.stalled, function (s) {
+      var c = el("div", "card");
+      c.appendChild(el("h3", null, "#" + s.id + " — " + s.title));
+      c.appendChild(el("p", null,
+        "held by " + (s.claimed_by || "?") + " · lease " + timeLeft(s.lease_epoch) +
+        " · resumes used " + (s.resume_count || 0)));
+      c.appendChild(el("p", "note",
+        "a list is not a decision to type: CONTINUE needs the pane readable AND unchanged before anything is sent"));
+      return c;
+    });
+
+    feed.appendChild(head("What the queue offers next"));
+    var qCard = el("div", "card");
+    if (ap.next) {
+      qCard.appendChild(el("h3", null, "#" + ap.next.id + " — " + ap.next.title));
+      qCard.appendChild(el("p", null,
+        "status " + ap.next.status + " · phase " + (ap.next.phase || "—") +
+        " · depends on " + (ap.next.depends_on || "nothing")));
+    } else {
+      qCard.appendChild(el("p", "empty",
+        "nothing is offerable — an empty queue means stop, not find something"));
+    }
+    var counts = (ap.per_status || []).map(function (r) { return r.status + " " + r.n; }).join(" · ");
+    qCard.appendChild(el("p", "note", "quest_tasks by status: " + (counts || "none")));
+    feed.appendChild(qCard);
+  }
+
+  function renderRolesView() {
+    document.getElementById("title").textContent = "Who is on the team";
+    document.getElementById("crumb").textContent = "Roles & verifier";
+    document.getElementById("tabs").style.display = "none";
+    var box = document.getElementById("stats");
+    box.textContent = "";
+    var feed = document.getElementById("feed");
+    feed.textContent = "";
+
+    if (!master) {
+      document.getElementById("sub").textContent = "reading the master data…";
+      feed.appendChild(el("p", "empty", masterBusy ? "validating against the CLIs and the meter…" : "not loaded yet"));
+      loadMaster();
+      return;
+    }
+    if (master.error) {
+      document.getElementById("sub").textContent = "the daemon could not answer";
+      feed.appendChild(el("p", "empty", master.error));
+      return;
+    }
+
+    var report = masterBlocked || master.report || {};
+    var evidence = report.evidence || {};
+    var registry = (master.document && master.document.engines && master.document.engines.engines) || {};
+    var dispatch = master.dispatch || {};
+    var live = ((master.report || {}).evidence || {});
+    var can = Object.keys(dispatch).filter(function (k) { return dispatch[k].can_dispatch; }).length;
+
+    [["engines", Object.keys(registry).length, ""],
+     ["can be dispatched now", can + " / " + Object.keys(dispatch).length,
+      can ? "good" : "bad"],
+     ["blocking errors", (report.errors || []).length, (report.errors || []).length ? "bad" : ""],
+     ["warnings", (report.warnings || []).length, ""],
+     ["model ids read from CLIs",
+      Object.keys(evidence.model_lists || {}).map(function (k) {
+        return k + " " + evidence.model_lists[k].length;
+      }).join(" · ") || "none", ""]].forEach(function (r) {
+      var card = el("div", "stat " + r[2]);
+      card.appendChild(el("span", null, r[0]));
+      card.appendChild(el("strong", null, r[1]));
+      box.appendChild(card);
+    });
+
+    document.getElementById("sub").textContent =
+      "the model named here is the one read out of config at the moment of use — " +
+      "nothing on this page is remembered from a previous session";
+
+    var team = null;
+    var slots = (master.document && master.document.slots) || {};
+    (slots.teams || []).forEach(function (t) { if (t.id === slots.active_team) team = t; });
+
+    if (team) {
+      feed.appendChild(head("Roles in " + team.id));
+      var table = el("table", "rtable");
+      var thead = el("thead");
+      var hr = el("tr");
+      ["role", "engine key", "model resolved now", "would it start?"].forEach(function (h) {
+        hr.appendChild(el("th", null, h));
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+      var tbody = el("tbody");
+      (team.roles || []).forEach(function (role) {
+        var tr = el("tr");
+        var resolved = (master.report.resolved || {})[role.role_id] || {};
+        var d = dispatch[resolved.registry_key || ""] || null;
+        var first = el("td", null);
+        first.appendChild(el("b", null, role.role_id));
+        if (role.title) {
+          var why = el("span", "why");
+          why.textContent = role.title;
+          first.appendChild(why);
+        }
+        tr.appendChild(first);
+        tr.appendChild(el("td", "mono", resolved.registry_key || "— not bound"));
+        var mt = el("td", "mono", resolved.model || (role.model || "—"));
+        if (resolved.registry_key && resolved.model) {
+          var src = el("span", "why");
+          src.textContent = "from config/engines.json → " + resolved.registry_key;
+          mt.appendChild(src);
+        }
+        tr.appendChild(mt);
+        var st = el("td", null);
+        if (!resolved.registry_key) {
+          st.appendChild(el("span", "why", "team description only — this role dispatches nothing"));
+        } else if (d && d.can_dispatch) {
+          st.appendChild(el("span", "tag state", "yes · " + (d.model || "")));
+        } else {
+          st.appendChild(el("span", "tag bad", "no"));
+          var why2 = el("span", "why");
+          why2.textContent = (d && d.reason) || "not in the registry";
+          st.appendChild(why2);
+        }
+        tr.appendChild(st);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      feed.appendChild(table);
+    }
+
+    feed.appendChild(head("Engine registry — edit and save"));
+    Object.keys(registry).sort().forEach(function (key) {
+      feed.appendChild(engineEditor(key, registry[key], live));
+    });
+
+    var bar = el("div", "savebar");
+    var save = el("button", "btn primary" + (masterBusy ? " waiting" : ""),
+      masterBusy ? "working…" : "Save & validate");
+    save.disabled = !!masterBusy;
+    save.addEventListener("click", saveMaster);
+    var reload = el("button", "btn", "Reload from disk");
+    reload.disabled = !!masterBusy;
+    reload.addEventListener("click", function () {
+      master = null; masterMsg = null; masterBlocked = null; loadMaster();
+    });
+    bar.appendChild(save);
+    bar.appendChild(reload);
+    if (masterMsg) {
+      bar.appendChild(el("span", "note", masterMsg.text));
+    }
+    feed.appendChild(bar);
+
+    if ((report.errors || []).length) {
+      feed.appendChild(head("Refused — the registry would not start"));
+      feed.appendChild(findings(report.errors, "", ""));
+    }
+    feed.appendChild(head("Warnings — saved is not the same as certain"));
+    feed.appendChild(findings((master.report || {}).warnings || [], " warn",
+      "no warnings: every declared meter, model id and window matched what the machine reports"));
+    if (report.errors && report.errors.length && masterBlocked) {
+      feed.appendChild(el("p", "note",
+        "the fields above still hold what you typed; nothing was written to config."));
+    }
+  }
+
+  function render() {
+    if (view === "dashboard") {
+      var waiting = !ap;
+      document.getElementById("title").textContent = "Command center";
+      document.getElementById("crumb").textContent = "Dashboard";
+      document.getElementById("tabs").style.display = "none";
+      document.getElementById("stats").textContent = "";
+      document.getElementById("sub").textContent = waiting
+        ? "membaca PostgreSQL lewat /api/autopilot…"
+        : "fokus: " + (((ap.workspace || {}).focus) || "tidak terbaca")
+          + " · mode " + (((ap.autopilot || {}).mode) || "?")
+          + " · tangan " + (((ap.drain || {}).level) || "?")
+          + " · segarkan sendiri setiap 10 detik";
+      if (waiting) {
+        var f = document.getElementById("feed");
+        f.textContent = "";
+        f.appendChild(el("p", "empty", "loading…"));
+        loadAutopilot();
+      }
+      return renderDashboard();
+    }
+    if (view === "decide") { return renderDecideView(); }
+    if (view === "treasury") { return renderTreasuryView(); }
+    if (view === "roles") {
+      /* Jangan membangun ulang formulir yang sedang diketik: poll 10 detik akan
+         merebut fokus di tengah nama model. */
+      if (document.querySelector("#feed input:focus, #feed select:focus")) { return; }
+      return renderRolesView();
+    }
+    renderStats();
+    var titles = { feed: ["What happened", "Activity feed"], files: ["Artefacts", "Files touched"] };
+    document.getElementById("title").textContent = titles[view][0];
+    document.getElementById("crumb").textContent = titles[view][1];
+    document.getElementById("tabs").style.display = view === "feed" ? "" : "none";
+
+    var open = (data.posts || []).filter(function (p) { return p.state === "IN_PROGRESS"; }).length;
+    document.getElementById("sub").textContent =
+      (data.totals.posts || 0) + " entries today" +
+      (open ? " · " + open + " running right now" : "") +
+      " · showing the last " + (data.posts || []).length + " from the action log";
+
+    var feed = document.getElementById("feed");
+    feed.textContent = "";
+    if (view === "files") { renderFiles(); }
+    else {
+      var shown = (data.posts || []).filter(passes);
+      if (!shown.length) feed.appendChild(el("p", "empty", "Nothing matches this filter."));
+      else shown.forEach(function (p) { feed.appendChild(renderPost(p)); });
+    }
+    document.getElementById("stamp").textContent =
+      "refreshed " + new Date().toLocaleTimeString() + " · source " + (data.generated_at || "—");
+  }
+
+
+  /* Kolam BYOK. Semua yang tampil di bawah adalah byte dari /api/byok, yang sendiri hanya
+     memancarkan `byok.py station`: status slot, dan peta kapasitas yang DIUKUR. Yang tidak
+     pernah ada di halaman ini adalah isi kunci — yang tampil hanyalah panjang, bentuk, dan
+     12 karakter pertama sidik jarinya, cukup untuk mengenali slot yang sama tanpa menyalin
+     rahasianya ke DOM, ke log browser, atau ke screenshot yang dikirim ke engine lain. */
+  function loadByok() {
+    var host = document.getElementById("feed");
+    host.textContent = "";
+    host.appendChild(el("p", "empty", "memuat kolam BYOK…"));
+    fetch("/api/byok", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        host.textContent = "";
+        if (j.ok === false) { host.appendChild(el("p", "empty", "kolam tidak terbaca: " + j.why)); return; }
+        var s = j.slots || {}, cap = j.capabilities || {};
+        host.appendChild(el("h3", "", "Slot kunci Gemini (" + (s.slots || []).filter(function (x) { return x.filled; }).length + " terisi dari " + (s.slots || []).length + ")"));
+        var tbl = document.createElement("table");
+        tbl.innerHTML = "<tr><th>slot</th><th>terisi</th><th>panjang</th><th>bentuk</th><th>sidik</th><th>key baru</th></tr>";
+        (s.slots || []).forEach(function (row) {
+          var tr = document.createElement("tr");
+          tr.innerHTML = "<td>" + row.slot + "</td><td>" + (row.filled ? "ya" : "—") + "</td><td>" +
+            row.length + "</td><td>" + row.shape + "</td><td><code>" + (row.fingerprint || "—") + "</code></td>";
+          var td = document.createElement("td");
+          var inp = document.createElement("input");
+          inp.type = "password"; inp.placeholder = "AIza… (kosongkan untuk menghapus)";
+          inp.style.width = "15rem";
+          var btn = document.createElement("button");
+          btn.textContent = "simpan";
+          btn.addEventListener("click", function () { saveSlot(row.slot, inp.value, btn); });
+          td.appendChild(inp); td.appendChild(btn); tr.appendChild(td);
+          tbl.appendChild(tr);
+        });
+        host.appendChild(tbl);
+        host.appendChild(el("h3", "", "Model aktif"));
+        var mrow = document.createElement("p");
+        var minp = document.createElement("input");
+        minp.type = "text"; minp.value = s.model || ""; minp.style.width = "22rem";
+        var mbtn = document.createElement("button"); mbtn.textContent = "simpan model";
+        mbtn.addEventListener("click", function () { saveModel(minp.value, mbtn); });
+        mrow.appendChild(minp); mrow.appendChild(" "); mrow.appendChild(mbtn);
+        mrow.appendChild(" " + el("span", "sub", "slot aktif sekarang: " + s.active + " · berkas: " + s.path));
+        host.appendChild(mrow);
+        host.appendChild(el("h3", "", "Kapasitas — yang diukur, bukan yang dikira"));
+        var groups = [["text", "Teks"], ["image", "Gambar"], ["video", "Video"], ["audio", "Audio"], ["music", "Musik"]];
+        groups.forEach(function (g) {
+          var box = cap[g[0]]; if (!box) return;
+          Object.keys(box).forEach(function (name) {
+            var val = String(box[name]);
+            var line = el("p", "sub", name + " — " + val);
+            if (val.indexOf("DITOLAK") === 0) line.style.color = "#e07a5f";
+            host.appendChild(line);
+          });
+        });
+        host.appendChild(el("p", "sub", "Terukur pada " + (cap.measured_at || "?") +
+          ". Status 'ADA DI DAFTAR' berarti namanya terlihat oleh ListModels tetapi belum satu pun panggilan dilakukan — itu bukan 'sudah bisa dipakai'."));
+      })
+      .catch(function () { host.textContent = ""; host.appendChild(el("p", "empty", "daemon tidak terjangkau")); });
+  }
+
+  function saveSlot(slot, key, btn) {
+    btn.disabled = true; btn.textContent = "menulis…";
+    postJson("/api/byok", { slot: slot, key: key }).then(function (res) {
+      btn.disabled = false;
+      btn.textContent = (res && res.ok) ? "tersimpan" : "gagal";
+      if (res && !res.ok && res.why) window.alert(res.why);
+      loadByok();
+    });
+  }
+
+  function saveModel(model, btn) {
+    btn.disabled = true; btn.textContent = "menulis…";
+    postJson("/api/byok", { model: model }).then(function (res) {
+      btn.disabled = false;
+      btn.textContent = (res && res.ok) ? "tersimpan" : "gagal";
+      if (res && !res.ok && res.why) window.alert(res.why);
+      loadByok();
+    });
+  }
+
+  function load() {
+    fetch("/api/station?limit=80", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (json) {
+        if (json.error) {
+          document.getElementById("feed").textContent = "";
+          document.getElementById("feed").appendChild(el("p", "empty", json.error));
+          return;
+        }
+        data = json;
+        render();
+        if (view === "treasury") loadTreasury();
+        if (view === "decide" || view === "dashboard") loadAutopilot();
+        if (view === "byok") loadByok();
+      })
+      .catch(function () {
+        document.getElementById("sub").textContent =
+          "daemon unreachable — is irsofka-ai-workstation running?";
+      });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll(".chip"), function (chip) {
+    chip.addEventListener("click", function () {
+      var onChip = document.querySelector(".chip.on");
+      if (onChip) { onChip.classList.remove("on"); }
+      chip.classList.add("on");
+      filter = chip.dataset.f;
+      render();
+    });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll(".nav[data-view]"), function (item) {
+    item.addEventListener("click", function () {
+      /* `if (on)` bukan hiasan. querySelector mengembalikan null kalau tidak ada satu pun .nav.on,
+         dan null.classList melempar TypeError di DALAM handler klik — view tidak pernah berubah,
+         tidak ada error yang muncul, dan tombol navigasi terlihat mati. Itu gejala "menu hilang"
+         yang dilaporkan operator, dan satu-satunya cara melihatnya adalah membuat halaman pernah
+         berada di keadaan tanpa .on — yang terjadi sendiri setelah goto() gagal mencari link. */
+      var on = document.querySelector(".nav.on");
+      if (on) { on.classList.remove("on"); }
+      item.classList.add("on");
+      view = item.dataset.view;
+      /* Hash ditulis kembali. Sebelum ini halaman hanya MEMBACA hash sekali saat buka, jadi
+         berpindah tab lalu me-reload mengembalikan kamu ke Activity feed — dan sebuah tombol
+         Back yang tidak pernah ke mana-mana. */
+      try { location.hash = "#" + view; } catch (e) { /* WebView menolak: bukan kesalahan data */ }
+      window.scrollTo(0, 0);
+      render();
+    });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll(".nav.soon"), function (item) {
+    item.addEventListener("click", function () {
+      item.querySelector("em").textContent = "F8 pending";
+      setTimeout(function () { item.querySelector("em").textContent = "soon"; }, 1600);
+    });
+  });
+  document.getElementById("q").addEventListener("input", function (e) {
+    query = e.target.value.toLowerCase();
+    render();
+  });
+
+  // Deep link: /station#dashboard, #roles, #treasury, ... — sebuah view bisa dibuka dan diuji
+  // tanpa harus mengklik, dan tautan dari terminal mendarat di tempat yang dimaksud.
+  function goto(wanted) {
+    /* #decide tetap hidup: bookmark lama tidak boleh mati karena sebuah tab dinamai ulang. */
+    if (wanted === "decide") { wanted = "dashboard"; }
+    var link = document.querySelector('.nav[data-view="' + wanted + '"]');
+    if (!link) { return false; }
+    var on = document.querySelector(".nav.on");
+    if (on) { on.classList.remove("on"); }
+    link.classList.add("on");
+    view = wanted;
+    render();
+    if (wanted === "decide" || wanted === "dashboard") { loadAutopilot(); }
+    return true;
+  }
+  goto((location.hash || "").replace(/^#/, ""));
+  window.addEventListener("hashchange", function () {
+    goto((location.hash || "").replace(/^#/, ""));
+  });
+
+  setInterval(function () { if (!document.hidden) load(); }, 10000);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) load(); });
+  load();
+})();
+</script>
+</body>
+</html>

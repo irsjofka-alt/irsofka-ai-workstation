@@ -1,0 +1,1161 @@
+#!/usr/bin/env python3
+"""
+cross_verify.py — verifikasi lintas mesin: satu AI mengaudit pekerjaan AI lain.
+
+Alasan keberadaan: pemilik workstation ini tidak butuh IDE. Kalau satu mesin kekurangan
+keahlian untuk memverifikasi hasilnya, yang memverifikasi adalah mesin LAIN, bukan manusia
+dan bukan tebakan. Ini juga jalan keluar untuk "AI HALU": klaim yang tidak lolos audit
+mesin kedua tercatat sebagai ketidaksepakatan, bukan sebagai kebenaran.
+
+Registry mesin dibaca dari ~/.ai-station/config/engines.json bila ada, sehingga menambah
+perangkat (Local LLM 7-9B, API lain) cukup dengan menyunting konfigurasi — tanpa mengubah
+berkas ini.
+
+  ./cross_verify.py --list
+  ./cross_verify.py gemini --file ../engine-rust/src/main.rs
+  ./cross_verify.py gemini "Fungsi pg_conn_str() sudah aman karena membaca db_local.json"
+  ./cross_verify.py qoder --file tools/session_ingestor.py --remember
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from call_workers import run_grouped  # noqa: E402  (worker panggilan mati bersama pemanggilnya)
+
+AI_STATION = Path.home() / ".ai-station"
+REGISTRY_PATH = AI_STATION / "config" / "engines.json"
+TIMEOUT = int(os.environ.get("STATION_VERIFY_TIMEOUT", "900"))
+
+# Pemicu handover (baris ledger 321). Tidak ada angka N di kontrak §4 maupun di config/:
+# barisnya meminta N diambil dari konstanta yang ada, dan bila tidak ada dipakai 3 dengan
+# alasannya ditulis. Tiga vonis PERLU_KOREKSI berturut-turut pada isi yang sama sudah cukup
+# membuktikan pemeriksa tidak menemukan hal baru; putaran keempat hanya menghabiskan satu
+# jendela kuota verifikasi untuk jawaban yang sudah diketahui.
+HANDOVER_AFTER = 3
+HANDOVER_REQUIRED = "HANDOVER_REQUIRED"
+
+# Bawaan. Nilai ini HANYA dipakai bila engines.json tidak ada.
+DEFAULT_ENGINES = {
+    "gemini": {
+        "kind": "pane", "tab": "antigravity", "role": "reviewer",
+        "model": "gemini-3.8-flash-high",
+        "note": "Lewat pane Antigravity yang sudah hidup (hangat). "
+                "Proses 'agy -p' baru butuh >100 detik hanya untuk login+bangun konteks.",
+    },
+    "qoder": {
+        "kind": "cli", "binary": "qoder", "role": "builder",
+        "model": "Qwen3.8-Flash",
+        "template": ["qoder", "-m", "{model}", "--context-window", "1000000",
+                     "--reasoning-effort", "high", "--permission-mode", "bypass_permissions",
+                     "-p", "{prompt}"],
+        "note": "Konteks 1M; cocok menelaah berkas besar.",
+    },
+    "local": {
+        "kind": "ollama", "role": "validator", "model": "qwen2.5-coder:7b",
+        "url": "http://127.0.0.1:11434/api/generate",
+        "note": "Belum terpasang. Akan dipakai sebagai pemeriksa sintaks murah & offline.",
+    },
+}
+
+REVIEW_BRIEF = """Kamu adalah PEMERIKSA BEBAS untuk Irsofka AI Workstation. Tugas kamu bukan
+menyetujui, melainkan mencari kesalahan. Periksa klaim/berikut, lalu jawab WAJIB dengan format:
+
+VERDICT: SETUJU | PERLU_KOREKSI | TIDAK_YAKIN
+ALASAN: <2-5 kalimat>
+TEMUAN: <daftar masalah konkret, atau 'tidak ada'>
+BUKTI: <baris/fungsi/perintah yang kamu rujuk>
+
+Jangan menyebut diri kamu membantu atau sopan. Kalau bukti tidak cukup untuk memastikan,
+pakai TIDAK_YAKIN — itu jawaban yang berharga, bukan kegagalan.
+
+=== YANG PERLU DIPERIKSA ===
+"""
+
+
+def load_registry():
+    """Gabung bawaan dengan engines.json. Config pengguna selalu menang."""
+    reg = dict(DEFAULT_ENGINES)
+    if REGISTRY_PATH.exists():
+        try:
+            extra = json.loads(REGISTRY_PATH.read_text())
+            for name, spec in (extra.get("engines", extra) or {}).items():
+                base = dict(reg.get(name, {}))
+                base.update(spec)
+                reg[name] = base
+        except Exception as exc:  # noqa: BLE001
+            print(f"[verify] engines.json tidak terbaca ({exc}); pakai bawaan", file=sys.stderr)
+    return reg
+
+
+def treasury_quota():
+    """(baris kuota, batas umur pembacaan) dari Treasury. (None, None) kalau tak ada sumber.
+
+    Sumbernya API daemon; kalau daemon tidak hidup, tanyakan langsung ke ingestor. Keduanya
+    query, bukan angka yang kita karang: gate kuota yang menebak lebih buruk daripada gate
+    yang tidak ada, karena ia mengizinkan pemanggilan model sambil berpura-pura sudah
+    memeriksa sisanya.
+    """
+    payload = None
+    try:
+        payload = json.loads(daemon_get("/api/treasury", timeout=20))
+    except Exception:  # noqa: BLE001
+        payload = None
+    if payload is None:
+        try:
+            sys.path.insert(0, str(AI_STATION / "tools"))
+            from session_ingestor import Store, latest_quota
+            payload = {"quota": latest_quota(Store()), "interval_s": 900}
+        except Exception:  # noqa: BLE001
+            return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    try:
+        interval = int(payload.get("interval_s") or 900)
+    except (TypeError, ValueError):
+        # interval_s datang dari daemon, bukan dari config kita. Daemon yang melaporkan
+        # angka raksasa tidak boleh memperlonggar batas kesegaran tanpa batas.
+        interval = 900
+    return payload.get("quota") or [], min(max(2 * interval, 1800), 6 * 3600)
+
+
+def _finite(value):
+    """float hanya untuk angka yang benar-benar angka: None, teks, NaN dan inf semua gagal."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and abs(out) != float("inf") else None
+
+
+def _parse_ts(ts):
+    """Cap waktu meter sebagai datetime sadar zona, atau None kalau tidak bisa dibaca."""
+    if not ts:
+        return None
+    try:
+        when = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when.astimezone() if when.tzinfo else when.replace(tzinfo=LocalZone())
+
+
+def LocalZone():
+    """Zona lokal, dipakai hanya untuk cap waktu yang ditulis tanpa offset."""
+    return datetime.now().astimezone().tzinfo
+
+
+def _rank_row(row):
+    """Urutkan pembacaan per jendela: yang terbaru, dan pada detik sama yang LEMAH menang.
+
+    Dua baris bertimestamp identik dengan state REPORTED dan UNAVAILABLE bukan kasus reka-reka:
+    ia terjadi ketika satu siklus menulis dua meter untuk jendela yang sama. Menganggap yang
+   REPORTED otomatis lebih baru berarti bukti yang tidak bisa dipercaya kalah diam-diam —
+    fail-open persis yang dikira sudah ditutup.
+    """
+    when = _parse_ts(row.get("ts"))
+    return (when is not None, when or datetime(1970, 1, 1, tzinfo=LocalZone()),
+            str(row.get("state")) != "REPORTED")
+
+
+def quota_gate_reason(spec):
+    """Alasan mesin ini TIDAK boleh diberangkatkan, atau None kalau jendelanya masih ada.
+
+    Pemilik mesin memutuskan kolam Anthropic/GPT boleh dihabiskan untuk verifikasi — tapi
+    keputusannya bersyarat: 'selama kuota 5 hours ada dan weekly nya ada'. Setiap jalur yang
+    membuat kita tidak punya bukti — gate tanpa jendela, ambang tidak terbaca, state bukan
+    laporan, fraksi di luar 0..1, cap waktu hilang atau dari masa depan, pembacaan lebih tua
+    dari 2x interval — berujung penolakan. Aturan yang gagal dibaca tidak boleh berubah
+    menjadi 'boleh lewat'.
+    """
+    gate = spec.get("quota_gate")
+    if not gate:
+        return None
+    if not isinstance(gate, dict):
+        return "quota_gate bukan objek: tidak ada yang bisa diperiksa"
+    engine, scope = str(gate.get("engine") or ""), str(gate.get("scope") or "")
+    windows = [str(w) for w in (gate.get("windows") or [])]
+    if not windows:
+        return ("quota_gate tanpa daftar 'windows': tidak ada satu jendela pun yang bisa "
+                "dibuktikan, jadi tidak ada dasar untuk memberangkatkan mesin ini")
+    floor = _finite(gate.get("min_fraction", 0.0))
+    if floor is None or not 0.0 <= floor <= 1.0:
+        return (f"ambang 'min_fraction' {gate.get('min_fraction')!r} bukan pecahan 0..1 — "
+                "aturan ambangnya sendiri rusak, dan gerbang tidak menebak")
+    if not engine or not scope:
+        return "quota_gate tanpa 'engine' atau 'scope': baris meter mana yang harus dipercaya?"
+    rows, fresh_s = treasury_quota()
+    if rows is None:
+        return (f"kuota {engine}/{scope} tidak terbaca: daemon mati dan ingestor tidak "
+                "menghasilkan angka — tidak ada bukti jendela ini masih ada")
+    candidates = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("engine")) == engine and str(r.get("scope")) == scope:
+            candidates.setdefault(str(r.get("limit_window")), []).append(r)
+    for w in windows:
+        group = candidates.get(w)
+        if not group:
+            return (f"meter tidak pernah melaporkan jendela {w} untuk {engine}/{scope} — "
+                    "tidak ada dasar untuk memberangkatkan mesin ini")
+        r = max(group, key=_rank_row)
+        state = str(r.get("state") or "")
+        if state != "REPORTED":
+            return (f"pembacaan terakhir jendela {w} berstate {state or 'kosong'}, bukan "
+                    "REPORTED: tidak ada bukti kuota")
+        frac = _finite(r.get("remaining_fraction"))
+        if frac is None:
+            return f"jendela {w} dilaporkan tanpa angka sisa yang bisa dibaca"
+        if not 0.0 <= frac <= 1.0:
+            return (f"sisa jendela {w} dilaporkan {frac} — di luar 0..1, jadi angka ini bukan "
+                    "pecahan sisa dan tidak bisa dipakai sebagai bukti")
+        if frac <= floor:
+            return f"jendela {w} tinggal {frac:.3f} (habis)"
+        when = _parse_ts(r.get("ts"))
+        if when is None:
+            return f"pembacaan jendela {w} tidak punya cap waktu yang bisa dibaca"
+        age = (datetime.now().astimezone() - when).total_seconds()
+        if age < 0:
+            return (f"pembacaan jendela {w} berumur {age / 60:.0f} menit — jam mesin dan "
+                    "cap meter tidak sepakat, jadi kesegarannya tidak bisa dibuktikan")
+        if age > fresh_s:
+            return (f"pembacaan jendela {w} berumur {age / 60:.0f} menit, lebih tua dari "
+                    f"batas kesegaran meter ({fresh_s / 60:.0f} menit)")
+    return None
+
+
+def engine_present(spec):
+    """Apakah mesin ini BENAR-BENAR bisa dipakai sekarang.
+
+    Menebak dari 'kind' akan melaporkan 'ada' untuk Ollama yang tidak terpasang —
+    persis jenis kebohongan yang membuat AI mengira sesuatu sudah diverifikasi.
+    """
+    kind = spec.get("kind", "cli")
+    if kind == "pane":
+        tab = spec.get("tab", "antigravity")
+        try:
+            data = json.loads(daemon_get("/api/workspace"))
+            info = (data.get("tabs") or {}).get(tab) or {}
+            if not info.get("alive"):
+                return False, f"pane '{tab}' tidak hidup di workstation"
+            return True, ""
+        except Exception as exc:  # noqa: BLE001
+            return False, f"daemon tidak menjawab ({type(exc).__name__})"
+    if kind == "cli":
+        if not shutil.which(spec.get("binary", "")):
+            return False, ""
+        blocked = quota_gate_reason(spec)
+        return (False, blocked) if blocked else (True, "")
+    if kind == "ollama":
+        # Probe dan pemanggilan HARUS memakai sumber URL yang sama. Dulu probe membaca
+        # spec.get("url","") tanpa bawaan, sehingga mesin yang hanya ada di engines.json
+        # (tidak punya entri bawaan) selalu dianggap mati padahal sebenarnya hidup.
+        gen_url = spec.get("url") or "http://127.0.0.1:11434/api/generate"
+        url = gen_url.replace("/api/generate", "/api/tags")
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+            have = {m.get("name") for m in data.get("models", [])}
+            want = spec.get("model", "")
+            if want and want not in have:
+                # Cocokkan nama tag persis. Pencocokan "keluarga" (qwen3.5:9b dianggap ada
+                # karena qwen3.5:4b terpasang) melapor 'siap' untuk mesin yang pasti gagal.
+                return False, f"server hidup, model '{want}' belum di-pull (ada: {', '.join(sorted(h for h in have if h)) or '-'})"
+            return True, ""
+        except Exception as exc:  # noqa: BLE001
+            return False, f"server tidak menjawab ({type(exc).__name__})"
+    return True, ""
+
+
+HEADLESS_RULE = """ATURAN PENGANGKUTAN (berlaku untuk panggilan ini):
+Anda berjalan headless (`agy -p`), dan headless tidak bisa menyetujui izin tool. Kalau Anda
+memanggil tool apa pun yang butuh izin (menjalankan perintah, membaca berkas di luar prompt),
+permintaan itu ditolak otomatis dan jawaban Anda kembali KOSONG — pemeriksaan yang gagal begitu
+bukan vonis, melainkan waktu dan kuota yang terbuang. Semua bukti sudah ada di pesan ini: nilai
+teksnya apa adanya. Tidak ada perintah yang perlu Anda jalankan; kalau sebuah klaim hanya bisa
+dibuktikan dengan menjalankan sesuatu, tulis itu sebagai TEMUAN bahwa buktinya tidak terkirim,
+bukan sebagai kegagalan.
+"""
+
+
+def build_prompt(subject, focus):
+    # Satu-satunya pemanggil build_prompt adalah jalur headless (run_engine), jadi aturan tanpa-tool
+    # ini milik transport, bukan milik mesin: tier pane yang punya tool tidak lewat sini.
+    parts = [REVIEW_BRIEF, HEADLESS_RULE]
+    if focus:
+        parts.append(f"Fokus pemeriksaan: {focus}\n\n")
+    parts.append(subject)
+    return "".join(parts)
+
+
+def daemon_get(path, timeout=10):
+    url = f"http://127.0.0.1:{os.environ.get('STATION_PORT', '8999')}{path}"
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def daemon_post(path, payload, timeout=10):
+    url = f"http://127.0.0.1:{os.environ.get('STATION_PORT', '8999')}{path}"
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r")
+
+
+def strip_ansi(text):
+    return ANSI_RE.sub("", text or "")
+
+
+
+SPINNER_CHARS = "⠁⠂⠄⡀⢀⠐⠈⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⢿⣟⣷"
+
+
+def last_frame(raw):
+    """Ambil frame render TERAKHIR dari scrollback.
+
+    Antigravity tidak mencetak teks secara kumulatif; ia menggambar ulang barisnya
+    dengan ESC[2A (naik 2 baris). Menggabungkan seluruh history menghasilkan ribuan
+    potongan kata yang sama berulang, dan panjangnya akan terus berubah sehingga
+    deteksi 'teks sudah stabil' tidak pernah selesai.
+    """
+    parts = re.split(r"\x1b\[2A|\x1b\[1A", raw)
+    return parts[-1] if parts else raw
+
+
+
+
+def tab_project(tab):
+    """Proyek MILIK TAB — dari `cli_profiles.json`, bukan dari cwd shell di dalamnya.
+
+    Dua angka ini berbeda dan yang benar adalah yang pertama. Terukur 2026-10-08 11:2x:
+    `pane_current_path` untuk tab qoder mengembalikan ~/.ai-station hanya karena perintah shell
+    terakhir melakukan `cd` ke sana, sementara Qoder sendiri diluncurkan di
+    ~/Documents/ai-workstation dan tidak pernah pindah. Memakai cwd shell sebagai pagar direktori
+    akan membuat SEMI menolak hampir selalu — kegagalan yang aman, tapi diam lagi, dan diam justru
+    yang sedang dibuang dari mesin ini. Yang menentukan "proyek siapa yang dikerjakan tab ini"
+    adalah kolom workspace profil, karena kolom itulah yang dipakai daemon saat menyalakannya.
+    """
+    try:
+        data = json.loads((Path.home() / ".ai-station" / "config" / "cli_profiles.json")
+                          .read_text(encoding="utf-8"))
+        prof = data.get(tab)
+        if not isinstance(prof, dict):
+            return None
+        ws = (prof.get("workspace") or "").strip()
+        return ws or None
+    except Exception:  # noqa: BLE001 — tidak terbaca = UNKNOWN, bukan "boleh mengetik"
+        return None
+
+
+def pane_cwd(tab):
+    """Direktori kerja pane saat ini, lewat tmux — atau None kalau tidak terbaca.
+
+    Ditambahkan 2026-10-08 setelah audit peer menemukan bahwa drainer bisa mengirim tugas proyek A
+    ke pane yang sedang berdiri di proyek B. Yang menentukan mesin mana yang mengerjakan adalah
+    barisnya, jadi mengirim tanpa tahu di mana pane itu berada membuat engine mengerjakan tree
+    yang bukan tree laporan. None berarti UNKNOWN, dan UNKNOWN tidak pernah berarti boleh mengetik.
+    """
+    try:
+        res = subprocess.run(
+            ["tmux", "-L", os.environ.get("STATION_TMUX_SOCKET", "irsofka"),
+             "display-message", "-p", "-t", f"station-{tab}", "#{pane_current_path}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+        if res.returncode != 0:
+            return None
+        path = res.stdout.strip()
+        return path or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def pane_is_busy(frame):
+    return any(ch in frame for ch in SPINNER_CHARS) or "esc to cancel" in frame.lower()
+
+
+WORKING_WORDS = ("working", "running", "thinking", "generating")
+READY_WORDS = ("ready", "idle")
+
+
+def pane_state(tab):
+    """Status yang DINYATAKAN SENDIRI oleh CLI lewat judul pane tmux (OSC).
+
+    Qodercli menulis "✦ <topik> | Working" selama satu giliran berjalan dan "◇ … | Ready" di
+    prompt yang diam. Itu pernyataan mesin tentang dirinya sendiri, bukan dugaan dari bentuk glyph.
+    Bedanya konkret: menebak dari isi layar membuat satu baris chrome yang berdetak — jam berjalan,
+    persen konteks, glyph tool-call yang berganti — sudah cukup untuk menyebut pane yang SEDANG
+    DIAM sebagai sibuk, pada setiap pembacaan, selamanya. Itulah yang dialami qoder dan tidak
+    dialami antigravity, dan itulah sebabnya perintah operator mendarat di mesin yang satu dan
+    menggantung di mesin yang lain padahal keduanya melewati gerbang yang sama.
+
+    None berarti tidak ada yang dinyatakan — BUKAN berarti diam. Pemanggil wajib jatuh ke bukti
+    tidak langsung; UNKNOWN tidak pernah boleh diartikan kosong.
+    """
+    try:
+        res = subprocess.run(
+            ["tmux", "-L", os.environ.get("STATION_TMUX_SOCKET", "irsofka"),
+             "display", "-p", "-t", f"station-{tab}", "#{pane_title}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+        if res.returncode != 0:
+            return None
+        title = (res.stdout or "").strip().lower()
+    except Exception:  # noqa: BLE001 — tidak terbaca bukan berarti diam
+        return None
+    if not title:
+        return None
+    # Kata state dibaca dari EKOR judul ("✦ topik | working"). Mencocokkan di seluruh string akan
+    # salah setiap kali nama proyek di judul pane kebetulan memuat kata seperti "idle" atau "run".
+    tail = title.rsplit("|", 1)[-1].strip()
+    if any(w in tail for w in WORKING_WORDS):
+        return "working"
+    if any(w in tail for w in READY_WORDS):
+        return "ready"
+    return None
+
+
+def capture_pane(tab):
+    """Baca layar pane lewat tmux capture-pane.
+
+    Jauh lebih andal daripada mengurai /api/term/history: buffer itu berisi ribuan frame
+    redraw berisi ANSI mentah, sedangkan capture-pane mengembalikan TAMPILAN TERAKHIR
+    sebagai teks bersih. Ini juga tidak menggeser offset baca daemon, jadi GUI tidak
+    kehilangan byte-nya.
+    """
+    try:
+        res = subprocess.run(
+            ["tmux", "-L", os.environ.get("STATION_TMUX_SOCKET", "irsofka"),
+             "capture-pane", "-p", "-t", f"station-{tab}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+        if res.returncode != 0:
+            return None
+        return res.stdout
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def pane_idle(screen):
+    """Pane dianggap selesai kalau tidak ada spinner dan prompt input kosong terlihat."""
+    if not screen:
+        return False
+    if any(ch in screen for ch in SPINNER_CHARS) or "esc to cancel" in screen.lower():
+        return False
+    return ("? for shortcuts" in screen) or bool(re.search(r"^\s*>\s*$", screen, re.M))
+
+
+def tail_answer(screen, marker):
+    """Ambil isi setelah prompt terkirim, buang kerangka UI pane."""
+    lines = [l.rstrip() for l in screen.splitlines()]
+    idx = max((i for i, l in enumerate(lines) if marker in l), default=-1)
+    body = lines[idx + 1:] if idx >= 0 else lines
+    out = []
+    for l in body:
+        s = l.strip()
+        if not s or s.startswith("? for shortcuts") or set(s) <= set("─━>-│ "):
+            continue
+        if re.match(r"^(>\s*|.*·\s*(Gemini|Qwen|Claude)[\w .·-]*$)", s) and len(s) < 60 and "VERDICT" not in s.upper():
+            continue
+        out.append(s)
+    return "\n".join(out).strip()
+
+
+def run_via_pane(tab, prompt, timeout):
+    """Kirim tugas ke CLI yang SUDAH HIDUP di pane tmux, lalu baca jawabannya.
+
+    Kenapa tidak spawns `agy -p` baru: proses dingin butuh >100 detik hanya untuk login dan
+    membangun konteks (sumber kegagalan dispatch Antigravity selama ini), dan yang lebih
+    penting: kehilangan sesi hangat yang sudah punya riwayat percakapan. Submission memakai
+    /api/cli/run yang sejak 2026-10-06 mengirim \r, bukan \n — \n tidak pernah dianggap
+    Enter oleh TUI, sehingga prompt hanya menumpuk di kotak input.
+    """
+    import uuid
+    marker = f"XV-{uuid.uuid4().hex[:10]}"
+    body = f"{marker} {prompt}"[:6000]
+    try:
+        daemon_post("/api/cli/run", {"prompt": body, "target_cli": tab})
+    except Exception as exc:  # noqa: BLE001
+        return "UNAVAILABLE", (f"Tidak bisa mengirim ke pane '{tab}' (daemon tidak menjawab): {exc}. "
+                               "Hasil ini BELUM diverifikasi mesin kedua.")
+
+    started = time.time()
+    seen_prompt = False
+    quiet_since, best = None, ""
+    while time.time() - started < timeout:
+        time.sleep(1.5)
+        screen = capture_pane(tab)
+        if screen is None:
+            return "UNAVAILABLE", f"tmux capture-pane gagal untuk tab {tab}."
+        if marker in screen:
+            seen_prompt = True
+        if not seen_prompt:
+            continue
+        if not pane_idle(screen):
+            quiet_since = None
+            continue
+        answer = tail_answer(screen, marker)
+        if not answer:
+            continue
+        best = answer
+        if quiet_since is None:
+            quiet_since = time.time()
+        elif time.time() - quiet_since >= 3:
+            return "COMPLETED", answer[:8000]
+    if best:
+        return "TIMEOUT", "Jawaban belum selesai. Terakhir terbaca:\n\n" + best[:4000]
+    return "TIMEOUT", (f"Pane '{tab}' tidak menampilkan jawaban dalam {timeout}s. "
+                       "Prompt sudah dikirim; cek tab Antigravity untuk melihat statusnya.")
+
+
+def clean_answer(frame):
+    """Rapikan frame terminal: buang garis tepi UI dan baris duplikat hasil redraw."""
+    out, seen = [], set()
+    for line in frame.splitlines():
+        line = line.strip(" │┃┏┓┗┛┃─═")
+        if not line or line.startswith("[?") or line.startswith("[9"):
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+_AGY_MODELS_CACHE = None
+
+
+def agy_model_ids():
+    """Model id yang benar-benar dikenali CLI, dibaca saat dipakai (§12: jangan memilih dari ingatan).
+
+    Hasil gagal di-cache sebagai None supaya panggilan berikutnya mencoba lagi: registri yang
+    tidak bisa dibaca hari ini tidak boleh membuat setiap verifikasi ditolak selamanya.
+    """
+    global _AGY_MODELS_CACHE
+    if _AGY_MODELS_CACHE is None:
+        try:
+            r = run_grouped(["agy", "models"], timeout=60, text=True)
+            ids = {l.split("\t")[0].strip() for l in r.stdout.splitlines() if "\t" in l}
+            _AGY_MODELS_CACHE = ids or None
+        except Exception:  # noqa: BLE001 — meter/model tak terbaca = UNKNOWN, bukan 'ada'
+            _AGY_MODELS_CACHE = None
+    return _AGY_MODELS_CACHE
+
+
+def run_engine(spec, prompt, timeout):
+    """Jalankan satu mesin. Status jujur: UNAVAILABLE kalau memang tidak ada."""
+    started = time.time()
+    kind = spec.get("kind", "cli")
+
+    if kind == "pane":
+        # Registri bisa menunjuk id yang sudah tidak ada di instalasi — persis yang terjadi pada
+        # dua decider (`gemini-4-argon`, `gemini-3.1-pro-high`), dan gejalanya adalah dispatch
+        # mati dalam 60 ms dengan exit 0-per-print, lalu dicatat FAILED seolah mesinnya menolak
+        # pekerjaan. Gerbang menolak lebih dulu dengan menyebut id-nya, karena vonis FAILED dari
+        # id mati pernah dibaca sebagai 'verifier tidak sepakat', dan itu conclusions yang salah.
+        mid = spec.get("model") or ""
+        known = agy_model_ids()
+        if known and mid and mid not in known:
+            return "UNAVAILABLE", (f"registri menunjuk model id '{mid}' yang tidak dikenali CLI; "
+                                   f"tersedia: {', '.join(sorted(known)[:6])} — perbaiki "
+                                   "config/engines.json, jangan tandai vonis")
+        status, out = run_via_pane(spec.get("tab", "antigravity"), prompt, timeout)
+        return status, out
+
+    if kind == "ollama":
+        try:
+            # num_ctx TIDAK boleh diwarisi dari default Ollama (4096). Pemeriksaan kode
+            # menghasilkan jawaban panjang + konteks berkas, dan kehabisan konteks tampil
+            # sebagai "jawaban kosong" yang mudah disalahartikan sebagai model bodoh.
+            opts = {"num_ctx": int(spec.get("num_ctx", 12288)),
+                    "num_predict": int(spec.get("num_predict", 1200)),
+                    "temperature": float(spec.get("temperature", 0.2))}
+            req = urllib.request.Request(
+                spec.get("url") or "http://127.0.0.1:11434/api/generate",
+                data=json.dumps({"model": spec.get("model"), "prompt": prompt,
+                                 "stream": False, "options": opts,
+                                 # qwen3.5 adalah model berpikir: tanpa think=False, seluruh
+                                 # anggaran token habis di kolom `thinking` dan `response`
+                                 # kembali KOSONG — terlihat seperti model bodoh padahal
+                                 # kehabisan ruang. Pemeriksa kode butuh jawaban, bukan monolog.
+                                 "think": bool(spec.get("think", False)),
+                                 # Aturan GPU workstation: jangan menahan VRAM. Tanpa ini
+                                 # model tinggal di kartu sampai 5 menit setelah pemeriksaan.
+                                 "keep_alive": spec.get("keep_alive", 0)}).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+            out = (data.get("response") or "").strip()
+            if out:
+                return "COMPLETED", out
+            # Jawaban kosong bukan "gagal periksa" tanpa sebab: sertakan apa yang server
+            # bilang, supaya mesin/pembaca tahu bedanya model menolak, kehabisan token,
+            # atau endpoint tidak cocok.
+            sebab = data.get("error") or ", ".join(f"{k}={str(v)[:40]}" for k, v in data.items()
+                                                   if k in ("done_reason", "prompt_eval_count", "eval_count"))
+            cuma_pikir = len((data.get("thinking") or "").strip())
+            if cuma_pikir and not out:
+                sebab += f" · model hanya menghasilkan monolog berpikir ({cuma_pikir} karakter) tanpa jawaban"
+            return "FAILED", (f"Model {spec.get('model')} menjawab kosong"
+                              + (f" ({sebab})" if sebab else "") + ". Hasil ini BELUM diverifikasi.")
+        except Exception as exc:  # noqa: BLE001
+            return "UNAVAILABLE", (f"Engine lokal tidak aktif ({type(exc).__name__}: {exc}). "
+                                   "Hasil ini BELUM diverifikasi oleh mesin kedua.")
+
+    binary = spec.get("binary", "")
+    if not shutil.which(binary):
+        return "UNAVAILABLE", f"Perintah '{binary}' tidak ditemukan di PATH."
+
+    cmd = [c.replace("{model}", str(spec.get("model", "")))
+             .replace("{prompt}", prompt) for c in spec["template"]]
+    try:
+        res = run_grouped(cmd, timeout=timeout, text=True, merge_stderr=True)
+        out = (res.stdout or "").strip()
+        if res.returncode != 0:
+            return "FAILED", out or f"exit {res.returncode} tanpa output"
+        if not out:
+            return "FAILED", "(mesin tidak menghasilkan output)"
+        # 'exit 0 + teks' BUKAN bukti pemeriksaan. Terukur 2026-10-07: `agy -p` headless
+        # menolak tool yang minta izin, mengembalikan response berisi penolakannya, dan
+        # exit 0 — audit seperti itu tercatat COMPLETED padahal tidak ada yang diperiksa.
+        # Format VERDICT adalah satu-satunya tanda mesin itu benar-benar menjawab brief.
+        reply = unwrap_cli_response(out)
+        if "VERDICT" not in reply.upper():
+            return "FAILED", (out + "\n\n(mesin menjawab tanpa baris VERDICT: tidak ada "
+                              "pemeriksaan yang bisa dicatat sebagai terverifikasi)")
+        return "COMPLETED", out
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT", f"Batas {timeout}s terlampaui; pemeriksaan tidak selesai."
+    except Exception as exc:  # noqa: BLE001
+        return "FAILED", f"{type(exc).__name__}: {exc}"
+
+
+def unwrap_cli_response(text):
+    """Ambil isi jawaban dari sampul yang dicetak CLI (--output-format json).
+
+    Hanya dibuka kalau teksnya memang JSON dengan kunci 'response'; teks polos lewat utuh.
+    """
+    # Baris pertama bukan satu-satunya tempat sampul bisa muncul: CLI menulis log pendahuluan
+    # sebelum JSON. Jadi setiap baris dicoba, dan yang terakhir menang (yang paling baru).
+    # Hanya dibuka kalau SELURUH teks memang satu objek berpayung `response`. Memindai setiap
+    # baris dan mengambil JSON terakhir membuat jawaban verifier yang MEMUAT contoh payload —
+    # misalnya `{"status": "err", "response": "VERDICT: SETUJU"}` sebagai bukti — menjadi sumber
+    # vonis, dan seluruh ulasan aslinya dibuang. Bentuk CLI sungguhan adalah satu objek dan tidak
+    # lebih; kalau teksnya bukan itu, ia dibaca apa adanya.
+    def _envelope(candidate):
+        """Sampul CLI sejati: punya `response` dan penghitung waktunya sendiri.
+
+        Bentuknya yang diminta, bukan posisinya di teks. CLI mencetak baris log sebelum JSON, jadi
+        "satu objek di seluruh teks" terlalu ketat; dan verifier yang mengutip payload contoh di
+        dalam ulasannya tidak boleh menang, jadi "baris JSON terakhir apa pun" terlalu longgar.
+        Penanda yang dipilih adalah pasangan kunci yang hanya ada pada sampul sungguhan: `response`
+        bersama `duration_seconds` atau `conversation_id`. Contoh `{\'status\': \'err\',
+        \'response\': ...}` tidak punya keduanya, dan itu persis bentuk yang dipakai tes di bawah.
+        """
+        try:
+            d = json.loads(candidate)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(d, dict) or not isinstance(d.get("response"), str):
+            return None
+        if not d["response"].strip():
+            return None
+        if "duration_seconds" in d or "conversation_id" in d:
+            return d["response"]
+        return None
+
+    body = None
+    t = (text or "").strip()
+    whole = _envelope(t) if t.startswith("{") and t.endswith("}") else None
+    if whole is not None:
+        return whole
+    for line in (text or "").splitlines():
+        c = line.strip()
+        if not (c.startswith("{") and c.endswith("}")):
+            continue
+        got = _envelope(c)
+        if got is not None:
+            body = got          # yang terakhir: CLI mencetak sampulnya di ujung keluaran
+    return body if body is not None else text
+
+
+def parse_verdict(text):
+    """Ambi verdict TERAKHIR, bukan pertama.
+
+    Layar pane menyimpan jawaban sebelumnya di scrollback. Mengambil kecocokan pertama
+    membuat audit mencatat verdict dari pemeriksaan lama — salah catat yang tampak meyakinkan.
+    """
+    # Dicari di SELURUH teks, tidak di baris yang DIAWALI kata VERDICT. Jawaban CLI datang
+    # bersampul JSON — `{"response":"VERDICT: SETUJU\n..."}` — dan kalau sampulnya tidak terbuka
+    # sempurna, baris pertama tidak pernah mulai dengan VERDICT: setiap vonis terbaca TIDAK_YAKIN,
+    # termasuk SETUJU yang sungguh-sungguh. Terukur 2026-10-08 14:35: empat pemeriksaan tercatat
+    # TIDAK_YAKIN padahal teksnya menulis PERLU_KOREKSI. Karena gerbang push sekarang MEMBACA
+    # catatan ini untuk memutuskan apakah sebuah commit boleh berangkat, salah label di sini berarti
+    # pekerjaan yang sudah diloloskan tidak akan pernah bisa didorong — dan kegagalan itu akan
+    # terlihat seperti "verifier belum menyetujui", bukan seperti pembaca yang buta.
+    # Jangkar baris, bukan seluruh teks. Versi "cari di mana saja, ambil yang terakhir" tercatat
+    # memalsukan dirinya sendiri dalam sebelas menit: jawaban yang benar `VERDICT: PERLU_KOREKSI`
+    # diikuti paragraf yang mengutip instruksi saya — `... jawab VERDICT: SETUJU` — dan kecocokan
+    # TERAKHIR itu yang terbaca sebagai vonis. Karena gerbang push sekarang membeli izin dari angka
+    # ini, sebuah kalimat yang kebetulan menyebut kata sakti akan cukup untuk mendorong kode apa pun
+    # ke origin. Jadi yang dihitung hanyalah baris yang MEMANG vonis: setelah dibersihkan dari
+    # sampul markdown, barisnya harus dimulai dengan VERDICT.
+    #
+    # "yang terakhir menang" tetap dipertahankan untuk scrollback pane, di mana jawaban lama mendahului
+    # jawaban baru. Tidak ada vonis yang terbaca = TIDAK_YAKIN, dan itu arah yang aman: tidak ada
+    # izin, bukan izin yang diragukan.
+    # Sampul dibuka DI SINI, bukan oleh pemanggil. Jalur produksi memanggil `parse_verdict(text)`
+    # pada keluaran mentah sementara tes saya memanggilnya SETELAH membuka sampul — jadi setiap
+    # pemeriksaan headless tercatat TIDAK_YAKIN walau teksnya menulis vonis dengan jelas, dan suite
+    # tetap hijau karena yang diuji adalah rangkaian yang berbeda dari yang berjalan. Satu fungsi,
+    # satu jalur, tes yang memanggil fungsi itu apa adanya.
+    text = unwrap_cli_response(text)
+    found = "TIDAK_YAKIN"
+    for line in (text or "").splitlines():
+        raw = line.strip()
+        # Baris kutipan BUKAN vonis pemeriksa. `> VERDICT: SETUJU` adalah verifier yang menunjukkan
+        # contoh teks — sering justru contoh yang ia sebut salah. Membuang `>` dari awalan akan
+        # membacanya sebagai keputusan pemeriksa itu sendiri, jadi baris kutipan ditolak lebih dulu
+        # dan tidak pernah dibersihkan menjadi calon.
+        if raw.startswith(">"):
+            continue
+        u = re.sub(r"[`*_\"']", "", raw).upper()
+        # Garis akhir ikut diminta. Tanpa `$`, baris yang MENYEBUT format jawaban —
+        # `VERDICT: SETUJU | PERLU_KOREKSI | TIDAK_YAKIN` — tetap cocok dan mengambil token
+        # pertamanya, dan karena "yang terakhir menang" dipertahankan, kutipan format di bagian
+        # bawah jawaban akan menimpa vonis asli di atasnya. Yang diterima hanya baris yang berisi
+        # SATU vonis dan tidak ada kata lain sesudahnya.
+        m = re.fullmatch(r"VERDICT\s*[:=]\s*([A-Z_]+)[\s.,;:]*", u)
+        if not m:
+            continue
+        v = m.group(1)
+        if v.startswith("PERLU"):
+            found = "PERLU_KOREKSI"
+        elif v.startswith("TIDAK"):
+            found = "TIDAK_YAKIN"
+        elif v == "SETUJU":
+            found = "SETUJU"
+        else:
+            # Baris vonis yang tokennya tidak dikenal pemeriksa. Dibiarkan lewat, ini mewarisi vonis
+            # baris sebelumnya — `VERDICT: BATAL` di bawah jawaban SETUJU akan tetap terbaca SETUJU,
+            # dan "yang terakhir menang" justru menjadi "yang terakhir diabaikan". Baris vonis adalah
+            # keputusan, jadi ia HARUS mengubah keadaan; yang tidak bisa dibaca berarti tidak ada
+            # izin, bukan izin yang dipertahankan.
+            found = "TIDAK_YAKIN"
+    return found
+
+
+def subject_fingerprint(subject: str) -> str:
+    """Identitas artefak = isi yang benar-benar diberangkatkan.
+
+    Sebelum ini `ref` hanya string path, sehingga "berkas sama, isi berubah" dan "berkas sama,
+    tidak ada diff" tidak bisa dibedakan. Hash ditutup di sini supaya putaran retry dihitung
+    per isi, bukan per nama.
+    """
+    return hashlib.sha256(subject.encode("utf-8", "replace")).hexdigest()
+
+
+def verdict_in_summary(summary: str) -> str:
+    """Ambil vonis dari KEPALA ringkasan saja, dengan disiplin yang sama seperti gerbang push:
+    setelah pemisah " :: " ada potongan jawaban model, dan potongan itu bisa memuat teks apa pun."""
+    head = str(summary or "").split(" :: ", 1)[0]
+    m = re.search(r"VERDICT=([A-Z_]+)", head.upper())
+    return m.group(1) if m else ""
+
+
+def recent_verdicts(subject_hash: str, limit: int = HANDOVER_AFTER):
+    """Vonis terbaru (terbaru dulu) untuk artefak yang sama; [] bila belum pernah dinilai.
+
+    `Store.query` menelan galat SQL menjadi daftar kosong, dan itu akan membaca "riwayat tidak
+    terbaca" sebagai "belum pernah gagal" — arah yang justru membuka jalur. Karena itu
+    `execute()` dipakai langsung supaya galatnya sampai ke pemanggil.
+    """
+    sys.path.insert(0, str(AI_STATION / "tools"))
+    from session_ingestor import Store, ph
+    store = Store()
+    try:
+        ph1 = ph(1, store.engine)
+        cur = store.execute(
+            "SELECT summary FROM action_log WHERE kind = 'cross_verify' "
+            f"AND subject_hash = {ph1} ORDER BY ts DESC, id DESC LIMIT {ph1}",
+            (subject_hash, limit))
+        if cur is None:
+            raise RuntimeError("query riwayat cross_verify gagal (lihat [sql skip])")
+        try:
+            return [verdict_in_summary(row[0]) for row in cur.fetchall()]
+        finally:
+            cur.close()
+    finally:
+        try:
+            store.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def handover_gate_reason(subject_hash: str, read=None):
+    """Alasan dispatch DITOLAK karena handover sudah waktunya, atau None kalau boleh jalan.
+
+    Aturannya: N vonis TERAKHIR untuk artefak (isi) yang sama semuanya PERLU_KOREKSI. Diff
+    mengubah hash, jadi isi baru mulai dari hitungan nol dan artefak lain tidak mewarisi
+    hitungan. Riwayat yang tidak terbaca menolak dispatch — jumlah putaran yang tidak diketahui
+    bukan nol putaran, arah gagal yang sama dengan gerbang kuota dan gerbang push.
+    """
+    read = read or recent_verdicts
+    try:
+        verdicts = list(read(subject_hash))
+    except Exception as exc:  # noqa: BLE001
+        return (f"riwayat verifikasi artefak ini tidak terbaca ({exc}) — jumlah putaran tidak "
+                f"diketahui, jadi dispatch ditolak; {HANDOVER_REQUIRED}")
+    head = verdicts[:HANDOVER_AFTER]
+    if len(head) < HANDOVER_AFTER or any(v != "PERLU_KOREKSI" for v in head):
+        return None
+    return (f"{HANDOVER_AFTER} putaran PERLU_KOREKSI berturut-turut pada artefak yang sama tanpa "
+            f"diff — {HANDOVER_REQUIRED}: serahkan ke operator atau mesin lain lewat ask_peer, "
+            f"jangan kirim ulang isi yang tidak berubah")
+
+
+def record(subject_ref, engine, model, status, verdict, text, duration_ms,
+           subject_hash=None, kind="cross_verify"):
+    """Catat hasil verifikasi ke action_log supaya ketidaksepakatan antar-mesin jadi memori."""
+    try:
+        sys.path.insert(0, str(AI_STATION / "tools"))
+        from session_ingestor import Store
+        store = Store()
+        store.insert_event({
+            "ts": datetime.now().isoformat(), "engine": "station", "session_id": None,
+            "turn_id": None, "tab": engine, "kind": kind, "model": model,
+            "effort": "", "cwd": os.getcwd(), "tool": "cross_verify",
+            "summary": f"verifikasi oleh {engine}: {status} verdict={verdict} :: "
+                       f"{(text or '')[:4000]}",
+            "exit_code": 0 if status == "COMPLETED" else 1,
+            "duration_ms": duration_ms,
+            # `subject_ref` adalah berkas --file yang benar-benar dikirim ke model. Untuk subjek
+            # teks polos (tanpa --file) tidak ada berkasnya, dan jalur rekaman TIDAK boleh mengarang
+            # satu: gerbang push membaca berkas ini untuk memutuskan apakah vonis itu menutup commit
+            # yang akan berangkat. Menunjuk berkas bukti run lain akan meminjam izin dari pekerjaan
+            # yang berbeda — cara paling halus untuk mendorong kode yang tidak pernah dibaca siapa
+            # pun. Kosong berarti tidak ada cakupan, dan tidak ada cakupan berarti tidak ada izin.
+            "raw_ref": str(subject_ref) if subject_ref else None,
+            "subject_hash": subject_hash,
+        })
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[verify] hasil tidak tercatat ke SQL: {exc}", file=sys.stderr)
+        return False
+
+
+def selftest() -> int:
+    """Pembacaan vonis diuji pada bentuk jawaban yang benar-benar dikirim CLI.
+
+    Ini bukan tes utilitas: catatan `verdict=` adalah bahan yang dibaca gerbang push malam ini.
+    Jawaban bersampul JSON yang gagal dibuka terbaca sebagai TIDAK_YAKIN untuk SETUJU yang asli,
+    dan itu mengurung pekerjaan yang sudah diloloskan verifier di dalam keadaan "belum diverifikasi"
+    selamanya — kegagalan yang dari luar terlihat sangat hati-hati.
+    """
+    checks = []
+
+    def check(name, cond, detail=""):
+        checks.append((name, bool(cond), detail))
+
+    def parse(t):
+        # Dipanggil apa adanya: inilah yang dilihat produksi pada baris 845. Membuka sampul di sini
+        # akan menguji fungsi yang berbeda dari yang dijalankan.
+        return parse_verdict(t)
+    check("jawaban polos terbaca", parse("VERDICT: SETUJU\nALASAN: ok") == "SETUJU")
+    # Fiksurnya membawa penanda sampul CLI sungguhan (conversation_id / duration_seconds). Versi
+    # pertama tes ini menulis `{"response": ...}` polos, yang bukan bentuk yang dikeluarkan agy:
+    # kode pun dilonggarkan agar cocok dengan fiktur yang salah, dan tesnya tetap hijau.
+    check("jawaban bersampul JSON terbaca — ini yang salah selama ini",
+          parse('{\"conversation_id\":\"c1\",\"status\":\"SUCCESS\",'
+                '\"response\":\"VERDICT: PERLU_KOREKSI\\n\\nALASAN: bla\",\"duration_seconds\":9.4}')
+          == "PERLU_KOREKSI")
+    check("baris log pendahuluan sebelum JSON tidak menyembunyikan vonis",
+          parse("booting...\n{\"conversation_id\":\"c2\",\"response\":\"VERDICT: SETUJU\","
+                "\"duration_seconds\":3.1}") == "SETUJU")
+    check("scrollback jawaban lama kalah oleh jawaban terbaru (yang terakhir menang)",
+          parse("VERDICT: PERLU_KOREKSI\n...\nVERDICT: SETUJU") == "SETUJU")
+    check("teks tanpa vonis TIDAK dilepas sebagai SETUJU",
+          parse("saya tidak bisa memeriksa") == "TIDAK_YAKIN")
+    check("sampul JSON dengan response kosong tidak menutupi teks aslinya",
+          parse('{\"response\":\"\"}\nVERDICT: TIDAK_YAKIN') == "TIDAK_YAKIN")
+    # Regresi yang ditemukan oleh ledger, bukan oleh pembacaan: jawaban PERLU_KOREKSI yang di
+    # bawahnya mengutip instruksi "jawab VERDICT: SETUJU" pernah terbaca SETUJU.
+    check("kutipan instruksi di tengah jawaban TIDAK BISA memalsukan vonis",
+          parse("VERDICT: PERLU_KOREKSI\nALASAN: ... seperti diminta, jawab VERDICT: SETUJU "
+                "bila bersih") == "PERLU_KOREKSI", parse("VERDICT: PERLU_KOREKSI\nx VERDICT: SETUJU"))
+    check("kalimat yang hanya MEMUAT kata vonis, tanpa baris vonis, tetap TIDAK_YAKIN",
+          parse("menurut saya jawabannya VERDICT: SETUJU ya") == "TIDAK_YAKIN")
+    check("vonis dengan sampul markdown tetap terbaca",
+          parse("**VERDICT:** SETUJU\nALASAN: beres") == "SETUJU")
+    # Tiga bentuk yang ditemukan ronde tujuh: semuanya adalah jawaban yang MENYEBUT kata vonis
+    # tanpa MEMUTUSKAN dengannya. Ketiganya harus berakhir tanpa izin, bukan sebagai SETUJU.
+    check("baris yang menyebut SEMUA pilihan format tidak dibaca sebagai vonis",
+          parse("VERDICT: PERLU_KOREKSI\nALASAN: x\nVERDICT: SETUJU | PERLU_KOREKSI | TIDAK_YAKIN")
+          == "PERLU_KOREKSI", parse("VERDICT: SETUJU | PERLU_KOREKSI"))
+    check("baris kutipan vonis bukan keputusan pemeriksa",
+          parse("VERDICT: PERLU_KOREKSI\ncontoh yang salah:\n> VERDICT: SETUJU") == "PERLU_KOREKSI",
+          parse("a\n> VERDICT: SETUJU"))
+    check("token vonis yang tidak dikenal MEMATIKAN izin, tidak mewarisi vonis baris sebelumnya",
+          parse("VERDICT: SETUJU\nALASAN: x\nVERDICT: BATAL") == "TIDAK_YAKIN",
+          parse("VERDICT: SETUJU\nVERDICT: BATAL"))
+    check("kata yang HANYA DIMULAI dengan SETUJU tidak dihitung sebagai persetujuan",
+          parse("VERDICT: SETUJUTIDAK") == "TIDAK_YAKIN", parse("VERDICT: SETUJUTIDAK"))
+    check("payload JSON yang DIKUTIP di dalam ulasan tidak menggantikan ulasan itu",
+          parse('VERDICT: PERLU_KOREKSI\nALASAN: misal {"status":"err","response":"VERDICT: '
+                'SETUJU"}\nselesai') == "PERLU_KOREKSI",
+          parse('VERDICT: PERLU_KOREKSI\nx {"response":"VERDICT: SETUJU"}'))
+
+    # Pemicu handover (baris ledger 321). Ledger kecil di memori menggantikan tabel, dan yang
+    # diuji adalah keputusan produksi dengan pembaca disuntikkan — bukan salinan logikanya.
+    ledger = {}
+
+    def fake_read(h):
+        return list(reversed(ledger.get(h, [])))[:HANDOVER_AFTER]
+
+    A = subject_fingerprint("artefak A")
+    B = subject_fingerprint("artefak B")
+    ledger[A] = ["PERLU_KOREKSI"] * 2
+    check("dua putaran PERLU_KOREKSI belum memicu handover",
+          handover_gate_reason(A, fake_read) is None)
+    ledger[A].append("PERLU_KOREKSI")
+    reason = handover_gate_reason(A, fake_read)
+    check("putaran ke-4 pada artefak tanpa diff ditolak dan menyebut handover",
+          reason is not None and HANDOVER_REQUIRED in reason)
+    ledger[B] = ["PERLU_KOREKSI"]
+    check("diff memulai hitungan dari nol", handover_gate_reason(B, fake_read) is None)
+    ledger[B].extend(["PERLU_KOREKSI", "PERLU_KOREKSI"])
+    check("tiga putaran pada isi baru juga menolak dispatch berikutnya",
+          handover_gate_reason(B, fake_read) is not None)
+    ledger[B].append("SETUJU")
+    check("vonis selain PERLU_KOREKSI memutus deretan",
+          handover_gate_reason(B, fake_read) is None)
+    check("kembali ke isi lama yang sudah tiga kali gagal tetap ditolak",
+          handover_gate_reason(A, fake_read) is not None)
+
+    def broken_read(_h):
+        raise RuntimeError("database tidak menjawab")
+    check("riwayat tak terbaca menolak dispatch, bukan dibaca sebagai nol putaran",
+          handover_gate_reason(A, broken_read) is not None)
+
+    # Transport, bukan rasa: dua pengiriman verifikasi hari ini mati karena pemeriksa headless
+    # memanggil tool yang butuh izin, izinnya ditolak otomatis, dan jawabannya kembali kosong —
+    # exit 0 dengan teks kosong. Vonis yang tidak pernah ada dicatat FAILED, dan itu benar; yang
+    # salah adalah prompt yang memancing panggilan itu tanpa memperingatkan bahwa tangannya tidak ada.
+    _p = build_prompt("SUBJEK_UJI", "FOKUS_UJI")
+    check("prompt headless membawa aturan tanpa-tool",
+          "headless" in _p and "KOSONG" in _p, _p[:120])
+    check("fokus dan subjek terkirim utuh setelah aturan",
+          "FOKUS_UJI" in _p and _p.rstrip().endswith("SUBJEK_UJI"), _p[-80:])
+    bad = [c for c in checks if not c[1]]
+    for name, okval, detail in checks:
+        print(f"[{'ok    ' if okval else 'GAGAL '}] {name}" + (f" — {detail}" if detail and not okval else ""))
+    print(f"\ncross_verify selftest: {len(checks) - len(bad)}/{len(checks)} sesuai")
+    return 1 if bad else 0
+
+
+def _gate_selftest_cases():
+    """Deretan keadaan meter yang WAJIB berujung penolakan, ditambah yang boleh lewat.
+
+    Setiap kasus di sini lahir dari lubang nyata yang ditemukan audit mesin lain terhadap
+    gate ini: jendela kosong, ambang tidak terbaca, state bukan laporan, cap waktu hilang
+    atau dari masa depan, fraksi di luar 0..1, pembacaan basi. Fungsinya bukan menguji
+    matematika — fungsinya menjaga supaya "aturan yang gagal dibaca" jangan pernah kembali
+    menjadi "boleh lewat".
+    """
+    now = datetime.now().astimezone()
+    utc_now = now.astimezone(timezone.utc)
+
+    def iso(hours_from_now: float) -> str:
+        return (now + timedelta(hours=hours_from_now)).isoformat()
+
+    def zulu() -> str:
+        return utc_now.isoformat().replace("+00:00", "Z")
+
+    base_gate = {"engine": "antigravity", "scope": "Claude and GPT models",
+                 "windows": ["5h", "weekly"]}
+
+    def row(window, frac, state="REPORTED", ts=None, **over):
+        r = {"engine": "antigravity", "scope": "Claude and GPT models",
+             "limit_window": window, "remaining_fraction": frac, "state": state,
+             "ts": iso(0) if ts is None else ts}
+        r.update(over)
+        return r
+
+    def ok_rows():
+        return [row("5h", 0.94), row("weekly", 0.97)]
+
+    # (nama, baris meter, override gate, harus_ditolak)
+    return [
+        ("kedua jendela segar dan REPORTED", ok_rows(), {}, False),
+        ("baris asing dicampur, sisanya sehat", [row("5h", 0.94), "sampah", row("weekly", 0.97)],
+         {}, False),
+        ("windows kosong", ok_rows(), {"windows": []}, True),
+        ("min_fraction teks", ok_rows(), {"min_fraction": "abc"}, True),
+        ("min_fraction 1.5", ok_rows(), {"min_fraction": 1.5}, True),
+        ("min_fraction negatif", ok_rows(), {"min_fraction": -3}, True),
+        ("gate tanpa 'engine'", ok_rows(), {"engine": ""}, True),
+        ("scope salah ketik ('Anthropic')", ok_rows(), {"scope": "Anthropic"}, True),
+        ("quota_gate bukan objek", ok_rows(), {"__selftest_scalar__": True}, True),
+        ("meter tidak ada sama sekali", [], {}, True),
+        ("hanya satu jendela dilaporkan", [row("5h", 0.94)], {}, True),
+        ("hanya baris bukan dict", ["sampah"], {}, True),
+        ("state UNAVAILABLE", [row("5h", 0.94), row("weekly", 0.97, state="UNAVAILABLE")],
+         {}, True),
+        ("remaining_fraction None", [row("5h", None), row("weekly", 0.97)], {}, True),
+        ("frac 1.4 — bukan pecahan", [row("5h", 1.4), row("weekly", 0.97)], {}, True),
+        ("frac -0.2", [row("5h", -0.2), row("weekly", 0.97)], {}, True),
+        ("frac NaN", [row("5h", float("nan"), ), row("weekly", 0.97)], {}, True),
+        ("ts dari masa depan", [row("5h", 0.94, ts=iso(2)), row("weekly", 0.97)], {}, True),
+        ("tanpa cap waktu", [row("5h", 0.94, ts=""), row("weekly", 0.97, ts="")], {}, True),
+        ("pembacaan basi 7 jam", [row("5h", 0.94, ts=iso(-7)), row("weekly", 0.97)], {}, True),
+        ("ts detik sama: REPORTED vs UNAVAILABLE -> yang lemah menang",
+         [row("5h", 0.94), row("5h", 0.94, state="UNAVAILABLE"), row("weekly", 0.97)], {}, True),
+        ("ts format Z (UTC) tetap dikenali dan dianggap segar",
+         [row("5h", 0.94, ts=zulu()), row("weekly", 0.97, ts=zulu())], {}, False),
+    ], base_gate
+
+
+def gate_selftest() -> int:
+    """Jalankan tabel kasus gate tanpa menyentuh daemon maupun database."""
+    cases, base_gate = _gate_selftest_cases()
+    failures = 0
+    real_quota = globals()["treasury_quota"]
+    try:
+        for name, rows, gate_over, must_refuse in cases:
+            scalar = gate_over.pop("__selftest_scalar__", False)
+            gate = dict(base_gate, **gate_over)
+            globals()["treasury_quota"] = lambda *a, _r=rows: (_r, 3600)
+            spec = {"quota_gate": 12345 if scalar else gate}
+            reason = quota_gate_reason(spec)
+            refused = reason is not None
+            if refused != must_refuse:
+                failures += 1
+            print(f"  [{'GAGAL' if refused != must_refuse else 'ok  '}] "
+                  f"harus {'DITOLAK' if must_refuse else 'LEWAT '}: {name}")
+            if refused:
+                print(f"          -> {reason}")
+    finally:
+        globals()["treasury_quota"] = real_quota
+    print(f"\n=== gate selftest: {len(cases) - failures}/{len(cases)} sesuai ===")
+    return 1 if failures else 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Verifikasi lintas mesin")
+    ap.add_argument("engine", nargs="?",
+                    help="kunci mesin dari config/engines.json — jalankan `--list` untuk melihat "
+                         "yang terdaftar dan mana yang sedang terpasang")
+    # nargs='*' supaya subjek boleh ditulis sebelum ATAU sesudah opsi (--focus/--timeout);
+    # argparse menolak dua posisi opsional yang disela opsi.
+    ap.add_argument("subject", nargs="*", default=[], help="klaim/teks yang diperiksa")
+    ap.add_argument("--file", help="berkas yang diperiksa (isinya dikirim sebagai subjek)")
+    ap.add_argument("--focus", default="", help="sudut yang harus diperiksa")
+    ap.add_argument("--timeout", type=int, default=TIMEOUT)
+    ap.add_argument("--remember", action="store_true", help="catat ke action_log (default: ya)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="uji pembacaan vonis tanpa mengirim prompt ke mana pun")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--gate-selftest", action="store_true",
+                    help="uji tabel keadaan meter terhadap quota gate: tanpa daemon, "
+                         "tanpa database, tanpa mengirim prompt ke mana-mana")
+    args, extra = ap.parse_known_args()
+    # argparse menghabiskan pola posisi pada kelompok pertama, lalu sisa teks jadi 'extra'.
+    # Kita serap kembali token non-flag sebagai subjek; flag asing tetap error.
+    leftovers = [t for t in extra if not t.startswith("-")]
+    flags = [t for t in extra if t.startswith("-")]
+    if flags:
+        ap.error(f"opsi tak dikenal: {' '.join(flags)}")
+    if leftovers:
+        args.subject = list(args.subject) + leftovers
+
+    if args.gate_selftest:
+        return gate_selftest()
+    # Sebelum pemeriksaan "engine wajib": tanpa itu `--selftest` tanpa argumen posisi akan jatuh ke
+    # cabang pencetakan daftar dan menampilkan registry, seolah-olah itu hasil tes.
+    if getattr(args, "selftest", False):
+        return selftest()
+
+    reg = load_registry()
+    if args.list or not args.engine:
+        print("=== mesin verifikasi tersedia ===")
+        for name, spec in sorted(reg.items()):
+            ok, why = engine_present(spec)
+            state = why if why else ("ada" if ok else "TIDAK terpasang")
+            print(f"  {name:<14} {spec.get('role','?'):<10} {spec.get('model',''):<24} "
+                  f"{state:<34} {spec.get('note','')}")
+        print(f"\n  registry tambahan: {REGISTRY_PATH} "
+              f"({'ada' if REGISTRY_PATH.exists() else 'belum ada — menambah mesin baru tidak perlu ubah kode'})")
+        return 0
+
+    spec = reg.get(args.engine)
+    if not spec:
+        print(f"❌ mesin '{args.engine}' tidak ada di registry. Pilihan: {', '.join(sorted(reg))}")
+        return 2
+
+    if args.file:
+        path = Path(args.file).expanduser()
+        if not path.is_file():
+            print(f"❌ berkas tidak ditemukan: {path}")
+            return 2
+        body = path.read_text(errors="replace")
+        if len(body) > 120000:
+            body = body[:120000] + "\n...[dipotong; kirim bagian tertentu lewat --focus]"
+        subject = f"--- {path} ({len(body)} karakter) ---\n{body}"
+        ref = str(path)
+    else:
+        subject = " ".join(args.subject).strip()
+        ref = "klaim-tekstual"
+    if not subject.strip():
+        print("❌ beri subjek: teks klaim atau --file <path>")
+        return 2
+
+    blocked = quota_gate_reason(spec)
+    if blocked:
+        print(f"❌ {args.engine} tidak diberangkatkan: {blocked}")
+        record(ref, args.engine, spec.get("model", ""), "UNAVAILABLE", "UNAVAILABLE",
+               blocked, 0)
+        print("\n⚠ Klaim ini BELUM diverifikasi mesin kedua. Jangan catat sebagai terverifikasi.")
+        return 3
+
+    fingerprint = subject_fingerprint(subject)
+    handover = handover_gate_reason(fingerprint)
+    if handover:
+        print(f"❌ {args.engine} tidak diberangkatkan: {handover}")
+        print(f"  artefak : {ref}  sha256={fingerprint[:16]}")
+        record(ref, args.engine, spec.get("model", ""), "REFUSED", HANDOVER_REQUIRED,
+               handover, 0, subject_hash=fingerprint, kind="cross_verify_refused")
+        print("\n⚠ Klaim ini BELUM diverifikasi mesin kedua. Jangan catat sebagai terverifikasi.")
+        return 3
+
+    started = time.time()
+    status, text = run_engine(spec, build_prompt(subject, args.focus), args.timeout)
+    verdict = parse_verdict(text) if status == "COMPLETED" else status
+    dur = int((time.time() - started) * 1000)
+    # Hash hanya ikut pada vonis yang benar-benar terbaca: baris UNAVAILABLE/FAILED bukan putaran
+    # vonis, dan bila ia membawa hash ia akan memutus deretan PERLU_KOREKSI yang sedang dihitung.
+    saved = record(ref, args.engine, spec.get("model", ""), status, verdict, text, dur,
+                   subject_hash=fingerprint if status == "COMPLETED" else None)
+
+    print(f"=== hasil verifikasi oleh {args.engine} ({spec.get('model')}) ===")
+    print(f"  status  : {status}")
+    print(f"  verdict : {verdict}")
+    print(f"  durasi  : {dur} ms   tercatat di SQL: {'ya' if saved else 'TIDAK'}")
+    print("  ---")
+    print(text[:4000])
+    if status == "UNAVAILABLE":
+        print("\n⚠ Klaim ini BELUM diverifikasi mesin kedua. Jangan catat sebagai terverifikasi.")
+        return 3
+    return 0 if verdict == "SETUJU" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,26 @@
+[Unit]
+# Jam worker pembangunkan. 20 detik, bukan 5 menit seperti drainer dan bukan 90 detik seperti
+# rancangan pertama saya: operator menghitung dalam detik sesudah report, dan pada 90s dia
+# berdiri di samping mesin yang "masih juga" diam. Anggaran 20 wake/jam dan cooldown 45s
+# ditegakkan di tools/awakener.py, bukan di sini, supaya angkanya tetap satu definisi di satu
+# tempat (§12).
+Description=Irsofka AI Workstation - wake worker schedule
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
+
+[Timer]
+# Persistent=false adalah pilihan, sama seperti irsofka-autopilot.timer: mesin yang menyala
+# kembali harus mengejar satu tick sekarang, bukan seluruh tick yang terlewat sekaligus pada
+# detik seseorang baru duduk — tiap tick itu adalah kandidat mengetik ke pane orang.
+OnBootSec=2min
+# OnUnitInactiveSec, BUKAN OnUnitActiveSec. Yang terakhir diukur dari saat unit service terakhir
+# AKTIF; untuk oneshot yang sedang tidak berjalan dan timer yang di-restart, ia bisa tidak
+# pernah menghasilkan elapse berikutnya — terukur malam ini: `list-timers` kembali tanpa baris
+# NEXT sama sekali, jadi timer berstatus active tapi tidak pernah menyala. Jam baru dihitung
+# setiap kali tick selesai, yang untuk oneshot selalu terjadi.
+OnUnitInactiveSec=20s
+AccuracySec=1s
+RandomizedDelaySec=5
+Unit=irsofka-awakener.service
+
+[Install]
+WantedBy=timers.target

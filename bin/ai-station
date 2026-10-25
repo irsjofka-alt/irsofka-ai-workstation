@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# AI Workstation CLI Command Hub
+
+SCRIPT_DIR="$HOME/.ai-station"
+
+case "$1" in
+  status)
+    python3 "$SCRIPT_DIR/tools/brain_bridge.py" status
+    ;;
+  link)
+    python3 "$SCRIPT_DIR/tools/brain_bridge.py" link "$2"
+    ;;
+  ui|dashboard)
+    echo "Membuka Irsofka AI Workstation Native Studio..."
+    "$SCRIPT_DIR/bin/launch_gui.sh" &
+    ;;
+  see|screenshot)
+    python3 "$SCRIPT_DIR/tools/wayland_actor.py" screenshot
+    ;;
+  record-error)
+    python3 "$SCRIPT_DIR/tools/incident_recorder.py" "$2" "$3" "$4"
+    ;;
+  incidents)
+    python3 "$SCRIPT_DIR/tools/incident_recorder.py" list
+    ;;
+  recall)
+    python3 "$SCRIPT_DIR/tools/session_ingestor.py" recent "${2:-40}"
+    ;;
+  handoff)
+    python3 "$SCRIPT_DIR/tools/session_ingestor.py" handoff
+    ;;
+  verify)
+    python3 "$SCRIPT_DIR/tools/cross_verify.py" "${@:2}"
+    ;;
+  workers)
+    python3 "$SCRIPT_DIR/tools/call_workers.py" "${@:2}"
+    ;;
+  autopilot)
+    # Escape route, not a convenience: this must work with the daemon down, the GUI closed and
+    # no AI's cooperation (contract §6), so it calls the tool directly instead of the HTTP API.
+    python3 "$SCRIPT_DIR/tools/work_order.py" autopilot "${2:-show}" "${@:3}"
+    ;;
+  decisions)
+    python3 "$SCRIPT_DIR/tools/work_order.py" decisions "${@:2}"
+    ;;
+  drain)
+    # The hand ladder (F10.3). Raising it needs a controlling terminal, so this works from a pane
+    # and refuses from a timer — which is the point. `ai-station drain` alone prints the ladder.
+    case "${2:-show}" in
+      show) python3 "$SCRIPT_DIR/tools/work_order.py" drain ;;
+      arm|disarm) python3 "$SCRIPT_DIR/tools/work_order.py" "${@:2}" ;;
+      *) python3 "$SCRIPT_DIR/tools/work_order.py" drain ;;
+    esac
+    ;;
+  drainer)
+    python3 "$SCRIPT_DIR/tools/drainer.py" "${2:-tick}" "${@:3}"
+    ;;
+  snapshot)
+    python3 "$SCRIPT_DIR/tools/session_ingestor.py" snapshot "${2:-25}"
+    ;;
+  recovery)
+    python3 "$SCRIPT_DIR/tools/session_ingestor.py" recovery "${2:-40}"
+    ;;
+  logstats)
+    python3 "$SCRIPT_DIR/tools/session_ingestor.py" stats
+    ;;
+  posts)
+    python3 "$SCRIPT_DIR/tools/session_ingestor.py" posts "${2:-15}"
+    ;;
+  site)
+    "$SCRIPT_DIR/bin/site_open.sh" "${@:2}"
+    ;;
+  help|*)
+    echo "AI Workstation Hub - Pop!_OS COSMIC"
+    echo "Usage: ai-station [command]"
+    echo ""
+    echo "Commands:"
+    echo "  status                  Menampilkan ringkasan status Brain, memori, rules, & tim aktif"
+    echo "  link [path]             Menghubungkan workspace/project ke Global Brain"
+    echo "  ui                      Membuka jendela Native Desktop Studio (Rust + Tao + WebKitGTK)"
+    echo "  see                     Mengambil screenshot layar (Wayland Eye)"
+    echo "  record-error <id> <msg> Catat error (otomatis jadi SKILL baru jika >= 5x)"
+    echo "  incidents               Tampilkan daftar tracking error & frekuensinya"
+    echo "  recall [N]              Riwayat N aksi AI terakhir dari SQL (prompt, perintah shell, tool)"
+    echo "  handoff                 Baca serah-terima pekerjaan tertunda (world_memory + quest aktif)"
+    echo "  verify <mesin> [--file P|teks]  Minta AI lain memeriksa pekerjaan AI ini (gemini|qoder|local)"
+    echo "  workers [--list|--audit|--cut|--guard]  Panggilan engine yang masih hidup di luar Active Workspace"
+    echo "  autopilot [on|off|show] [--minutes N] [--budget N]  Autopilot switch; 'off' works without the daemon"
+    echo "  decisions [--limit N]   Who answered each unattended choice, and what is still waiting"
+    echo "  drain [arm <level> --minutes N|disarm]  How far the timer's hand may move; 'arm' needs a terminal"
+    echo "  drainer [tick|gate|selftest]  One deterministic F10.3 tick, no LLM, logged to logs/drainer-*.jsonl"
+    echo "  snapshot [N]            Tulis handoff mekanis sekarang (dipanggil otomatis saat sesi mati)"
+    echo "  recovery [N]            recall + handoff sekaligus, untuk memulihkan konteks sesi baru"
+    echo "  logstats                Statistik isi action_log & save-state"
+    echo "  posts [N]               Riwayat postingan: 1 perintah = 1 baris, dirakit Postgres sendiri"
+    echo "  site                    Build lalu buka AI Station Playground (127.0.0.1)"
+    echo "  help                    Tampilkan pesan bantuan ini"
+    ;;
+esac

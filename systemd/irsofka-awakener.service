@@ -1,0 +1,19 @@
+[Unit]
+# Worker lokal pembangunkan (lihat tools/awakener.py). Sama seperti irsofka-autopilot.service:
+# install_units.sh menyalin unit ini tetapi TIDAK meng-enable-nya, jadi boot tidak pernah
+# menjalankan sebuah loop yang tidak ada yang menyetujui malam itu.
+Description=Irsofka AI Workstation - wake a proven-idle CLI (local worker)
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
+After=network-online.target irsofka-ai-workstation.service
+Wants=irsofka-ai-workstation.service
+
+[Service]
+Type=oneshot
+# heartbeat() membaca pane dua kali dengan jeda nyata; TimeoutStartSec memberi ruang pembacaan
+# itu tanpa meninggalkan anak proses yang memegang RSS kalau systemd membunuhnya di tengah.
+TimeoutStartSec=120
+ExecStart=%h/.ai-station/bin/awakener_tick.sh
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

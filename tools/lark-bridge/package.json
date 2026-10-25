@@ -1,0 +1,10 @@
+{
+  "name": "lark-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Long-connection bridge between Lark events and AI Station",
+  "main": "index.js",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.76.0"
+  }
+}

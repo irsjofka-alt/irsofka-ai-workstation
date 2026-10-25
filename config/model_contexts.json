@@ -1,0 +1,11 @@
+{
+  "_note": "Operator-provided maximum context windows for models whose CLI does not report one. Only add values you can verify; a model absent here shows tokens without a maximum.",
+  "contexts": {
+    "gemini-3.8-flash-high": 1000000,
+    "gemini-3.8-flash-medium": 1000000,
+    "gemini-3.8-flash-low": 1000000,
+    "gemini-4-argon-medium": 1000000,
+    "gemini-4-argon-high": 1000000,
+    "gemini-4-argon-low": 1000000
+  }
+}

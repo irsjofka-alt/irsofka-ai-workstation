@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# pre-push, part 3 of 3: the credential net over the range that is leaving the machine, and the F10.9
+# push gate behind it.
+#
+# Why a hook and not the existing `work_order.py push-gate` command: that command ANSWERS the question
+# and exits non-zero when the answer is no, and `git push` is a different process. A commit can be
+# reported as "belum berangkat TANPA vonis" all evening and still be carried to the public remote ten
+# minutes later by a push of a descendant — which is exactly what happened to 3731fd4: it was written as
+# "TIDAK DIDORONG, satu vonis SETUJU masih diperlukan", the gate kept reporting it, and a later push in
+# this session moved the branch over it anyway. A rule that only describes a failure is documentation;
+# the same rule attached to the event is a guard.
+#
+# Why the credential net is here at all, when pre-commit already reads the staged tree: measured
+# 2026-10-16, git does not invoke pre-commit for an automatic merge commit, and `--no-verify` skips the
+# commit hooks entirely. Push is the event that makes a secret public, so push is where the whole range
+# gets read — every revision about to leave, its object, its tree, and the names it carries.
+#
+# Escape hatch, deliberately awkward and deliberately visible:
+#   IRSOFKA_PUSH_OVERRIDE=1 git push …                        # refused unless REASON is set too
+#   REASON="why this is safe" IRSOFKA_PUSH_OVERRIDE=1 git push …
+# The reason is required so an override cannot be a shrug: it is echoed here and belongs in the commit
+# or the digest. Autopilot never sets it; an unattended run that cannot reach a verdict commits locally
+# and leaves the push for the morning digest, which is the contract, not a workaround. The override
+# exempts the VERDICT requirement only — it is a statement that the push was reviewed, not a statement
+# that the range is safe to publish a key into, so the credential net above it cannot be cleared by it.
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 1
+GATE="$REPO/tools/work_order.py"
+
+# Resolve through the symlink: `bin/install_hooks.sh` links each hook into .git/hooks, and git
+# invokes it BY THAT PATH. `dirname` of the link gives .git/hooks, which holds no rules file — the
+# guard would report its own rules as missing and refuse every commit for the wrong reason.
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+rules="$here/guard_rules.sh"
+if [ ! -r "$rules" ]; then
+  printf '%s\n' "pre-push: REFUSED — $rules is not readable, so this hook has no deny list and no key shape." >&2
+  printf '%s\n' "Nothing was pushed. A guard with no rules is a guard that passes everything." >&2
+  exit 1
+fi
+# shellcheck source=./guard_rules.sh
+. "$rules"
+export GIT_LITERAL_PATHSPECS=1   # a path is a path, never a magic pattern that points somewhere else
+
+# Measured 2026-10-16, roughly 40 minutes after I installed these hooks into the three F11 MCP
+# repositories: none of them contains `tools/work_order.py`, so the line this replaces refused EVERY push
+# out of all three — a permanently shut door, the same class of defect round 11 found in the revision
+# bound (a guard that becomes an outage is worse than a guard that is missing). The credential net below is
+# repository-independent and runs everywhere. The verdict gate is not: `push-gate` reads the unpushed set of
+# ONE repository, the ledger's own, so pointing an MCP repo at the station's script would judge the wrong
+# range and hand this commit a clearance it never earned. Absent gate is therefore skipped LOUDLY — a
+# banner on every push from an ungoverned repository — and the gap is a ledger row (`f11mcp_gate`), not a
+# silence that reads as "verified".
+GATE_PRESENT=1
+if [ ! -f "$GATE" ]; then
+  GATE_PRESENT=0
+  printf '%s\n' "pre-push: no verdict gate here (tools/work_order.py absent). The credential net runs;" >&2
+  printf '%s\n' "the F10.9 per-sha gate cannot judge a repository the ledger does not track. Open row: f11mcp_gate." >&2
+fi
+
+ZERO="0000000000000000000000000000000000000000"
+# Measured on this repository: 14 ms per revision for all three scans (60 revisions in 0.83 s), so 500
+# revisions is about 7 seconds — seconds, not minutes. The bound is a plain variable with a documented
+# default, and the harness lowers it on purpose to prove the range it computes is the range that leaves
+# the machine rather than the whole line of history.
+MAX_REVS="${GUARD_MAX_REVS:-500}"
+leak=""
+
+# One revision: its whole object (headers included), its tree, and the names it touches.
+audit_commit() {
+  local sha="$1" obj rc paths
+  # The full commit object, not selected fields: `%an/%ae/%cn/%ce/%B` misses headers a merge carries,
+  # notably `mergetag`, whose text is an annotated tag's message copied into the commit.
+  rc=0
+  obj=$(git cat-file commit "$sha" 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    leak+="  READ  $sha: the commit object could not be read (exit $rc); an unaudited revision is a refusal\n"
+    return 0
+  fi
+  if printf '%s\n' "$obj" | grep -qoE "$KEY_RE"; then
+    leak+="  META  $sha carries a credential-shaped string in its identity, headers or message\n"
+  fi
+  # The tree at that revision. `-m3` bounds the work; exit 1 means "no match", which is the clean
+  # answer, while anything else means the scanner could not do its job and must not be read as clean.
+  # `-a` keeps the same rule as pre-commit: binary content is in scope, not skippable.
+  rc=0
+  paths=$(git grep -la -E "$KEY_RE" "$sha" 2>/dev/null) || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    leak+="  READ  $sha: the tree scan failed (exit $rc); an unaudited revision is a refusal\n"
+    return 0
+  fi
+  if [ -n "$paths" ]; then
+    # Paths are reported, values never: an operator with no filename cannot act, and a path is not secret.
+    leak+="  TREE  $sha holds a credential-shaped string in: $(printf '%s\n' "$paths" | sed "s|^$sha:||" | head -3 | tr '\n' ' ')\n"
+  fi
+  # The path net at push time too. Without it, a denied name committed with `--no-verify` — a key in a
+  # `*.p12`, or an engine registration file whose content is not credential-SHAPED at all — sails out
+  # while the same file is refused on the way in. `-m` so a merge is compared against each parent and
+  # the names it carried in are seen, not only the names it changed relative to both.
+  rc=0
+  # `--root` because git prints NOTHING for a root commit without it: the first commit of a repository
+  # or of an orphan branch has no parent to diff against, so the file list arrives empty and a denied
+  # name carried in that very commit is cleared by a net that never saw it. Round 11 named this.
+  # Any non-zero status is a refusal here, deliberately NOT copied from the grep rule above: grep
+  # reserves 1 for "no match", while `git diff-tree` returns 1 only when it failed. Importing `> 1`
+  # into this line would report a broken read as a clean scan — the same defect, a different command.
+  paths=$(git diff-tree -r -m --root --no-commit-id --name-only --diff-filter=ACMRT "$sha" 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    leak+="  READ  $sha: the file list could not be read (exit $rc); an unaudited revision is a refusal\n"
+  fi
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if hit=$(path_is_denied "$p"); then
+      leak+="  PATH  $sha touches $p, which matches the denied secret rule $hit\n"
+    fi
+  done <<< "$paths"
+  return 0
+}
+
+while IFS=' ' read -r lref lod rref rod rest; do
+  [ -n "${lod:-}" ] || continue
+  [ "$lod" = "$ZERO" ] && continue            # a branch deletion pushes no objects of its own
+
+  # An annotated tag being pushed: `rev-list` peels it to its commit, so the tag object itself — its
+  # tagger line and its message, both published — is audited separately.
+  if [ "$(git cat-file -t "$lod" 2>/dev/null)" = "tag" ]; then
+    tagobj=$(git cat-file tag "$lod" 2>/dev/null)
+    if [ -z "$tagobj" ]; then
+      leak+="  READ  $lod is a tag whose object cannot be read; an unaudited ref is a refusal\n"
+    elif printf '%s\n' "$tagobj" | grep -qoE "$KEY_RE"; then
+      leak+="  META  $lod (annotated tag) carries a credential-shaped string in its tagger or message\n"
+    fi
+  fi
+
+  # What is actually leaving the machine. For a brand-new ref, `git rev-list <sha>` alone counts the
+  # repository's ENTIRE history against the bound, so the day the repo passes MAX_REVS every new branch
+  # and every tag push is refused forever — a guard that becomes a outage. Commits already reachable
+  # from a remote-tracking ref are not being published by this push, so they are excluded. When there
+  # are no remote-tracking refs at all (never fetched), the exclusion is unavailable and the hook falls
+  # back to counting from the root — bounded, and stated in the refusal rather than hidden.
+  if [ -z "${rod:-}" ] || [ "$rod" = "$ZERO" ]; then
+    # NOTE on the pattern: `for-each-ref` matches a PREFIX, not a shell glob, so 'refs/remotes/*' would
+    # look for a ref literally named that and find nothing — measured 2026-10-16: with the wildcard the
+    # exclusion branch never fired and the hook kept counting the whole history, which is the very defect
+    # round 11 reported. The prefix form is `refs/remotes` with no asterisk.
+    if [ -n "$(git for-each-ref --format='%(refname)' refs/remotes 2>/dev/null | head -1)" ]; then
+      range_spec="$lod --not --remotes"
+      range_desc="$lod (excluding what the remote already has)"
+    else
+      range_spec="$lod"
+      range_desc="$lod (no remote-tracking refs to exclude, so the whole line of history)"
+    fi
+  else
+    range_spec="$rod..$lod"
+    range_desc="$range_spec"
+  fi
+  count=$(git rev-list --count $range_spec 2>/dev/null) || count=""
+  if [ -z "$count" ]; then
+    leak+="  RANGE $range_desc: the objects about to be pushed could not be enumerated (no audit, no push)\n"
+    continue
+  fi
+  if [ "$count" -gt "$MAX_REVS" ]; then
+    leak+="  RANGE $range_desc: $count revisions is more than this hook will audit ($MAX_REVS) — push in smaller batches or scan by hand\n"
+    continue
+  fi
+  for sha in $(git rev-list $range_spec); do
+    audit_commit "$sha"
+  done
+done
+
+if [ -n "$leak" ]; then
+  printf '%s\n' "pre-push: REFUSED — the range being pushed holds something a credential guard reads as a key." >&2
+  printf '%b' "$leak" >&2
+  printf '%s\n' "Nothing was pushed. Rotate the value, rewrite the range on a branch you control, and remember that history already published stays published." >&2
+  exit 1
+fi
+
+if [ "${IRSOFKA_PUSH_OVERRIDE:-}" = "1" ]; then
+  if [ -z "${REASON:-}" ]; then
+    printf '%s\n' "pre-push: override requested but REASON is empty. State why, then retry." >&2
+    exit 1
+  fi
+  printf 'pre-push: OVERRIDE by operator instruction, reason: %s\n' "$REASON" >&2
+  exit 0
+fi
+
+if [ "$GATE_PRESENT" = "0" ]; then
+  exit 0
+fi
+json=$(python3 "$GATE" push-gate 2>&1)
+rc=$?
+if [ $rc -ne 0 ]; then
+  printf '%s\n' "pre-push: push gate REFUSES (exit $rc)." >&2
+  printf '%s\n' "$json" | head -20 >&2
+  printf '%s\n' "Nothing was pushed. Get a per-sha verdict (python3 tools/work_order.py push-verified --sha …), or record the deferral (tools/work_order.py hold). Override with REASON=\"…\" IRSOFKA_PUSH_OVERRIDE=1 git push — an unattended run must not." >&2
+  exit 1
+fi
+exit 0

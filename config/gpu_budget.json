@@ -1,0 +1,25 @@
+{
+  "_comment": "VRAM floors enforced by tools/gpu_gate.py at dispatch time, not left to whichever engine remembers to read them. Every number here is a measurement on THIS machine (RTX 3060, 12288 MiB total), with its source named in `measured`. A rule whose need_mib is not an integer is NOT skipped and NOT guessed: it stays in force with an unreadable threshold and the gate answers UNKNOWN - it refuses. If this file is missing or malformed the gate falls back to in-code rules (3D and image diffusion both covered) and marks the decision `degraded`. Thresholds are re-read on every call on purpose: a number memorised at boot is the wrong number by next week.",
+  "rules": [
+    {
+      "label": "3d-trellis",
+      "match": ["trellis", "pixal3d", "image-to-3d", "image_to_3d", "3d_pipeline", "voxel remesh"],
+      "need_mib": 9966,
+      "measured": "2026-10-15 F7: a TRELLIS.2 image-to-3d run needed 9.73 GiB while the machine had 6.38 GiB free; weights alone stage 5004 MB (brain/skills/comfyui/05). Refusing below this floor is what prevents the OOM that surfaces as connection-loss rather than as a node error."
+    },
+    {
+      "label": "image-diffusion",
+      "match": ["z-image", "flux", "sdxl", "txt2img", "juggernaut", "nanobanana"],
+      "need_mib": 5919,
+      "removed_terms": ["checkpoint"],
+      "measured": "Z-Image-Turbo int8 = 5.78 GiB; the fp8 Juggernaut-Z row is 5.73 GiB (brain/skills/comfyui/08). bf16 12 GB variants do not fit beside a text encoder and are deliberately given no floor here - they are not runnable on this card at any free figure.",
+      "why_removed": "'checkpoint' matched git and database checkpoint items as often as model checkpoints, so a busy GPU would have refused non-GPU work on a word collision. Matching is word-bounded now, so 'flux' no longer hits 'reflux', 'flux_store' or 'test_flux'; '.' stays a boundary because the real product name in this queue is TRELLIS.2."
+    },
+    {
+      "label": "vendor-cloud",
+      "match": ["tripo", "partner_generate", "seedream", "kling"],
+      "need_mib": 0,
+      "measured": "Runs on vendor infrastructure; zero local VRAM. Recorded as a rule with 0 so the gate is explicit about it instead of silent: the cost gate for these lives in tools/tripo.py cost_is_known(), not here."
+    }
+  ]
+}

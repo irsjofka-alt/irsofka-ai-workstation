@@ -1,0 +1,91 @@
+# Peta peran → engine untuk workstation ini: `resolver`, `verifier`, `decider`, `drainer`
+# dan rekan satu tim. Berkas ini adalah KONTRAK nama peran; `config/engines.json` memegang
+# siapa di balik tiap nama (model, meter kuota, batas tangan). Engine dilarang memilih model
+# dari ingatan — ia membaca berkas ini pada saat dipakai (§12), dan operator menyuntingnya
+# dari Station.
+version: 1.0.0
+active_team: programmer_squad
+teams:
+- id: programmer_squad
+  name: Team Programmers (Antigravity & Qoder)
+  description: Kolaborasi antara Antigravity CLI untuk arsitektur/implementasi dan Qoder CLI untuk review/audit
+  roles:
+  - role_id: architect
+    title: Lead Architect
+    model: gemini-3.1-pro
+    effort: high
+  - role_id: implementer
+    title: Code Implementer
+    engine: antigravity_cli
+    instruction_ref: skills/coding_standards.md
+  - role_id: auditor
+    title: QA & Code Auditor
+    engine: qoder_cli
+    instruction_ref: skills/coding_standards.md
+  # Tangga pemeriksa (kebijakan operator 2026-10-15): pakai pool yang kuotanya masih ada; kalau
+  # tidak ada, Gemini 3.8 Flash High sudah cukup sebagai PELAPIS. Target masa depan adalah
+  # Gemini 4 Aragon begitu id itu muncul di `agy models` — belum ada hari ini, jadi jangan
+  # ditulis lebih dulu: §12 melarang memilih model dari ingatan, dan id yang belum terbit akan
+  # membuat dispatch mati dalam diam.
+  #
+  # Batas yang harus diketahui siapa pun menyunting berkas ini: TIDAK ADA fall-through otomatis
+  # antara decider dan verifier. `work_order` hanya mengumpulkan semua registry_key untuk
+  # menghitung anggaran, dan `cross_verify` menolak sebagai UNAVAILABLE kalau meter tidak bisa
+  # dibaca atau jendela habis. Sejak 2026-10-25 decider adalah Gemini 3.8 Flash High
+  # (`gemini-verify`); Argon tidak lagi menjadi lapisan decider.
+  - role_id: decider
+    title: "Independent Verifier (final decide: Gemini 3.8 Flash High). Perintah operator 2026-10-25: Argon dikeluarkan dari decider; kalau Flash High masih ragu tetapi tetap bisa menjawab, jawabannya tetap dipakai."
+    registry_key: gemini-verify
+  - role_id: decider-light
+    title: "Independent Verifier (keputusan level preferensi, penalaran ringan: Gemini 3.8 Flash Medium)"
+    registry_key: gemini-verify-light
+  - role_id: verifier
+    title: "Pelapis (penalaran medium-ke-high: Gemini 3.8 Flash High) — dipakai saat pool utama habis"
+    registry_key: gemini-verify
+  - role_id: verifier-light
+    title: "Second-tier Verifier (penalaran ringan: Gemini 3.8 Flash Medium)"
+    registry_key: gemini-verify-light
+  - role_id: resolver
+    title: Decision Resolver (unattended choice)
+    registry_key: gemini
+  - role_id: resolver-alt
+    title: Decision Resolver fallback
+    registry_key: gemini-verify
+  - role_id: resolver-byok
+    title: "Decision Resolver, kolam BYOK milik operator (5 slot / 3 kunci nyata, akun PRO) — kolam yang BERBEDA dari agy, jadi ia tidak memotong napas tier di atasnya"
+    registry_key: gemini-byok
+  - role_id: resolver-local
+    title: Decision Resolver, local tier, last rung
+    registry_key: local
+- id: visual_operator
+  name: Visual & Desktop Automation Squad
+  description: Tim 'Mata & Tangan' untuk mengoperasikan aplikasi GUI saat MCP tidak tersedia
+  roles:
+  - role_id: eye
+    title: Visual Observer
+    model: gemini-3.8-flash
+    effort: medium
+  - role_id: hand
+    title: Wayland Input Actuator
+    driver: ydotool
+- id: daily_assistant
+  name: Pop!_OS Desktop Companion
+  description: Asisten percakapan cepat dan eksekusi tugas sehari-hari Linux
+  roles:
+  - role_id: companion
+    title: System Companion
+    model: qwen2.5:7b
+    provider: ollama
+    tools:
+    - xdg-open
+    - pactl
+    - notify-send
+    - system_timers
+- id: analysis_team
+  name: Deep Analysis & Business Intelligence
+  description: Membaca data, log, atau dokumen besar dengan context window raksasa
+  roles:
+  - role_id: analyst
+    title: High-Context Analyst
+    model: qwen-3.8-flash
+    context_window: 1M

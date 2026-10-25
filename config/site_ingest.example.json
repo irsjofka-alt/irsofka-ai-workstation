@@ -1,0 +1,10 @@
+{
+  "_note": "Watcher output ComfyUI. Salin ke config/site_ingest.json untuk menimpa path lokal (gitignored).",
+  "interval_seconds": 20,
+  "stability_seconds": 4,
+  "watch": [
+    {"path": "~/ComfyUI-Shared/output", "project": "comfyui"},
+    {"path": "~/runtime/comfyui/output", "project": "comfyui"},
+    {"path": "~/ComfyUI-Installs/ComfyUI/ComfyUI/output", "project": "comfyui"}
+  ]
+}

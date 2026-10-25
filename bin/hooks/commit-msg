@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Guard, part 2 of 3: the commit message and the identity. git hands THIS hook the message file as $1 —
+# `pre-commit` receives no arguments at all, which is why the message scan lives here and not there.
+#
+# A key pasted into a commit message is published as surely as one committed in a file: it lands in
+# `git log`, in the pushed objects, and in every clone and hosting page that renders the message.
+# Until this file existed, nothing looked at the message, and the check that pretended to live in
+# pre-commit ran only when a test invoked it by hand.
+set -euo pipefail
+
+# Resolve through the symlink: `bin/install_hooks.sh` links each hook into .git/hooks, and git
+# invokes it BY THAT PATH. `dirname` of the link gives .git/hooks, which holds no rules file — the
+# guard would report its own rules as missing and refuse every commit for the wrong reason.
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+rules="$here/guard_rules.sh"
+if [ ! -r "$rules" ]; then
+  printf '%s\n' "guard: commit refused (bin/hooks/commit-msg)."
+  printf '  RULES %s is not readable; the guard has no key shape and will not invent one\n' "$rules"
+  exit 1
+fi
+# shellcheck source=./guard_rules.sh
+. "$rules"
+
+msgfile="${1:-}"
+if [ -z "$msgfile" ] || [ ! -f "$msgfile" ]; then
+  printf '%s\n' "guard: commit-msg refused — invoked without a readable message file argument." >&2
+  printf '%s\n' "This hook is: commit-msg <file>. Running it with no argument would silently check nothing, so it says so instead." >&2
+  exit 1
+fi
+
+# Part 1 runs from here too, and that is the reason this line exists. Measured 2026-10-16: an automatic
+# merge commit (`git merge` with nothing to resolve) runs prepare-commit-msg, commit-msg and post-merge,
+# and does NOT run pre-commit. A secret arriving on another branch therefore walked straight past the
+# staged-tree net — git wrote the merge, the key entered history, and the guard never spoke. By the time
+# commit-msg runs, the merged result is already in the index, so scanning the index here closes it. A
+# normal commit is scanned by both hooks: a few milliseconds, and cheaper than two definitions of "what a
+# secret looks like" (§12).
+if ! bash "$here/pre-commit"; then
+  exit 1
+fi
+
+# The identity fields are part of the commit object, not metadata beside it: `git commit
+# --author="AIza… <x@y>"` writes the key into the object that gets pushed, and neither the message
+# file nor any staged path ever contains it. So the author and committer lines git is about to use are
+# scanned with the same expression. A line that cannot be read is refused: an empty identity is not a
+# clean identity, and the guard that skips what it cannot see is the failure every round names.
+for who in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+  ident=""
+  readrc=0
+  ident=$(git var "$who" 2>&1) || readrc=$?
+  if [ "$readrc" -ne 0 ] || [ -z "$ident" ]; then
+    printf '%s\n' "guard: commit refused (bin/hooks/commit-msg)."
+    printf '  READ  %s could not be read (exit %s); an unchecked identity is a refusal, not a clearance\n' "$who" "$readrc"
+    printf '%s\n' "Nothing was committed."
+    exit 1
+  fi
+  if printf '%s\n' "$ident" | grep -qoE "$KEY_RE"; then
+    printf '%s\n' "guard: commit refused (bin/hooks/commit-msg)."
+    printf '  IDENT %s holds a credential-shaped string (value not shown)\n' "$who"
+    printf '%s\n' "An author or committer field is written into the commit object and pushed with it. Move the key out of the identity."
+    exit 1
+  fi
+done
+
+if grep -qoE "$KEY_RE" "$msgfile" 2>/dev/null; then
+  # Line numbers, not the value: the message is the thing that would leak, so echoing it here would
+  # put the key into the terminal and into whatever log captures hook output.
+  lines=$(grep -noE "$KEY_RE" "$msgfile" | cut -d: -f1 | head -3 | tr '\n' ' ')
+  printf '%s\n' "guard: commit refused (bin/hooks/commit-msg)."
+  printf '  MSG   the commit message contains a credential-shaped string on line(s): %s\n' "$lines"
+  printf '%s\n' "Nothing was committed. Remove the value from the message; secrets belong in config/byok.json, which is ignored and never shipped."
+  exit 1
+fi
+# The message is published with the commit. Refuse the same transcript/attribution language that
+# the tracked-tree guard refuses, so a clean document cannot be paired with a diary-style message.
+if grep -qaiE "$PUBLIC_WRITING_RE" "$msgfile" 2>/dev/null; then
+  hits=$(grep -oaiE "$PUBLIC_WRITING_RE" "$msgfile" | wc -l)
+  printf '%s\n' "guard: commit refused (bin/hooks/commit-msg)."
+  printf '  MSG   %s transcript/attribution phrase(s) in the commit message\n' "$hits"
+  printf '%s\n' "Describe the change and its reason. Do not quote operators, cite transcript rows, or explain who said what."
+  exit 1
+fi
+
+exit 0

@@ -1,0 +1,23 @@
+[Unit]
+# F10.5 dream phase. Seperti irsofka-autopilot.timer, unit ini INSTALLED tapi TIDAK di-enable oleh
+# bin/install_units.sh: penjadwal yang bisa menulis berkas atas nama orang yang sedang tidur tidak
+# boleh lahir aktif. Menyalakannya satu perintah dari terminal orang itu sendiri.
+Description=Irsofka AI Workstation - Dream phase schedule (memory consolidation)
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
+
+[Timer]
+# Ritme 30 menit dipilih oleh alat ukurnya, bukan oleh jadwal: gerbang idle di dalam
+# tools/dream_phase.py menolak putaran yang datang saat mesin masih bekerja, dan ia hanya bisa
+# mengukur keadaan yang berubah selambat-lambatnya secepat tick berikutnya. Tick lebih rapat dari
+# 30 menit hanya menambah penolakan; tick lebih jarang membuat "setelah 30 menit menganggur"
+# berarti "kapan pun antara 30 dan 90 menit".
+OnBootSec=30min
+OnUnitActiveSec=30min
+AccuracySec=2min
+# Acak kecil supaya mimpi tidak menabrak tick drainer (5 menit) pada detik yang sama: keduanya
+# membaca PostgreSQL yang sama dan satu di antaranya menjalankan gerbang shell.
+RandomizedDelaySec=90
+Unit=irsofka-dream.service
+
+[Install]
+WantedBy=timers.target

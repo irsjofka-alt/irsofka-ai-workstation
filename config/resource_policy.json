@@ -1,0 +1,17 @@
+{
+  "gpu": {
+    "min_free_llm_gb": 2.0,
+    "min_free_embedding_gb": 1.0,
+    "busy_processes": ["comfyui-desktop", "ComfyUI", "UnrealEditor"]
+  },
+  "models": {
+    "summary": { "model": "tev1:0.8b", "keep_alive": "0s", "num_ctx": 4096 },
+    "summary_quality": {
+      "model": "qwen3.5:4b",
+      "min_free_gb": 5.0,
+      "enabled": false
+    },
+    "embedding": { "model": "nomic-embed-text", "keep_alive": "0s" }
+  },
+  "fallback": { "summary": "deterministic", "embedding": "keyword" }
+}

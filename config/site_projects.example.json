@@ -1,0 +1,62 @@
+{
+  "_note": "Registry contoh untuk clone. Salin ke config/site_projects.json (gitignored) lalu sesuaikan path. ${HOME} dan ~ diperluas saat build. Path boleh tidak ada: halaman menandai project sebagai belum tersedia, bukan gagal.",
+  "projects": [
+    {
+      "slug": "readyasset",
+      "codename": "@ReadyAsset",
+      "name": "IRSofka-ReadyAsset",
+      "mode": "single",
+      "status": "aktif",
+      "description": "Aset Blender Sangkan Purwa: 18 mesh Training Hall dan satu complete assembly.",
+      "paths": ["${HOME}/Documents/ai-workstation/projects/IRSofka-ReadyAsset"],
+      "reference_files": ["README.md"],
+      "media_default": "showcase"
+    },
+    {
+      "slug": "meshcleanroom",
+      "codename": "@MeshCleanRoom",
+      "name": "IRSofka-ProjectMeshGenesis + IRSofka-Exporter",
+      "mode": "multi",
+      "status": "aktif",
+      "description": "Ruang kerja mesh dan exporter: aturan IP, rencana mesh, dan resep mesh dari dua folder.",
+      "paths": [
+        "${HOME}/Documents/ai-workstation/projects/IRSofka-Exporter",
+        "${HOME}/Documents/ai-workstation/projects/ProjectMeshGenesis"
+      ],
+      "reference_files": [
+        "IRSofka-Exporter/AntiDMCAandIP.md",
+        "IRSofka-Exporter/README.md",
+        "IRSofka-Exporter/PlanningMesh.md",
+        "ProjectMeshGenesis/PlanningMesh.md",
+        "ProjectMeshGenesis/recipemesh.md"
+      ],
+      "load_all_md": true,
+      "media_default": "showcase"
+    },
+    {
+      "slug": "ai-station",
+      "codename": "@AIStation",
+      "name": "AI Station",
+      "mode": "system",
+      "status": "aktif",
+      "description": "Workstation itu sendiri: daemon Rust, console, MCP, dan ingatan jangka panjang.",
+      "paths": ["${HOME}/.ai-station"],
+      "reference_files": ["README.md", "ROADMAP.md", "Planning.md"],
+      "media_default": "showcase"
+    },
+    {
+      "slug": "comfyui",
+      "codename": "@ComfyUI",
+      "name": "ComfyUI Studio",
+      "mode": "system",
+      "status": "degraded",
+      "description": "Rumah generasi gambar dan video. Watcher output baru aktif di Phase 4.",
+      "paths": [
+        "${HOME}/ComfyUI-Shared/output",
+        "${HOME}/runtime/comfyui"
+      ],
+      "reference_files": [],
+      "media_default": "generation"
+    }
+  ]
+}

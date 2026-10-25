@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "local-workstation": {
+      "command": "python3",
+      "args": [
+        "/home/irsofka/.ai-station/tools/mcp_workstation_local.py"
+      ],
+      "env": {},
+      "enabled": true,
+      "cwd": null,
+      "url": null,
+      "tools": {}
+    }
+  }
+}

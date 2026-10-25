@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# Guard, part 1 of 3: the staged tree. (bin/hooks/commit-msg is part 2, bin/hooks/pre-push part 3;
+# bin/guard_byok.sh symlinks here.)
+#
+# Why a hook and not a rule in someone's memory: `config/byok.json` holds real keys, was once NOT
+# ignored (found 2026-10-14), and this repository is public. Today it is ignored and has never
+# appeared in a commit — measured 2026-10-15 with `git ls-files` (empty) and
+# `git log --all -- config/byok.json` (empty). Decision 57 answered "rotate anyway?" with no,
+# because nothing is measurably exposed, and asked instead for a check that does not depend on
+# anyone remembering.
+#
+# The hook contract, learned the expensive way: git invokes `pre-commit` with NO arguments. The
+# commit-message file is delivered only to `commit-msg`. An earlier revision of this file scanned
+# "$1" for credentials, which is always empty here, so the message net did nothing in production —
+# and its own test passed, because the test called the script by hand and handed it a path. A guard
+# that works only when called the way the test calls it is not a guard.
+set -euo pipefail
+
+# Pathspecs are taken literally from here on. Without this, a staged file whose name begins with a
+# magic prefix — `:(top)NOTES.md`, `:(exclude)secret.txt` — is reinterpreted by git as a pathspec
+# pattern and `git ls-files -- "$f"` returns the blob of some OTHER file, so the guard scans content
+# that was never the entry and clears the real one. Round 10 found this by reading the line, not by
+# being told.
+export GIT_LITERAL_PATHSPECS=1
+
+# The deny list and the key shape live in one file, read by all three guards (§12: one word, one
+# definition). A hook that cannot read its rules refuses: an empty deny list would otherwise be a
+# clean bill of health issued by a scanner that had nothing to compare against.
+# Resolve through the symlink: `bin/install_hooks.sh` links each hook into .git/hooks, and git
+# invokes it BY THAT PATH. `dirname` of the link gives .git/hooks, which holds no rules file — the
+# guard would report its own rules as missing and refuse every commit for the wrong reason.
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+rules="$here/guard_rules.sh"
+if [ ! -r "$rules" ]; then
+  printf '%s\n' "guard: commit refused (bin/hooks/pre-commit)."
+  printf '  RULES %s is not readable; the guard has no deny list and will not guess one\n' "$rules"
+  exit 1
+fi
+# shellcheck source=./guard_rules.sh
+. "$rules"
+
+# Status pairs, not bare names, because a rename arrives as TWO paths and only one of them is the
+# content. `git mv config/byok.json notes.txt` puts the secret's bytes at a name no rule matches;
+# checking just the destination (what `--name-only` gives) let that through in a real test run. So
+# R/C entries contribute both their source and their destination to the PATH net, while the BLOB net
+# reads the destination — that is the blob actually being published.
+#
+# No D in the filter, and the reason is a promise this file made to itself: a file that should never
+# have been committed must still be deletable, or the guard blocks its own remedy. The cost is stated
+# rather than hidden — a rename that git scores below the -M20 threshold arrives as D+A, so the old
+# denied NAME is not seen by the path net. What is still seen is the content: the added file's blob is
+# scanned by the same expression, and the paths that matter most here (config/byok.json, *.pem) are
+# denied precisely because they hold credential-shaped bytes, not because their name is secret.
+staged_entries() { git diff --cached -z --name-status -M20 --diff-filter=ACMRT; }
+
+fail=0
+msg=""
+
+# One denied name, reported once. Split out because two passes over the index need the same rule and
+# §12 forbids a second definition of "matches a secret path" living in a second loop.
+check_name() {
+  local n="$1" hit
+  if hit=$(path_is_denied "$n"); then
+    msg+="  PATH  $n matches the denied secret rule $hit\n"; fail=1
+  fi
+  return 0
+}
+
+# One staged blob, found by OID so no path syntax can swallow a read failure.
+check_blob() {
+  local f="$1" mode="$2" oid="$3" ln hits rc
+  case "$mode" in
+    160000) msg+="  MODE  $f is a submodule gitlink; its content lives in another repository and cannot be scanned here — refuse it or add the files directly\n"; fail=1; return 0 ;;
+    120000) msg+="  MODE  $f is a symlink; only its target path is stored, so a key behind it is invisible to this guard — commit the file or drop the link\n"; fail=1; return 0 ;;
+  esac
+  # Read the object into a file, then scan the file. `git cat-file -e` only proves the object is LISTED —
+  # a corrupt loose object passes it and then inflates to nothing, and a grep over an empty pipe reports
+  # "no match", which is exactly the clean answer for the wrong reason. The case that found this is
+  # bin/test_guard.sh case 15: with the previous code the keyed-but-unreadable blob committed, rc=0.
+  if ! git cat-file blob "$oid" > "$blobtmp" 2>/dev/null; then
+    msg+="  READ  $f: blob $oid is listed in the index but cannot be read; an unchecked entry is a refusal, not a clearance\n"
+    fail=1
+    return 0
+  fi
+  # `-a` is load-bearing here and was mutation-verified: without it GNU grep prints "binary file
+  # matches" on stderr, writes nothing to stdout, and the keyed binary commits into history.
+  # `-m3` bounds the work; a FILE argument keeps the exit status honest (1 really is "no match").
+  rc=0
+  hits=$(grep -anoE -m3 "$KEY_RE" "$blobtmp" | cut -d: -f1) || rc=$?
+  # A finding outranks a broken pipeline: if something was read and matched, say what matched.
+  if [ -n "$hits" ]; then
+    while IFS= read -r ln; do
+      [ -n "$ln" ] || continue
+      # Line number only, never the value: this lands on a terminal and, unattended, in a log.
+      msg+="  BLOB  $f line $ln holds a credential-shaped string (value not shown)\n"
+    done <<< "$hits"
+    fail=1
+    return 0
+  fi
+  # grep exits 1 for "no match", which is the clean answer; anything else means it could not do its job.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    msg+="  READ  $f: the scan itself failed (exit $rc); an unchecked entry is a refusal, not a clearance\n"
+    fail=1
+  fi
+  return 0
+}
+
+# The two reads that feed the loops below go through a file, not a process substitution. Inside
+# `done < <(cmd)` the command's exit status is unreachable: a git that dies halfway leaves an empty
+# loop, and an empty loop looks exactly like a clean index. Round 10 named this. The status is checked
+# before a single entry is trusted.
+# ---------------------------------------------------------------------------
+# Section 10: documentation the world reads is written in English.
+#
+# Checked on ADDED lines only. The contract says convert what you touch and do not rewrite
+# untouched sections for language, so a whole-file scan would hold every existing Indonesian
+# paragraph hostage forever and teach people to bypass the hook. A diff scan enforces the rule
+# on the change that is actually being published.
+#
+# Deliberately narrow: prose files that ship, excluding brain/ (private knowledge) and code
+# comments (exempt by contract). Indonesian inside a .py comment is allowed; inside a README it
+# is not.
+check_language() {
+  local f="$1"
+  case "$f" in
+    brain/*|.qoder/*|*/brain/*) return 0 ;;
+  esac
+  case "$f" in
+    *.md|README*|UPSTREAM|NOTICE|CHANGELOG*|docs/*|documents/*) ;;
+    *) return 0 ;;
+  esac
+  local raw added hits
+  # Every step that can legitimately find nothing is wrapped: under `set -euo pipefail` an
+  # assignment whose pipeline exits 1 kills the guard BEFORE the next line runs, so the commit
+  # dies with an empty message and no reason — measured here, and it is the one failure mode a
+  # credential guard must never have. `if ! cmd` and `|| true` are the two spellings that survive.
+  if ! raw=$(git -c core.quotepath=false diff --cached -U0 -- "$f" 2>/dev/null); then
+    msg+="  READ  $f: the staged diff could not be read; an unchecked entry is a refusal, not a clearance\n"
+    fail=1
+    return 0
+  fi
+  added=$(printf '%s\n' "$raw" | { grep -E "^\\+[^+]" || true; } | sed 's/^+//')
+  if [ -z "$added" ]; then
+    return 0
+  fi
+  # Occurrences, not lines: one Indonesian sentence usually holds five of these words on a single
+  # line, and a per-line count let the very first test case through silently — measured, not guessed.
+  hits=$(printf '%s\n' "$added" | { grep -oaiE "\b(yang|dan|dengan|untuk|tidak|sudah|belum|kalau|karena|agar|ini|itu|saya|kamu|jangan|saja|harus|bisa|mengapa|silakan|dibuat|dilakukan)\b" || true; } | wc -l)
+  if [ "${hits:-0}" -ge 4 ]; then
+    if [ -z "${IRSOFKA_ALLOW_INDONESIAN_DOC:-}" ]; then
+      msg+="  LANG  $f: $hits Indonesian word-occurrences among the added lines; contract section 10 requires published documentation in English. Convert the lines you touched and leave untouched sections alone. If the exception is real (a quoted operator instruction, a translation table), set IRSOFKA_ALLOW_INDONESIAN_DOC=<reason> and say why in the commit message.\n"
+      fail=1
+    else
+      # Printed where it happens, not added to `msg`: `msg` is only emitted when `fail` is set, so the
+      # sentence claiming this exception "is visible in the guard's own output" was false — measured
+      # 2026-10-16 by R15's fixture, which committed with the exception set and got no output at all.
+      # A permission that says nothing is the silent path this guard exists to close.
+      printf '%s\n' "  LANG  $f: $hits Indonesian word-occurrences allowed by IRSOFKA_ALLOW_INDONESIAN_DOC=$IRSOFKA_ALLOW_INDONESIAN_DOC — the exception is recorded here and belongs in the commit message" >&2
+    fi
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Public writing: the tracked tree is a product surface, not a transcript.
+#
+# Added lines only, so an existing paragraph outside the change is not held hostage. The regex is
+# shared with commit-msg through guard_rules.sh. A hit is refused rather than rewritten: the author
+# must decide what the public sentence should say.
+check_public_writing() {
+  local f="$1"
+  case "$f" in
+    brain/*|.qoder/*|*/brain/*|data/*|rules/PUBLIC_WRITING.md) return 0 ;;
+  esac
+  case "$f" in
+    *.md|README*|UPSTREAM|NOTICE|CHANGELOG*|docs/*|documents/*|rules/*) ;;
+    *) return 0 ;;
+  esac
+  local raw added hits
+  if ! raw=$(git -c core.quotepath=false diff --cached -U0 -- "$f" 2>/dev/null); then
+    msg+="  READ  $f: the staged diff could not be read; an unchecked entry is a refusal, not a clearance\n"
+    fail=1
+    return 0
+  fi
+  added=$(printf '%s\n' "$raw" | { grep -E "^\+[^+]" || true; } | sed 's/^+//')
+  [ -n "$added" ] || return 0
+  hits=$(printf '%s\n' "$added" | { grep -oaiE "$PUBLIC_WRITING_RE" || true; } | wc -l)
+  if [ "${hits:-0}" -gt 0 ]; then
+    msg+="  WRITE $f: $hits transcript/attribution phrase(s) on added lines. Public docs describe the system, not who said what; move the note to data/ or rewrite it as a neutral requirement.\n"
+    fail=1
+  fi
+  return 0
+}
+
+listfile=$(mktemp)
+unmergedfile=$(mktemp)
+blobtmp=$(mktemp)
+trap 'rm -f "$listfile" "$unmergedfile" "$blobtmp"' EXIT
+
+if ! staged_entries > "$listfile"; then
+  msg+="  READ  the staged tree could not be read at all; refusing rather than reporting an empty index as clean\n"
+  fail=1
+fi
+while IFS= read -r -d '' st; do
+  [ -n "$st" ] || continue
+  IFS= read -r -d '' p1 || true
+  dest="$p1"
+  names=("$p1")
+  case "$st" in
+    R*|C*) IFS= read -r -d '' p2 || true; [ -n "$p2" ] && { names+=("$p2"); dest="$p2"; } ;;
+  esac
+  [ -n "$dest" ] || continue
+  f="$dest"
+
+  # Every name this entry touches: a rename's source is as much a denied path as its destination.
+  for n in "${names[@]}"; do
+    check_name "$n"
+  done
+  check_language "$f"
+  check_public_writing "$f"
+
+  # The staged BLOB is what gets published, so that blob is what gets inspected: the worktree lets a
+  # staged-then-deleted key through and lets an unrelated unstaged edit block a clean commit. Read by
+  # OID for the same reason; a `git show ":<path>"` reads the part before a colon as a revision and
+  # dies on a file named `pre:commit.md`.
+  #
+  # Every stage of the path, not the first line: during a conflict the index holds stage 1 (ancestor),
+  # 2 (ours) and 3 (theirs) and stage 1 sorts first, so `head -1` scanned the OLD content.
+  entries=""
+  readrc=0
+  entries=$(git ls-files --stage -z -- "$f" | tr '\0' '\n') || readrc=$?
+  if [ "$readrc" -ne 0 ]; then
+    msg+="  READ  $f: the index could not be read for this path (exit $readrc); an unchecked entry is a refusal, not a clearance\n"
+    fail=1
+    continue
+  fi
+  if [ -z "$entries" ]; then
+    msg+="  READ  $f resolved to no staged blob; an unchecked entry is a refusal, not a clearance\n"
+    fail=1
+    continue
+  fi
+  pairs=$(printf '%s\n' "$entries" | awk '$1 ~ /^(100644|100755|120000|160000)$/ {print $1" "$2}')
+  if [ -z "$pairs" ]; then
+    msg+="  READ  $f resolved to no staged blob; an unchecked entry is a refusal, not a clearance\n"
+    fail=1
+    continue
+  fi
+  while IFS=' ' read -r m oid; do
+    [ -n "$oid" ] || continue
+    check_blob "$f" "$m" "$oid"
+  done <<< "$pairs"
+done < "$listfile"
+
+# A conflicted index is invisible to the pass above: `git diff --cached` does not list unmerged paths at
+# all, so a keyed stage-3 blob was cleared without being read (measured, then fixed). Git itself refuses
+# to commit while any path is unmerged — exit 128, before hooks run — so nothing was ever published
+# through that state; this pass exists so the net does not depend on another program's ordering forever.
+unmergedrc=0
+git ls-files -z --unmerged > "$unmergedfile" || unmergedrc=$?
+if [ "$unmergedrc" -ne 0 ]; then
+  msg+="  READ  the unmerged index could not be read (exit $unmergedrc); refusing rather than trusting a list that came back empty\n"
+  fail=1
+fi
+while IFS= read -r -d '' line; do
+  [ -n "$line" ] || continue
+  head="${line%%$'\t'*}"
+  upath="${line#*$'\t'}"
+  umode=$(printf '%s' "$head" | awk '{print $1}')
+  uoid=$(printf '%s' "$head" | awk '{print $2}')
+  if [ -z "$umode" ] || [ -z "$uoid" ]; then
+    msg+="  READ  an unmerged entry could not be parsed; an unchecked entry is a refusal, not a clearance\n"
+    fail=1
+    continue
+  fi
+  check_name "$upath"
+  check_blob "$upath" "$umode" "$uoid"
+done < "$unmergedfile"
+
+if [ "$fail" -ne 0 ]; then
+  printf '%s\n' "guard: commit refused (bin/hooks/pre-commit)."
+  printf '%b' "$msg"
+  printf '%s\n' "Nothing was committed. Fix the reported entries; credentials belong in config/byok.json (ignored and never shipped)."
+  exit 1
+fi
+exit 0

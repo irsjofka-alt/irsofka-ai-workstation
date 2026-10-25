@@ -1,0 +1,16 @@
+[Unit]
+Description=Pindai output ComfyUI tiap 20 detik untuk situs Playground
+Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+
+[Timer]
+# Interval pendek: berkas baru harus muncul di gallery tanpa intervensi.
+# OnUnitActiveSec dihitung dari selesainya putaran sebelumnya, jadi tidak menumpuk.
+OnBootSec=30
+OnUnitActiveSec=20
+# Default systemd 1 menit membuat jadwal 20 dtk meleset sampai ~59 dtk.
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=irsofka-site-ingest.service
+
+[Install]
+WantedBy=timers.target

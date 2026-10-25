@@ -1,0 +1,13 @@
+[Unit]
+Description=Watcher output ComfyUI → situs AI Station Playground
+Documentation=https://github.com/irsjofka-alt/IRSofka-Ai-Workstation
+After=irsofka-ai-workstation.service
+
+[Service]
+Type=oneshot
+# Satu putaran per timer. Publish.py yang menegakkan aturan; unit ini hanya jadwal.
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 %h/.ai-station/tools/site/ingest.py --once
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,101 @@
+{
+  "_comment": "Dataset eval P2.3. Setiap tugas hanya memakai pemeriksaan deterministik supaya skor tidak bergantung pada model penilai. Menambah tugas cukup di sini; tidak perlu mengubah kode. `requires_permission` membuat tugas dilewati (bukan gagal) bila izin tool worker belum allow.",
+  "tasks": [
+    {
+      "id": "json_ok",
+      "prompt": "Balas HANYA objek JSON ini tanpa teks lain: {\"ok\": true}",
+      "checks": [
+        { "kind": "json_fields", "fields": ["ok"] },
+        { "kind": "max_chars", "value": 40 }
+      ]
+    },
+    {
+      "id": "math_sum",
+      "prompt": "Berapa 17 + 25? Balas hanya angkanya.",
+      "checks": [
+        { "kind": "contains", "value": "42" },
+        { "kind": "max_chars", "value": 24 }
+      ]
+    },
+    {
+      "id": "ibukota",
+      "prompt": "Dalam Bahasa Indonesia, sebutkan ibu kota Indonesia dalam satu kata.",
+      "checks": [
+        { "kind": "contains", "value": "jakarta" },
+        { "kind": "max_chars", "value": 30 }
+      ]
+    },
+    {
+      "id": "tanpa_tool",
+      "prompt": "Jangan memakai tool apa pun. Balas tepat dengan frasa: tanpa tool",
+      "checks": [
+        { "kind": "contains", "value": "tanpa tool" },
+        { "kind": "no_tool" }
+      ]
+    },
+    {
+      "id": "satu_kata",
+      "prompt": "Sebutkan satu warna dalam satu kata, tanpa tanda baca.",
+      "checks": [{ "kind": "max_chars", "value": 20 }]
+    },
+    {
+      "id": "urutan",
+      "prompt": "Balas dengan urutan ini dipisah koma: A,B,C",
+      "checks": [{ "kind": "contains_compact", "value": "A,B,C" }]
+    },
+    {
+      "id": "larangan_kata",
+      "prompt": "Jangan sebutkan kata pisang. Sebutkan satu buah lain dalam satu kata.",
+      "checks": [
+        { "kind": "not_contains", "value": "pisang" },
+        { "kind": "max_chars", "value": 40 }
+      ]
+    },
+    {
+      "id": "angka_pesan",
+      "prompt": "Angka yang muncul di pesan ini adalah 731. Sebutkan angka itu saja.",
+      "checks": [
+        { "kind": "contains", "value": "731" },
+        { "kind": "max_chars", "value": 10 }
+      ]
+    },
+    {
+      "id": "ringkas",
+      "prompt": "Jelaskan dalam maksimal lima kata: apa itu cache?",
+      "checks": [{ "kind": "max_chars", "value": 60 }]
+    },
+    {
+      "id": "multi_step",
+      "prompt": "Hitung 3×7 lalu kurangi 5. Balas hanya angkanya.",
+      "checks": [
+        { "kind": "contains", "value": "16" },
+        { "kind": "max_chars", "value": 10 }
+      ]
+    },
+    {
+      "id": "bahasa_inggris",
+      "prompt": "Answer in English, one word: capital of France?",
+      "checks": [
+        { "kind": "contains", "value": "paris" },
+        { "kind": "max_chars", "value": 20 }
+      ]
+    },
+    {
+      "id": "hitung_tanpa_tool",
+      "prompt": "Tanpa memakai tool, hitung 3 + 4. Balas hanya angkanya.",
+      "checks": [
+        { "kind": "contains", "value": "7" },
+        { "kind": "no_tool" },
+        { "kind": "max_chars", "value": 10 }
+      ]
+    },
+    {
+      "id": "tool_telemetry",
+      "prompt": "Gunakan tool get_hardware_telemetry untuk membaca VRAM total, lalu sebutkan angkanya dalam MB.",
+      "checks": [
+        { "kind": "tool_called", "server": "local-workstation", "tool": "get_hardware_telemetry" }
+      ],
+      "requires_permission": "mcp:local-workstation:get_hardware_telemetry"
+    }
+  ]
+}

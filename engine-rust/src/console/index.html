@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AI Station · Console</title>
+  <link rel="stylesheet" href="/console/console.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="rail">
+      <div class="brand">
+        <div class="brand-mark">AS</div>
+        <div class="brand-text">
+          <strong>AI Station</strong>
+          <span>IRSofka Data Teknologi</span>
+        </div>
+        <button class="icon-btn rail-toggle" id="rail-toggle" title="Sembunyikan menu" aria-label="Sembunyikan menu">«</button>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-item is-active" data-view="dashboard">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg>
+          <span>Dashboard</span>
+        </button>
+        <button class="nav-item" data-view="projects">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M3 11h18" opacity=".45"/></svg>
+          <span>Project</span>
+        </button>
+
+        <p class="nav-label">Ruang kerja</p>
+        <button class="nav-item" data-view="chat">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8.5 8.5 0 0 1-12.3 7.6L4 21l1.4-4.7A8.5 8.5 0 1 1 21 12Z"/></svg>
+          <span>@Worker</span>
+        </button>
+        <button class="nav-item" data-view="auto-pilot">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 16 0"/><path d="m12 12 4-3"/><circle cx="12" cy="12" r="2"/><path d="M4 16h16" opacity=".4"/></svg>
+          <span>Auto Pilot Task</span>
+        </button>
+
+        <p class="nav-label">Autonomous Work</p>
+        <button class="nav-item" data-view="automations">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+          <span>Automations</span>
+        </button>
+        <button class="nav-item" data-view="workflows">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h6M5 12h6M5 18h6"/><path d="M15 6h4M15 12h4M15 18h4"/><path d="M11 6h4M11 12h4M11 18h4" opacity=".4"/></svg>
+          <span>Workflows</span>
+        </button>
+        <button class="nav-item" data-view="runs">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.5v15l12-7.5-12-7.5Z"/></svg>
+          <span>Runs</span>
+        </button>
+        <button class="nav-item" data-view="traces">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.5-6 4 12 2.5-6H21"/></svg>
+          <span>Traces</span>
+        </button>
+        <button class="nav-item" data-view="approvals">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/><path d="M4 4h16v16H4z" opacity=".25"/></svg>
+          <span>Approvals</span>
+        </button>
+        <button class="nav-item" data-view="decide">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.4 9a2.6 2.6 0 1 1 3.8 2.3c-.8.5-1.2 1-1.2 1.8"/><path d="M12 17h.01"/></svg>
+          <span>Human Decide</span>
+        </button>
+
+        <p class="nav-label">Worker Management</p>
+        <button class="nav-item" data-view="wakers">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span>Workers</span>
+        </button>
+        <button class="nav-item" data-view="groups">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.4"/><path d="M3 19a6 6 0 0 1 12 0M14.5 19a4.5 4.5 0 0 1 6.5-4"/></svg>
+          <span>Groups</span>
+        </button>
+        <button class="nav-item" data-view="channels">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v4M15 3v4M7 7h10v6a5 5 0 0 1-10 0V7Zm5 11v3"/></svg>
+          <span>Channels</span>
+        </button>
+
+        <p class="nav-label">Capabilities &amp; Resources</p>
+        <button class="nav-item" data-view="models">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17 9 5 9-5" opacity=".5"/></svg>
+          <span>Models</span>
+        </button>
+        <button class="nav-item" data-view="usage">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 16v-4"/><path d="M13 16V8"/><path d="M18 16v-6"/></svg>
+          <span>Usage Model</span>
+        </button>
+        <button class="nav-item" data-view="engines">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/><circle cx="12" cy="12" r="3.2"/></svg>
+          <span>Engines</span>
+        </button>
+        <button class="nav-item" data-view="capabilities">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17 9 5 9-5" opacity=".5"/></svg>
+          <span>Skills &amp; MCP</span>
+        </button>
+        <button class="nav-item" data-view="knowledge">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h13v18H6a2 2 0 0 1-2-2V5Z"/><path d="M8 3v18"/></svg>
+          <span>Knowledge</span>
+        </button>
+        <button class="nav-item" data-view="memory">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
+          <span>Memory</span>
+        </button>
+
+        <p class="nav-label">Sistem</p>
+        <button class="nav-item" data-view="settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>
+          <span>Settings</span>
+        </button>
+      </nav>
+
+      <div class="rail-foot">
+        <div class="status" id="status">
+          <span class="dot" id="status-dot"></span>
+          <span id="status-text">menghubungkan…</span>
+        </div>
+        <p class="rail-hint">Fondasi console · M1</p>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="titles">
+          <h1 id="page-title">Wakers</h1>
+          <p id="page-sub">Pegawai digital yang menjalankan pekerjaanmu.</p>
+        </div>
+        <div class="top-actions">
+          <label class="search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+            <input id="search" type="search" placeholder="Cari worker…" autocomplete="off">
+          </label>
+          <label class="mode-control" title="Mode keputusan: OFF = Anda menjawab; SEMI = @Decider merekomendasikan; AUTO = @Decider memutuskan (irreversible tetap manusia).">
+            <span>Mode keputusan</span>
+            <select id="mode-select" disabled>
+              <option value="SEMI">SEMI</option>
+              <option value="AUTO">AUTO</option>
+              <option value="OFF">OFF</option>
+            </select>
+          </label>
+          <button class="btn" id="viewer-toggle" title="Buka/tutup kolom viewer">
+            <span aria-hidden="true">▤</span> Viewer
+          </button>
+          <button class="btn" id="refresh" title="Muat ulang aplikasi (Ctrl+R)">
+            <span aria-hidden="true">↻</span> Muat ulang
+          </button>
+          <button class="btn primary" id="new-waker">
+            <span aria-hidden="true">＋</span> Worker baru
+          </button>
+        </div>
+      </header>
+
+      <section class="view" id="view" aria-live="polite"></section>
+    </main>
+
+    <aside class="viewer" id="viewer" aria-label="Viewer berkas">
+      <div class="viewer-head">
+        <div class="viewer-titles">
+          <strong id="viewer-name">Viewer</strong>
+          <span id="viewer-path"></span>
+        </div>
+        <div class="row-actions" style="margin-left:auto">
+          <button class="icon-btn" id="viewer-min" title="Sembunyikan kolom" aria-label="Sembunyikan kolom">—</button>
+          <button class="icon-btn" id="viewer-close" title="Tutup" aria-label="Tutup">×</button>
+        </div>
+      </div>
+      <div class="viewer-body" id="viewer-body"></div>
+    </aside>
+  </div>
+
+  <div class="scrim hidden" id="scrim"></div>
+
+  <aside class="drawer hidden" id="drawer" aria-label="Detail waker">
+    <div class="drawer-head">
+      <span class="drawer-kicker">Detail</span>
+      <button class="icon-btn" id="drawer-close" aria-label="Tutup">×</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+
+  <div class="modal hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="modal-title">Worker baru</h2>
+        <button class="icon-btn" id="modal-close" aria-label="Tutup">×</button>
+      </div>
+      <form class="form" id="waker-form">
+        <div class="field">
+          <label for="f-name">Nama</label>
+          <input id="f-name" name="name" required maxlength="60" placeholder="mis. Laporan Harian">
+        </div>
+        <div class="field">
+          <label for="f-desc">Deskripsi</label>
+          <input id="f-desc" name="description" maxlength="160" placeholder="Apa yang dikerjakan waker ini?">
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="f-engine">Engine</label>
+            <select id="f-engine" name="engine_key" required></select>
+          </div>
+          <div class="field">
+            <label for="f-model">Model <button type="button" class="link-btn" id="model-refresh" title="Muat ulang katalog QoderWake">↻</button></label>
+            <select id="f-model" name="model"></select>
+            <input id="f-model-free" class="hidden" name="model_free" placeholder="id model untuk engine ini">
+          </div>
+        </div>
+        <div class="grid-2" id="f-reasoning">
+          <div class="field">
+            <label for="f-effort">Thinking level</label>
+            <select id="f-effort"></select>
+          </div>
+          <div class="field">
+            <label for="f-context">Context window</label>
+            <select id="f-context"></select>
+          </div>
+        </div>
+        <div class="field hidden" id="f-context-free-wrap">
+          <label for="f-context-free">Context window (opsional)</label>
+          <input id="f-context-free" name="context_window_free" type="number" min="1000" step="1000" placeholder="mis. 1000000 — hanya dipakai untuk menghitung % context">
+        </div>
+        <p class="form-note hidden" id="catalog-note"></p>
+        <div class="field">
+          <label for="f-workspace">Workspace</label>
+          <input id="f-workspace" name="workspace" placeholder="—">
+        </div>
+        <div class="field">
+          <label for="f-prompt">System prompt</label>
+          <textarea id="f-prompt" name="system_prompt" rows="4" placeholder="Peran, batasan, dan gaya jawaban."></textarea>
+        </div>
+        <p class="form-error hidden" id="form-error"></p>
+        <div class="form-actions">
+          <button type="button" class="btn ghost" id="form-cancel">Batal</button>
+          <button type="submit" class="btn primary" id="form-submit">Simpan</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="automation-modal" role="dialog" aria-modal="true" aria-labelledby="automation-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="automation-title">Automation baru</h2>
+        <button class="icon-btn" id="automation-close" aria-label="Tutup">×</button>
+      </div>
+      <form class="form" id="automation-form">
+        <div class="field">
+          <label for="a-name">Nama</label>
+          <input id="a-name" required maxlength="60" placeholder="mis. Laporan pagi">
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="a-waker">Worker</label>
+            <select id="a-waker" required></select>
+          </div>
+          <div class="field">
+            <label for="a-kind">Jenis tugas</label>
+            <select id="a-kind">
+              <option value="prompt">Worker menjawab (pakai model)</option>
+              <option value="command">Komputer menjalankan perintah</option>
+            </select>
+          </div>
+        </div>
+        <p class="form-note" id="a-kind-help"></p>
+        <div class="field">
+          <label for="a-sched">Kapan dijalankan</label>
+          <select id="a-sched">
+            <option value="daily">Setiap hari, pada jam tertentu</option>
+            <option value="hourly">Setiap jam (tiap 60 menit)</option>
+            <option value="weekly">Setiap minggu, pada hari dan jam tertentu</option>
+            <option value="monthly">Setiap bulan, pada tanggal dan jam tertentu</option>
+            <option value="custom">Cron khusus (hanya bila sudah paham cron)</option>
+          </select>
+        </div>
+        <div class="grid-2">
+          <div class="field" id="a-hour-field">
+            <label for="a-hour">Jam (00–23)</label>
+            <select id="a-hour"></select>
+          </div>
+          <div class="field" id="a-minute-field">
+            <label for="a-minute">Menit (00–59)</label>
+            <select id="a-minute"></select>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field hidden" id="a-weekday-field">
+            <label for="a-weekday">Hari</label>
+            <select id="a-weekday"></select>
+          </div>
+          <div class="field hidden" id="a-dom-field">
+            <label for="a-dom">Tanggal</label>
+            <select id="a-dom"></select>
+          </div>
+        </div>
+        <div class="field hidden" id="a-cron-field">
+          <label for="a-cron">Cron khusus</label>
+          <input id="a-cron" placeholder="contoh: 0 2 * * * = setiap hari pukul 02:00" autocomplete="off">
+          <span class="card-slug">Format: menit jam tanggal bulan hari. Pilih jadwal di atas bila tidak yakin.</span>
+        </div>
+        <p class="form-note" id="a-sched-summary"></p>
+        <div class="grid-2">
+          <div class="field">
+            <label for="a-tz">Zona waktu</label>
+            <select id="a-tz">
+              <option value="local">Lokal (sistem)</option>
+              <option value="UTC">UTC</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="a-overlap">Jika masih berjalan</label>
+            <select id="a-overlap">
+              <option value="skip">Lewati</option>
+              <option value="queue">Antrekan</option>
+              <option value="replace">Ganti</option>
+            </select>
+          </div>
+        </div>
+        <div class="field hidden" id="a-command-field">
+          <label for="a-command">Perintah</label>
+          <textarea id="a-command" rows="3" placeholder="/home/irsofka/.ai-station/bin/backup_push.sh"></textarea>
+        </div>
+        <div class="field" id="a-prompt-field">
+          <label for="a-prompt">Prompt</label>
+          <textarea id="a-prompt" rows="4" placeholder="Apa yang harus dikerjakan waker?"></textarea>
+        </div>
+        <p class="form-note">Jadwal berikutnya dihitung saat disimpan. Cron tidak perlu diketik kecuali kamu memilih "Cron lanjutan".</p>
+        <p class="form-error hidden" id="automation-error"></p>
+        <div class="form-actions">
+          <button type="button" class="btn ghost" id="automation-cancel">Batal</button>
+          <button type="submit" class="btn primary" id="automation-submit">Simpan</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="workflow-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="workflow-title">Workflow baru</h2>
+        <button class="icon-btn" id="workflow-close" aria-label="Tutup">×</button>
+      </div>
+      <form class="form" id="workflow-form">
+        <div class="field">
+          <label for="w-name">Nama</label>
+          <input id="w-name" required maxlength="80" placeholder="mis. Laporan pagi">
+        </div>
+        <div class="field">
+          <label for="w-waker">Worker</label>
+          <select id="w-waker" required></select>
+        </div>
+        <div class="field">
+          <label for="w-steps">Langkah <span class="hint">satu baris satu langkah</span></label>
+          <textarea id="w-steps" rows="6" placeholder="Kumpulkan data penjualan hari ini&#10;Ringkas menjadi tiga poin&#10;approval: Setujui sebelum dikirim"></textarea>
+        </div>
+        <p class="form-note">Awali baris dengan <code>approval:</code>, <code>tool:</code> (perintah shell), atau <code>branch: contains="…" goto=N</code>. Tambahkan <code>| retry=2</code> untuk mengulang langkah yang gagal.</p>
+        <p class="form-error hidden" id="workflow-error"></p>
+        <div class="form-actions">
+          <button type="button" class="btn ghost" id="workflow-cancel">Batal</button>
+          <button type="submit" class="btn primary">Simpan workflow</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="group-modal" role="dialog" aria-modal="true" aria-labelledby="group-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="group-title">Grup baru</h2>
+        <button class="icon-btn" id="group-close" aria-label="Tutup">×</button>
+      </div>
+      <form class="form" id="group-form">
+        <div class="field">
+          <label for="g-name">Nama grup</label>
+          <input id="g-name" required maxlength="80" placeholder="mis. Tim Laporan Harian">
+        </div>
+        <div class="field">
+          <label for="g-sop">SOP <span class="hint">disisipkan ke setiap prompt</span></label>
+          <textarea id="g-sop" rows="4" placeholder="Aturan kerja bersama: siapa menjawab apa, batasan, dan format keluaran."></textarea>
+        </div>
+        <div class="field">
+          <label>Anggota <span class="hint">urutan menjawab mengikuti urutan di sini</span></label>
+          <div id="g-members" class="member-list"></div>
+        </div>
+        <p class="form-error hidden" id="group-error"></p>
+        <div class="form-actions">
+          <button type="button" class="btn ghost" id="group-cancel">Batal</button>
+          <button type="submit" class="btn primary">Simpan grup</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="channel-modal" role="dialog" aria-modal="true" aria-labelledby="channel-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2 id="channel-title">Channel baru</h2>
+        <button class="icon-btn" id="channel-close" aria-label="Tutup">×</button>
+      </div>
+      <form class="form" id="channel-form">
+        <div class="grid-2">
+          <div class="field">
+            <label for="c-provider">Provider</label>
+            <select id="c-provider">
+              <option value="local">Lokal (uji tanpa kredensial)</option>
+              <option value="dingtalk">DingTalk</option>
+              <option value="feishu">Feishu</option>
+              <option value="lark">Lark</option>
+              <option value="wecom">WeCom</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="c-name">Nama</label>
+            <input id="c-name" required maxlength="60" placeholder="mis. Tim Operasional">
+          </div>
+        </div>
+        <div class="field">
+          <label for="c-cred">Variabel kredensial <span class="hint">env, bukan rahasianya</span></label>
+          <input id="c-cred" placeholder="mis. DINGTALK_WEBHOOK_URL">
+        </div>
+        <p class="form-note">Kredensial hanya dibaca dari variabel lingkungan saat mengirim balasan. Provider lokal menyimpan balasan di database untuk diuji.</p>
+        <p class="form-error hidden" id="channel-error"></p>
+        <div class="form-actions">
+          <button type="button" class="btn ghost" id="channel-cancel">Batal</button>
+          <button type="submit" class="btn primary">Simpan channel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast" role="status"></div>
+
+  <!--BOOT-->
+  <script type="module" src="/console/console.js"></script>
+</body>
+</html>

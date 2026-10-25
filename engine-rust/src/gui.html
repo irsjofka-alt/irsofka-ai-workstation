@@ -1,0 +1,1363 @@
+<!DOCTYPE html>
+<!--
+  gui.html — the whole workstation cockpit in one page, loaded by wry and by a browser.
+  Layout: engine bar and context meter on top, Active Workspace and Session Memory down
+  the left, tmux panes filling the rest, composer pinned at the bottom. Every state
+  change goes through the daemon at http://127.0.0.1:8999 — this file holds no logic of
+  its own. Text shown to the user is English; in-code comments may stay Indonesian.
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Irsofka AI Workstation - Live Studio</title>
+    <link rel="stylesheet" href="/assets/vendor/xterm.css">
+    <script src="/assets/vendor/xterm.js"></script>
+    <script src="/assets/vendor/addon-fit.js"></script>
+
+    <style>
+        /* Font dilayani dari disk sendiri: tanpa CDN, UI tetap hidup saat jaringan mati. */
+        @font-face { font-family: 'Inter'; font-weight: 400; font-display: swap; src: url('/assets/fonts/inter-400.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 500; font-display: swap; src: url('/assets/fonts/inter-500.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 600; font-display: swap; src: url('/assets/fonts/inter-600.woff2') format('woff2'); }
+        @font-face { font-family: 'Inter'; font-weight: 700; font-display: swap; src: url('/assets/fonts/inter-700.woff2') format('woff2'); }
+        @font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-display: swap; src: url('/assets/fonts/jb-400.woff2') format('woff2'); }
+        @font-face { font-family: 'JetBrains Mono'; font-weight: 500; font-display: swap; src: url('/assets/fonts/jb-500.woff2') format('woff2'); }
+        @font-face { font-family: 'JetBrains Mono'; font-weight: 600; font-display: swap; src: url('/assets/fonts/jb-600.woff2') format('woff2'); }
+
+        :root {
+            --bg-deep: #07090e;
+            --bg-surface: #0e121d;
+            --bg-card: #141926;
+            --bg-elevated: #1a2133;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --border-focus: rgba(56, 189, 248, 0.4);
+            --accent-cyan: #38bdf8;
+            --accent-glow: rgba(56, 189, 248, 0.25);
+            --accent-amber: #f59e0b;
+            --accent-emerald: #10b981;
+            --accent-violet: #818cf8;
+            --accent-rose: #f43f5e;
+            --text-main: #f1f5f9;
+            --text-muted: #94a3b8;
+            --text-dim: #64748b;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg-deep);
+            color: var(--text-main);
+            font-family: 'Inter', -apple-system, sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            user-select: text;
+            -webkit-user-select: text;
+        }
+
+        /* Topbar Header */
+        header {
+            height: 52px;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 16px;
+            z-index: 20;
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 700;
+            font-size: 0.92rem;
+        }
+        .brand-badge {
+            width: 28px;
+            height: 28px;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-violet));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            box-shadow: 0 0 14px var(--accent-glow);
+        }
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .pill {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .pill b { color: var(--text-main); font-weight: 600; }
+        .refresh-btn {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-subtle);
+            color: var(--accent-cyan);
+            padding: 5px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        .refresh-btn:hover {
+            border-color: var(--accent-cyan);
+            background: rgba(56, 189, 248, 0.15);
+        }
+
+        /* Main Workspace Layout */
+        .workspace {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 290px 1fr 280px;
+            height: calc(100vh - 52px);
+            overflow: hidden;
+        }
+
+        /* Left Rail: Controls & Parameters */
+        .sidebar-left {
+            background: var(--bg-surface);
+            border-right: 1px solid var(--border-subtle);
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            overflow-y: auto;
+        }
+        .section-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: var(--text-muted);
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .select-input {
+            width: 100%;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-main);
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            outline: none;
+            margin-bottom: 10px;
+            cursor: pointer;
+        }
+        .select-input:focus { border-color: var(--accent-cyan); }
+
+        /* Auto-Approve Toggle Card */
+        .toggle-card {
+            background: rgba(16, 185, 129, 0.08);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            border-radius: 8px;
+            padding: 10px 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            cursor: pointer;
+        }
+        .toggle-card.off {
+            background: var(--bg-card);
+            border-color: var(--border-subtle);
+        }
+        .toggle-title {
+            font-size: 0.78rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .switch-indicator {
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: var(--accent-emerald);
+            background: rgba(16, 185, 129, 0.2);
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        .toggle-card.off .switch-indicator {
+            color: var(--text-dim);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        /* Center Stage: Studio Live Terminal */
+        .center-stage {
+            display: flex;
+            flex-direction: column;
+            background: #05070c;
+            height: 100%;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Terminal Top Bar (Tabs & Status) */
+        .term-header {
+            height: 42px;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 12px;
+        }
+        .term-tabs {
+            display: flex;
+            gap: 4px;
+        }
+        .term-tab {
+            padding: 6px 14px;
+            border-radius: 6px 6px 0 0;
+            font-size: 0.76rem;
+            font-weight: 600;
+            cursor: pointer;
+            color: var(--text-muted);
+            background: transparent;
+            border: 1px solid transparent;
+            border-bottom: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.15s;
+        }
+        .term-tab:hover { color: var(--text-main); }
+        .term-tab.active {
+            color: var(--text-main);
+            background: #05070c;
+            border-color: var(--border-subtle);
+        }
+        .term-tab.qoder.active { border-top: 2px solid var(--accent-amber); }
+        .term-tab.antigravity.active { border-top: 2px solid var(--accent-cyan); }
+        .term-tab.shell.active { border-top: 2px solid var(--accent-emerald); }
+
+        .term-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .term-btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-muted);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .term-btn:hover { color: var(--text-main); border-color: var(--accent-cyan); }
+
+        /* The Live Terminal Viewport */
+        .terminal-container {
+            /* Yang mengalah saat komposer membesar adalah terminal, bukan komposer. */
+            flex: 1 1 auto;
+            min-height: 140px;
+            width: 100%;
+            padding: 8px;
+            background: #05070c;
+            overflow: hidden;
+        }
+
+        /* Action Chips */
+        .action-chips {
+            padding: 6px 14px;
+            display: flex;
+            gap: 8px;
+            overflow-x: auto;
+            background: rgba(14, 18, 29, 0.85);
+            border-top: 1px solid var(--border-subtle);
+        }
+        .chip {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-muted);
+            padding: 4px 10px;
+            border-radius: 14px;
+            font-size: 0.72rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+        .chip:hover { border-color: var(--accent-cyan); color: var(--text-main); background: rgba(56, 189, 248, 0.1); }
+
+        /* Bar mesin di bawah tab: satu baris, mengikuti tab aktif */
+        .engine-bar {
+            display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap;
+            padding: 8px 12px; background: var(--panel-2, rgba(17, 29, 51, 0.6));
+            border-bottom: 1px solid var(--border);
+        }
+        .engine-bar.hidden { display: none; }
+        .eb-engine {
+            font-size: 0.68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+            color: var(--accent-cyan); padding-bottom: 6px; white-space: nowrap;
+        }
+        .eb-field { display: flex; flex-direction: column; gap: 2px; min-width: 132px; flex: 1 1 132px; max-width: 240px; }
+        .eb-field > span { font-size: 0.6rem; color: var(--text-dim); letter-spacing: .08em; text-transform: uppercase; }
+        .eb-field select {
+            width: 100%; background: #0c0e15; color: var(--text-main);
+            border: 1px solid var(--border); border-radius: 6px;
+            font-size: 0.72rem; padding: 4px 6px; height: 26px;
+        }
+        .eb-field select:focus { outline: 1px solid var(--accent-cyan); }
+        .eb-field select option { background: #0c0e15; color: var(--text-main); }
+        .eb-apply, .eb-ctx { align-self: flex-end; height: 26px; font-size: 0.72rem; white-space: nowrap; }
+        .engine-bar .select-input { color-scheme: dark; }
+        .eb-usage {
+            margin-left: auto; font-size: 0.66rem; color: var(--text-muted);
+            font-family: monospace; padding-bottom: 6px; text-align: right; max-width: 42%;
+        }
+
+        /* Bottom Prompt Bar */
+        .prompt-bar {
+            /* Tanpa ini komposer adalah flex item yang BOLEH menyusut: tingginya
+               di-clamp ke ~46px berapa pun yang kita hitung, dan teks baris ke-3
+               ke bawah terpotong oleh overflow induknya. */
+            flex: 0 0 auto;
+            background: var(--bg-surface);
+            border-top: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: flex-end;
+            padding: 10px 14px;
+            gap: 10px;
+        }
+        .prompt-input {
+            flex: 1;
+            min-height: 46px;
+            max-height: 60vh;
+            overflow-y: auto;
+            resize: none;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            color: var(--text-main);
+            padding: 10px 14px;
+            font-size: 0.85rem;
+            line-height: 1.55;
+            outline: none;
+            font-family: inherit;
+            /* Perintah panjang turun baris, tidak terpotong ke tepi jendela */
+            white-space: pre-wrap;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+        }
+        .prompt-input:focus { border-color: var(--accent-cyan); }
+        .composer-wrap { flex: 1; display: flex; flex-direction: column; }
+        .key-hint {
+            font-size: 0.66rem; color: var(--text-dim);
+            display: flex; gap: 10px; align-items: center; margin-top: 5px; flex-wrap: wrap;
+        }
+        kbd {
+            background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+            border-radius: 4px; padding: 1px 6px; font-size: 0.64rem;
+            font-family: 'JetBrains Mono', monospace; color: var(--text-muted);
+        }
+        .btn-send {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-violet));
+            color: #000;
+            font-weight: 700;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: opacity 0.2s;
+        }
+        .btn-send:hover { opacity: 0.9; }
+
+        /* Right Rail: Inspector */
+        .sidebar-right {
+            background: var(--bg-surface);
+            border-left: 1px solid var(--border-subtle);
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            overflow-y: auto;
+        }
+        .card-aux {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .card-aux h4 {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .screen-preview {
+            width: 100%;
+            height: 125px;
+            background: #0b0d14;
+            border-radius: 6px;
+            border: 1px dashed var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        .screen-preview img { width: 100%; height: 100%; object-fit: contain; }
+        .quick-btn {
+            background: var(--bg-elevated);
+            color: var(--text-main);
+            border: 1px solid var(--border-subtle);
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 0.74rem;
+            cursor: pointer;
+            width: 100%;
+            margin-bottom: 6px;
+            transition: all 0.15s;
+            text-align: left;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .quick-btn:hover { border-color: var(--accent-cyan); background: rgba(56, 189, 248, 0.1); }
+    </style>
+</head>
+<body>
+    <!-- Main Header -->
+    <header>
+        <div class="brand">
+            <div class="brand-badge">⚛</div>
+            <span>IRSOFKA AI WORKSTATION</span>
+            <span class="pill" style="font-size: 0.68rem;">
+                <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--accent-emerald); display: inline-block;"></span>
+                COSMIC Wayland
+            </span>
+        </div>
+
+        <div class="header-actions">
+            <div class="pill" style="border-color: rgba(245, 158, 11, 0.4);">
+                <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--accent-amber); display: inline-block;"></span>
+                <span>QODER CLI</span> <b id="qoder-cli-badge" style="color: var(--accent-amber);">v1.1.65</b>
+            </div>
+            <div class="pill" style="border-color: rgba(56, 189, 248, 0.4);">
+                <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--accent-cyan); display: inline-block;"></span>
+                <span>AGY CLI</span> <b id="agy-cli-badge" style="color: var(--accent-cyan);">v1.2.17</b>
+            </div>
+            <div class="pill" style="border-color: rgba(16, 185, 129, 0.4);">
+                <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--accent-emerald); display: inline-block;"></span>
+                <span>DB</span> <b id="header-db-pill" style="color: var(--accent-emerald);">🐘 PostgreSQL</b>
+            </div>
+            <div class="pill">
+                <span>GPU</span> <b id="gpu-info">RTX 3060</b>
+            </div>
+            <div class="pill">
+                <span>RAM</span> <b id="ram-info">32 GB</b>
+            </div>
+            <button class="refresh-btn" style="border-color: rgba(79, 209, 197, 0.45); color: var(--accent-teal, #4fd1c5);" onclick="openStation()" title="Open the record of what happened">📊 Station</button>
+            <button class="refresh-btn" onclick="refreshUI()" title="Reload interface">🔄 Refresh UI</button>
+            <button class="refresh-btn" style="border-color: rgba(244, 63, 94, 0.4); color: var(--accent-rose);" onclick="restartServerDaemon()" title="Restart server service">⚡ Restart Daemon</button>
+        </div>
+    </header>
+
+    <div class="workspace">
+        <!-- Left: Execution, save-state, workspace, session memory -->
+        <div class="sidebar-left">
+            <div>
+                <div class="section-label">Permissions & Execution</div>
+                <div id="auto-approve-card" class="toggle-card" onclick="toggleAutoApprove()">
+                    <div class="toggle-title">
+                        <span>⚡ Auto-Approve Tools</span>
+                    </div>
+                    <div id="auto-approve-indicator" class="switch-indicator">ON</div>
+                </div>
+                <div style="font-size: 0.68rem; color: var(--text-dim); margin-top: -6px; margin-bottom: 12px; line-height: 1.4;">
+                    When ON: Tools & file reads are automatically permitted without confirmation pauses in the terminal.
+                </div>
+                <div id="autopilot-card" class="toggle-card off" onclick="toggleAutopilot()"
+                     title="F10.8 — the engines may choose which queued item comes next, never what may exist. Hard ceilings are enforced by tools/work_order.py, not by this page.">
+                    <div class="toggle-title">
+                        <span>🌙 Autopilot</span>
+                    </div>
+                    <div id="autopilot-indicator" class="switch-indicator">…</div>
+                </div>
+                <div style="font-size: 0.68rem; color: var(--text-dim); margin-top: -6px; line-height: 1.4;">
+                    When ON the machine is entrusted to the ecosystem for a bounded run. It does
+                    <b>not</b> grant the mouse or keyboard, and OFF needs nothing from the AI.
+                    <div style="display:flex; gap:6px; align-items:center; margin-top:6px;">
+                        <label for="ap-minutes" style="font-size:0.62rem;">window min</label>
+                        <input id="ap-minutes" type="number" value="240" min="1" step="1"
+                               style="width:62px; background:transparent; color:var(--text-main); border:1px solid var(--border-subtle); border-radius:4px; padding:2px 4px; font-size:0.66rem;">
+                        <label for="ap-budget" style="font-size:0.62rem;">items</label>
+                        <input id="ap-budget" type="number" value="8" min="1" step="1"
+                               style="width:52px; background:transparent; color:var(--text-main); border:1px solid var(--border-subtle); border-radius:4px; padding:2px 4px; font-size:0.66rem;">
+                    </div>
+                    <span id="autopilot-note" style="display:block; color:var(--accent-amber); margin-top:5px;">reading the work order…</span>
+                </div>
+            </div>
+
+            <div>
+                <div class="section-label">Database & RPG Save State</div>
+                <div class="card-aux" style="padding: 10px; font-size: 0.72rem; color: var(--text-muted); line-height: 1.6;">
+                    <div>💾 <b>Save State:</b> <span id="db-engine-badge" style="color: var(--accent-emerald);">🐘 POSTGRESQL Active</span></div>
+                    <div>📁 <b>Skills:</b> <span id="skills-count">4</span> unlocked</div>
+                    <div>📁 <b>Quests:</b> <span id="quests-count">0</span> logged</div>
+                    <div>🛡️ <b>Guardrails:</b> <span id="rules-count">2</span> rules active</div>
+                    <div id="db-path-badge" style="margin-top: 4px; color: var(--accent-cyan); font-family: monospace; font-size: 0.68rem;">checking database…</div>
+                </div>
+            </div>
+
+            <div>
+                <div class="section-label">Active Workspace</div>
+                <div class="card-aux">
+                    <h4>
+                        <span>Active Workspace</span>
+                        <button style="background: transparent; border: none; color: var(--accent-cyan); cursor: pointer; font-size: 0.72rem;" onclick="refreshWorkspace()">🔄</button>
+                    </h4>
+                    <div id="workspace-rows" style="display: flex; flex-direction: column; gap: 8px;">
+                        <div style="font-family: monospace; font-size: 0.7rem; color: var(--text-dim);">Detecting…</div>
+                    </div>
+                </div>
+
+                <div class="card-aux" style="margin-top: 10px;">
+                    <h4>
+                        <span>Session Memory (SQL)</span>
+                        <button style="background: transparent; border: none; color: var(--accent-cyan); cursor: pointer; font-size: 0.72rem;" onclick="refreshRecovery()">🔄</button>
+                    </h4>
+                    <div id="recovery-box" style="font-size: 0.68rem; color: var(--text-muted); line-height: 1.5;">
+                        Loading action history…
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center: Studio Live Terminal -->
+        <div class="center-stage">
+            <!-- Terminal Header & Tabs -->
+            <div class="term-header">
+                <div class="term-tabs">
+                    <div id="tab-qoder" class="term-tab qoder active" onclick="switchTab('qoder')">
+                        <span>🌟 Qoder CLI</span>
+                    </div>
+                    <div id="tab-antigravity" class="term-tab antigravity" onclick="switchTab('antigravity')">
+                        <span>⚡ Antigravity CLI</span>
+                    </div>
+                    <div id="tab-shell" class="term-tab shell" onclick="switchTab('shell')">
+                        <span>🐧 COSMIC Shell</span>
+                    </div>
+                </div>
+
+                <div class="term-actions">
+                    <span style="font-size: 0.7rem; color: var(--accent-emerald); display: flex; align-items: center; gap: 4px;">
+                        <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--accent-emerald);"></span>
+                        Live Stream (60 FPS)
+                    </span>
+                    <button class="term-btn" onclick="clearActiveTerm()">🧹 Clear</button>
+                    <button class="term-btn" onclick="interruptActiveSession()" title="Send Ctrl+C to the running CLI — stops what it is doing, keeps the conversation">⏹ Interrupt</button>
+                    <button class="term-btn" onclick="newActiveSession()" title="Terminate this tab's CLI and start a brand-new session (no resume). The pane is cleared; history stays in the database.">🆕 New Session</button>
+                </div>
+            </div>
+
+
+            <!-- The Live xterm.js Terminal Viewport (Independent Persistent Panes) -->
+            <div class="terminal-container" id="terminal-box">
+                <div id="term-qoder" class="term-pane" style="width: 100%; height: 100%;"></div>
+                <div id="term-antigravity" class="term-pane" style="width: 100%; height: 100%; display: none;"></div>
+                <div id="term-shell" class="term-pane" style="width: 100%; height: 100%; display: none;"></div>
+            </div>
+
+            <!-- Action Chips for 1-Click Execution -->
+
+            <!-- Bar mesin: ikut tab aktif, daftarnya dari /api/models (bukan hardcode) -->
+            <div class="engine-bar" id="engine-bar">
+                <span class="eb-engine" id="eb-engine">Qoder CLI</span>
+                <label class="eb-field"><span>Model</span>
+                    <select id="model-select" class="select-input" onchange="onModelChange()">
+                        <option value="">loading…</option>
+                    </select>
+                </label>
+                <label class="eb-field" id="eb-effort-wrap"><span>Reasoning Effort</span>
+                    <select id="effort-select" class="select-input" onchange="onModelChange()">
+                        <option value="xhigh">xhigh</option>
+                    </select>
+                </label>
+                <label class="eb-field" id="eb-context-wrap"><span>Context Window</span>
+                    <select id="context-select" class="select-input" onchange="onModelChange()">
+                        <option value="1048576">1,048,576 (1M)</option>
+                    </select>
+                </label>
+                <button class="term-btn eb-ctx" id="eb-ctx" onclick="showAgContext()" style="display:none"
+                        title="Types /context to Antigravity: displays token breakdown. Close panel with Esc.">📊 /context</button>
+                <button class="term-btn eb-apply" id="eb-apply" onclick="applyProfileNow()"
+                        title="Save profile AND respawn this tab's CLI to apply the new model immediately">⚡ Apply</button>
+                <span class="eb-usage" id="eb-usage" title="usage read from local state">—</span>
+            </div>
+
+            <!-- Bottom Prompt Dispatcher -->
+            <div class="prompt-bar">
+                <div class="composer-wrap">
+                    <textarea id="prompt-input" class="prompt-input" rows="1" spellcheck="false"
+                        placeholder="Type AI prompt… Enter for new line, Ctrl+Enter to send"
+                        oninput="autoGrowPrompt(this)" onkeydown="handleKey(event)" maxlength="6000"></textarea>
+                    <div class="key-hint">
+                        <span><kbd>Enter</kbd> new line</span>
+                        <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> send to CLI</span>
+                        <span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> send line-by-line</span>
+                        <span id="composer-state" style="color: var(--accent-cyan);"></span>
+                    </div>
+                </div>
+                <button class="btn-send" onclick="sendPromptToCLI()">
+                    <span>🚀 Send</span>
+                </button>
+            </div>
+            <div style="font-size: 0.7rem; color: var(--text-dim); margin-top: 4px; padding: 0 2px;">
+                💡 Multi-line prompt composer — Enter for new line, Ctrl+Enter to send, box expands to fit text, up to 6,000 characters.
+                To type directly in the terminal, click the pane above and type as usual.
+            </div>
+        </div>
+
+        <!-- Right: Usage, Visual Eye & Quick Actions -->
+        <div class="sidebar-right">
+            <div class="card-aux">
+                <h4>
+                    <span>Visual Eye (Wayland)</span>
+                    <button style="background: transparent; border: none; color: var(--accent-cyan); cursor: pointer; font-size: 0.72rem;" onclick="captureScreen()">📸 Capture</button>
+                </h4>
+                <div class="screen-preview" id="screen-box">
+                    <span style="font-size: 0.72rem; color: var(--text-dim);">Click 'Capture' to view screen</span>
+                </div>
+            </div>
+
+            <div class="card-aux">
+                <h4>Self-Healing Tracker</h4>
+                <div style="font-size: 0.75rem; color: var(--accent-emerald);">
+                    ● 0 Repeat Crashes (Stable)
+                </div>
+                <div style="font-size: 0.7rem; color: var(--text-dim); margin-top: 4px;">
+                    5x repeat triggers auto-synthesis of new skills into workstation.db
+                </div>
+            </div>
+
+            <div class="card-aux">
+                <h4>Context Recovery</h4>
+                <div style="font-size:.62rem;color:var(--text-dim);margin:-2px 0 6px;line-height:1.45;">
+                    Types recall commands to active CLI. Used when context was just
+                    compacted — before answering anything, reload persistent state.
+                </div>
+                <button class="quick-btn" onclick="recallAction('sql')">🧠 Load My SQL Memory</button>
+                <button class="quick-btn" onclick="recallAction('quests')">📜 Active Quests</button>
+                <button class="quick-btn" onclick="recallAction('skills')">📚 Registered Skills &amp; Memory</button>
+                <button class="quick-btn" onclick="recallAction('lastwork')">🔎 My Last 10 Actions</button>
+                <button class="quick-btn" onclick="recallAction('full')">♻️ Full Recovery</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let activeTab = 'qoder';
+        let isAutoApprove = true;
+        const TABS = ['qoder', 'antigravity', 'shell'];
+        const terms = {};
+        const fitAddons = {};
+
+        async function initTerminal() {
+            for (const t of TABS) {
+                const termInstance = new Terminal({
+                    cursorBlink: true,
+                    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+                    fontSize: 13,
+                    lineHeight: 1.25,
+                    theme: {
+                        background: '#05070c',
+                        foreground: '#f1f5f9',
+                        cursor: '#38bdf8',
+                        selectionBackground: 'rgba(56, 189, 248, 0.3)',
+                        black: '#000000',
+                        red: '#f43f5e',
+                        green: '#10b981',
+                        yellow: '#f59e0b',
+                        blue: '#38bdf8',
+                        magenta: '#818cf8',
+                        cyan: '#22d3ee',
+                        white: '#ffffff'
+                    }
+                });
+                const fit = new FitAddon.FitAddon();
+                termInstance.loadAddon(fit);
+
+                const container = document.getElementById('term-' + t);
+                termInstance.open(container);
+                fit.fit();
+
+                termInstance.onData(data => {
+                    fetch('/api/term/write', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({tab: t, data: data})
+                    });
+                });
+
+                terms[t] = termInstance;
+                fitAddons[t] = fit;
+
+                // Load initial screen history
+                try {
+                    const res = await fetch('/api/term/history?tab=' + t);
+                    if (res.ok) {
+                        const hist = await res.text();
+                        if (hist && hist.length > 0) {
+                            termInstance.write(hist);
+                        }
+                    }
+                } catch(e) {}
+            }
+
+            window.addEventListener('resize', syncPtySize);
+            setTimeout(syncPtySize, 200);
+
+            pollTerminal();
+        }
+
+        function syncPtySize() {
+            const fit = fitAddons[activeTab];
+            const term = terms[activeTab];
+            if (!fit || !term) return;
+            try {
+                fit.fit();
+                fetch('/api/term/resize', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ tab: activeTab, cols: term.cols, rows: term.rows })
+                }).catch(() => {});
+            } catch(e) {}
+        }
+
+
+        async function pollTerminal() {
+            for (const t of TABS) {
+                try {
+                    const res = await fetch('/api/term/read?tab=' + t);
+                    if (res.ok) {
+                        const text = await res.text();
+                        if (text.length > 0 && terms[t]) {
+                            terms[t].write(text);
+                        }
+                    }
+                } catch (err) {}
+            }
+            setTimeout(pollTerminal, 60);
+        }
+
+        function switchTab(tab) {
+            activeTab = tab;
+            renderEngineBar();
+            document.querySelectorAll('.term-tab').forEach(t => t.classList.remove('active'));
+            document.getElementById('tab-' + tab).classList.add('active');
+
+            // Hide other panes, show active pane without clearing
+            for (const t of TABS) {
+                const pane = document.getElementById('term-' + t);
+                if (pane) pane.style.display = (t === tab) ? 'block' : 'none';
+            }
+
+            if (fitAddons[tab]) fitAddons[tab].fit();
+            if (terms[tab]) terms[tab].focus();
+            syncPtySize();
+        }
+
+        function toggleAutoApprove() {
+            isAutoApprove = !isAutoApprove;
+            const card = document.getElementById('auto-approve-card');
+            const ind = document.getElementById('auto-approve-indicator');
+            if (isAutoApprove) {
+                card.classList.remove('off');
+                ind.innerText = 'ON';
+            } else {
+                card.classList.add('off');
+                ind.innerText = 'OFF';
+            }
+        }
+
+        /* Autopilot (F10.8). Halaman ini hanya memegang tombol; setiap angka yang
+           ditampilkan datang dari /api/autopilot, yang meneruskan byte tools/work_order.py
+           apa adanya. Batas keras (kegagalan berturut-turut, jumlah item, lease) tidak
+           disalin ke sini — dua definisi untuk satu kata adalah dua laporan yang boleh
+           berbeda, dan kontrak §12 melarangnya. */
+        var apState = null, apBusy = false;
+
+        function apWindowText(epoch) {
+            if (!epoch) return 'no window set';
+            const sec = Number(epoch) - Math.floor(Date.now() / 1000);
+            if (sec <= 0) return 'window expired — it will not claim anything';
+            const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+            return (h ? h + 'h ' : '') + m + 'm of air left';
+        }
+
+        async function refreshAutopilot() {
+            try {
+                const res = await fetch('/api/autopilot', { cache: 'no-store' });
+                const j = await res.json();
+                const card = document.getElementById('autopilot-card');
+                const ind = document.getElementById('autopilot-indicator');
+                const note = document.getElementById('autopilot-note');
+                if (j.error && !j.autopilot) {
+                    ind.innerText = 'UNKNOWN';
+                    card.classList.add('off');
+                    note.innerText = j.error + ' — OFF still works from any shell (ai-station autopilot off)';
+                    return;
+                }
+                apState = j;
+                const st = j.autopilot || {}, night = j.night || {};
+                const on = st.mode === 'ON';
+                card.classList.toggle('off', !on);
+                ind.innerText = st.mode || 'UNKNOWN';
+                const waiting = (j.decisions_open || []).length + (j.human_queue || []).length;
+                const bits = [on ? apWindowText(st.until_epoch) : 'a human is at the desk',
+                              night.ok ? 'breaker closed' : ('BREAKER OPEN: ' + (night.why || []).join(', ')),
+                              'items ' + (st.items_done || 0) + '/' + (st.item_budget || '—'),
+                              waiting + ' waiting for you'];
+                note.innerText = bits.join(' · ');
+                note.style.color = night.ok ? 'var(--text-dim)' : 'var(--accent-rose)';
+            } catch (e) {
+                document.getElementById('autopilot-note').innerText =
+                    'daemon unreachable — the work order could not be read';
+            }
+        }
+
+        async function toggleAutopilot() {
+            if (apBusy) return;
+            const next = (apState && apState.autopilot && apState.autopilot.mode === 'ON') ? 'off' : 'on';
+            const body = { mode: next, by: 'operator-cockpit',
+                           reason: 'flipped ' + next + ' from the cockpit' };
+            if (next === 'on') {
+                const m = parseInt(document.getElementById('ap-minutes').value, 10);
+                const b = parseInt(document.getElementById('ap-budget').value, 10);
+                if (m > 0) body.minutes = m;
+                if (b > 0) body.budget = b;
+            }
+            apBusy = true;
+            const note = document.getElementById('autopilot-note');
+            note.innerText = 'writing the switch through work_order.py…';
+            try {
+                const res = await fetch('/api/autopilot', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const j = await res.json().catch(function () { return {}; });
+                if (!res.ok || j.error) {
+                    note.innerText = (j.error || ('daemon answered ' + res.status)) +
+                        ((j.off_paths || []).length ? ' — still off-able: ' + j.off_paths.join(' / ') : '');
+                    note.style.color = 'var(--accent-rose)';
+                    return;
+                }
+            } catch (e) {
+                note.innerText = 'the switch was NOT written: daemon unreachable';
+                note.style.color = 'var(--accent-rose)';
+                return;
+            } finally {
+                apBusy = false;
+            }
+            refreshAutopilot();
+        }
+
+        async function onModelChange() {
+            const engine = targetEngine();
+            const tab = engine === 'agy' ? 'antigravity' : (engine === 'qoder' ? 'qoder' : activeTab);
+            switchTab(tab);
+            const sel = document.getElementById('model-select');
+            const model = sel.value;
+            // Antigravity menolak --effort bersamaan dengan sebagian nama model
+            // (penyebab quest "Test GDD Architecture" FAILED), jadi kirim effort kosong.
+            const effort = engine === 'agy' ? '' : document.getElementById('effort-select').value;
+            const context = engine === 'agy' ? '' : document.getElementById('context-select').value;
+            try {
+                const res = await fetch('/api/cli/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tab: tab, model: model, effort: effort,
+                                           context_window: context, restart: false })
+                });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                flagProfileSaved(`✓ profile ${tab} = ${model} — takes effect on tab respawn`, false);
+            } catch (e) {
+                flagProfileSaved(`✗ failed to save profile ${tab}`, true);
+            }
+        }
+
+        // Enter = new line (default textarea behavior).
+        // Ctrl/Cmd+Enter = send. Shift = verbatim line-by-line (for shell).
+        function handleKey(e) {
+            if (e.key !== 'Enter') return;
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                sendPromptToCLI({ verbatim: e.shiftKey });
+            }
+        }
+
+        function autoGrowPrompt(el) {
+            const baris = (el.value.match(/\n/g) || []).length + 1;
+            const perBaris = 21;                 // 0.85rem × line-height 1.55
+            const padding = 22;                  // top + bottom padding
+            const cap = Math.round(window.innerHeight * 0.60);
+            const tinggi = Math.min(cap, Math.max(46, baris * perBaris + padding));
+            el.style.height = tinggi + 'px';
+            el.style.overflowY = (baris * perBaris + padding) > cap ? 'auto' : 'hidden';
+            updateComposerState();
+        }
+
+        function updateComposerState() {
+            const el = document.getElementById('prompt-input');
+            const st = document.getElementById('composer-state');
+            if (!el || !st) return;
+            if (!el.value.trim()) { st.innerText = ''; return; }
+            const baris = (el.value.match(/\n/g) || []).length + 1;
+            const n = el.value.length;
+            st.innerText = `${baris} lines • ${n} / 6000 chars`
+                + (n >= 6000 ? ' — full' : '');
+            st.style.color = n >= 6000 ? 'var(--accent-rose)' : '';
+        }
+
+        // Context progress bar
+        function contextBar(pct) {
+            if (pct === null || pct === undefined) return 'context: unreadable from pane';
+            const p = Math.max(0, Math.min(100, Number(pct)));
+            const blok = Math.round(p / 10);
+            const bar = '█'.repeat(blok) + '░'.repeat(10 - blok);
+            const warna = p >= 90 ? 'var(--accent-rose)' : (p >= 70 ? 'var(--accent-amber)' : 'var(--accent-cyan)');
+            return `Context <span style="color:${warna}">${bar}</span> ${p}%`;
+        }
+
+        const RECALL = {
+            sql: 'Run `python3 ~/.ai-station/tools/db_state.py` and inspect the world_memory table '
+                 + '(latest 20 rows) and IN_PROGRESS quest_tasks. Summarize what is there; '
+                 + 'do not start new tasks before current work is resolved.',
+            quests: 'Run `ai-station handoff`. List quests that are IN_PROGRESS, what '
+                  + 'has been completed, and the recorded next steps.',
+            skills: 'Read ONLY two indices: ~/.ai-station/brain/skills/SKILLS.md and '
+                  + '~/.ai-station/brain/memory/MEMORY.md. Read table of contents only; do not open individual files '
+                  + 'before tasks are clarified. This is the selective loading policy.',
+            lastwork: 'Run `ai-station recall 10` and describe recent actions in '
+                    + 'this session: commands run, outcomes, and remaining tasks.',
+            full: 'Run `ai-station recovery 40`, read the latest handoff file in '
+                + '~/.ai-station/brain/memory/projects/, and report: (1) current task, '
+                + '(2) verified items, (3) remaining work. Do not start new initiatives.'
+        };
+
+        async function recallAction(kind) {
+            const teks = RECALL[kind];
+            if (!teks) return;
+            const el = document.getElementById('prompt-input');
+            el.value = teks;
+            autoGrowPrompt(el);
+            await sendPromptToCLI({ verbatim: false });
+        }
+
+        function targetEngine() {
+            const byTab = tabEngine(activeTab);
+            if (byTab !== 'shell') return byTab;
+            const sel = document.getElementById('model-select');
+            const opt = sel && sel.selectedOptions ? sel.selectedOptions[0] : null;
+            return (opt && opt.getAttribute('data-engine')) || 'qoder';
+        }
+
+        async function showAgContext() {
+            try {
+                await fetch('/api/cli/run', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target_cli: 'antigravity', prompt: '/context' })
+                });
+                flagProfileSaved('✓ /context sent to Antigravity — close panel with Esc', false);
+                setTimeout(fetchStats, 2500);
+            } catch (e) { flagProfileSaved('✗ failed to send /context', true); }
+        }
+
+        async function applyProfileNow() {
+            const engine = targetEngine();
+            const tab = engine === 'agy' ? 'antigravity' : (engine === 'qoder' ? 'qoder' : activeTab);
+            const sel = document.getElementById('model-select');
+            const model = sel ? sel.value : '';
+            if (!model) { flagProfileSaved('✗ no model selected', true); return; }
+            const peringatan = tab === 'qoder'
+                ? 'Respawn Qoder CLI in this tab?\n\nActive session will stop and reconnect (--continue) with the new model. History is preserved in tmux, disk, and PostgreSQL.'
+                : 'Respawn Antigravity CLI in this tab?\n\nActive session will stop and reconnect (--continue) with the new model.';
+            if (!confirm(peringatan)) return;
+            const effort = engine === 'agy' ? '' : (document.getElementById('effort-select')?.value || '');
+            const context = engine === 'agy' ? '' : (document.getElementById('context-select')?.value || '');
+            try {
+                const res = await fetch('/api/cli/config', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tab, model, effort, context_window: context, restart: true })
+                });
+                const d = await res.json();
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                flagProfileSaved(d.restarted ? `✓ ${tab} respawned with ${model}`
+                                             : `✓ profile ${tab} = ${model} — tab not running, will apply on start`, false);
+            } catch (e) {
+                flagProfileSaved('✗ failed to apply ' + model, true);
+            }
+        }
+
+
+        async function sendPromptToCLI(opts = {}) {
+            const inp = document.getElementById('prompt-input');
+            const prompt = inp.value.trim();
+            if (!prompt) return;
+
+            const engine = targetEngine();
+            if (engine === 'agy') {
+                if (activeTab !== 'antigravity') switchTab('antigravity');
+            } else if (engine === 'qoder') {
+                if (activeTab !== 'qoder') switchTab('qoder');
+            }
+
+            // REPL Qoder/Antigravity menganggap baris baru sebagai "kirim", jadi rata
+            // lebih dulu, kecuali pengguna meminta multi-baris atau tab-nya shell.
+            const verbatim = opts.verbatim === true || activeTab === 'shell';
+            const payload = verbatim ? prompt : prompt.replace(/\s*\n\s*/g, ' ');
+            inp.value = '';
+            autoGrowPrompt(inp);
+
+            const model = document.getElementById('model-select').value;
+            const effort = document.getElementById('effort-select').value;
+            const context_size = document.getElementById('context-select').value;
+
+            try {
+                await fetch('/api/cli/run', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        prompt: payload,
+                        model: model,
+                        effort: effort,
+                        context_size: context_size,
+                        auto_approve: isAutoApprove,
+                        target_cli: activeTab
+                    })
+                });
+                if (terms[activeTab]) terms[activeTab].focus();
+            } catch(e) {
+                if (terms[activeTab]) terms[activeTab].write('\r\n\x1b[1;31m[Error Dispatching Command]\x1b[0m\r\n');
+            }
+        }
+
+        function clearActiveTerm() {
+            if (terms[activeTab]) terms[activeTab].clear();
+        }
+
+        async function interruptActiveSession() {
+            if (!confirm(`Send interrupt (Ctrl+C) to ${activeTab.toUpperCase()}?`)) return;
+            await fetch('/api/term/reset', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tab: activeTab})
+            });
+        }
+
+        async function newActiveSession() {
+            const t = activeTab.toUpperCase();
+            if (!confirm(`Start a NEW ${t} session?\n\nThe CLI in this tab is terminated and the pane is cleared. The conversation itself is not lost — it stays in the database and ai-station recovery.`)) return;
+            try {
+                const res = await fetch('/api/cli/restart', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({tab: activeTab, fresh: true})
+                });
+                const d = await res.json();
+                if (!res.ok || (d.status && d.status !== 'ok')) {
+                    flagProfileSaved(`✗ new session: ${(d && d.reason) || 'endpoint failed'}`, true);
+                    return;
+                }
+                if (terms[activeTab]) terms[activeTab].clear();
+                flagProfileSaved(`✓ ${t}: ${d.detail || (d.killed ? 'restarting' : 'nothing to restart')}`, false);
+            } catch (e) {
+                flagProfileSaved(`✗ new session: ${e}`, true);
+            }
+        }
+
+        async function fetchStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const d = await res.json();
+
+                if (typeof d.ui_reload_tick === 'number') {
+                    if (window.__uiTick === undefined) {
+                        window.__uiTick = d.ui_reload_tick;
+                    } else if (d.ui_reload_tick !== window.__uiTick) {
+                        window.location.reload();
+                    }
+                }
+                if (d.gpu) document.getElementById('gpu-info').innerText = `${d.gpu.used_mb}/${d.gpu.total_mb} MB (${d.gpu.load}%)`;
+                if (d.ram) document.getElementById('ram-info').innerText = `${d.ram.used_gb}/${d.ram.total_gb} GB`;
+                
+                if (d.antigravity_cli) {
+                    const el = document.getElementById('agy-cli-badge');
+                    if (el) {
+                        el.innerText = d.antigravity_cli.connected ? `v${d.antigravity_cli.version}` : 'OFFLINE';
+                        el.style.color = d.antigravity_cli.connected ? 'var(--accent-cyan)' : 'var(--accent-rose)';
+                    }
+                }
+                if (d.qoder_cli) {
+                    const el = document.getElementById('qoder-cli-badge');
+                    if (el) {
+                        el.innerText = d.qoder_cli.connected ? `v${d.qoder_cli.version}` : 'OFFLINE';
+                        el.style.color = d.qoder_cli.connected ? 'var(--accent-amber)' : 'var(--accent-rose)';
+                    }
+                }
+
+                document.getElementById('skills-count').innerText = d.skills_count;
+                if (document.getElementById('quests-count')) document.getElementById('quests-count').innerText = d.total_quests || 0;
+
+                if (d.db_engine) {
+                    const hPill = document.getElementById('header-db-pill');
+                    const dbBadge = document.getElementById('db-engine-badge');
+                    const dbPath = document.getElementById('db-path-badge');
+                    if (d.db_engine === 'POSTGRESQL') {
+                        if (hPill) { hPill.innerText = '🐘 PostgreSQL'; hPill.style.color = 'var(--accent-emerald)'; }
+                        if (dbBadge) { dbBadge.innerText = '🐘 POSTGRESQL Active'; dbBadge.style.color = 'var(--accent-emerald)'; }
+                        if (dbPath) dbPath.innerText = 'postgresql://irsofka@localhost:5432/irsofka_ai_workstation';
+                    } else {
+                        if (hPill) { hPill.innerText = '⚡ SQLite'; hPill.style.color = 'var(--accent-amber)'; }
+                        if (dbBadge) { dbBadge.innerText = '⚡ SQLITE Fallback'; dbBadge.style.color = 'var(--accent-amber)'; }
+                        if (dbPath) dbPath.innerText = '~/.ai-station/brain/workstation.db';
+                    }
+                }
+            } catch(e) {}
+        }
+
+        function esc(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
+        function flagProfileSaved(text, isError) {
+            const st = document.getElementById('composer-state');
+            if (!st) return;
+            st.innerText = text;
+            st.style.color = isError ? 'var(--accent-rose)' : 'var(--accent-emerald)';
+            setTimeout(updateComposerState, 4000);
+        }
+
+        const TAB_LABELS = { qoder: '🌟 Qoder', antigravity: '⚡ Antigravity', shell: '🐧 Shell' };
+
+        async function refreshWorkspace() {
+            const box = document.getElementById('workspace-rows');
+            if (!box) return;
+            try {
+                const res = await fetch('/api/workspace');
+                const d = await res.json();
+                const tabs = d.tabs || {};
+                let html = '';
+                for (const key of ['qoder', 'antigravity', 'shell']) {
+                    const t = tabs[key] || {};
+                    const dot = t.alive
+                        ? '<span style="color: var(--accent-emerald);">●</span>'
+                        : '<span style="color: var(--accent-rose);">○ stopped</span>';
+                    const sess = t.session || {};
+                    const sid = (sess.session_id || '').slice(0, 8);
+                    const transcript = (sess.transcript || '').split('/').pop() || '';
+                    const upd = sess.last_updated
+                        ? new Date(Number(sess.last_updated) * 1000).toLocaleTimeString('en-US') : '';
+                    TABLIVE[key] = {
+                        model: t.model_in_command || t.profile_model || '',
+                        effort: t.effort_in_command || t.profile_effort || '',
+                        context: t.context_in_command || t.profile_context || '',
+                    };
+                    html += `<div style="border: 1px solid var(--border-subtle); border-radius: 6px; padding: 7px 8px; background: #0c0e15;">
+                        <div style="display:flex; justify-content:space-between; font-size:0.68rem; color:var(--text-muted);">
+                            <b>${TAB_LABELS[key]}</b> <span>${dot} pid ${esc(t.pid || 0)}</span>
+                        </div>
+                        <div style="font-family:monospace; font-size:0.68rem; color:var(--accent-cyan); word-break:break-all; margin-top:3px;">
+                            ${esc(t.live_cwd || '—')}
+                        </div>
+                        ${t.diverged ? `<div style="font-size:0.64rem; color:var(--accent-amber); margin-top:2px;">⚠ profile states: <code>${esc(t.declared_workspace)}</code></div>` : ''}
+                        <div style="font-size:0.63rem; color:var(--text-dim); margin-top:3px; word-break:break-all;">
+                            running: ${esc(t.model_in_command || t.profile_model || '—')}${t.effort_in_command || t.profile_effort ? ' · effort ' + esc(t.effort_in_command || t.profile_effort) : ''}${t.context_in_command ? ' · ctx ' + esc(t.context_in_command) : ''}
+                        </div>
+                        ${sid ? `<div style="font-size:0.63rem; color:var(--text-dim); margin-top:2px; word-break:break-all;">
+                            session ${esc(sid)} · ${esc(transcript)}${upd ? ' · ' + esc(upd) : ''}</div>` : ''}
+                    </div>`;
+                }
+                html += `<div style="font-size:0.62rem; color:var(--text-dim); word-break:break-all;">
+                    daemon pid ${esc((d.daemon || {}).pid)} · port ${esc((d.daemon || {}).port)} ·
+                    spool ${esc((d.spool || {}).bytes)} B → ${esc((d.spool || {}).path)}</div>`;
+                box.innerHTML = html;
+            } catch (e) {
+                box.innerHTML = '<div style="font-size:0.68rem; color:var(--accent-rose);">/api/workspace not responding</div>';
+            }
+        }
+
+        async function refreshRecovery() {
+            const box = document.getElementById('recovery-box');
+            if (!box) return;
+            try {
+                const res = await fetch('/api/recovery?limit=6');
+                const d = await res.json();
+                const quest = (d.active_quests || [])[0];
+                const mem = (d.handoff_memory || [])[0];
+                const events = (d.events || []).slice(0, 6);
+                let html = `<div>💾 DB: <b style="color:var(--accent-emerald)">${esc(d.db_engine)}</b> · ${esc(d.error || '')}</div>`;
+                html += quest
+                    ? `<div style="margin-top:4px; color:var(--accent-amber);">▶ Quest: ${esc(quest.title)}</div>`
+                    : '<div style="margin-top:4px; color:var(--text-dim);">▶ no active quests</div>';
+                html += mem
+                    ? `<div style="font-size:0.64rem; color:var(--text-dim); margin-top:2px;">handoff: ${esc(mem.key)}</div>`
+                    : '';
+                html += '<div style="margin-top:6px; border-top:1px solid var(--border-subtle); padding-top:5px;">';
+                for (const ev of events) {
+                    html += `<div style="font-size:0.63rem; color:var(--text-muted); word-break:break-all; margin-bottom:2px;">
+                        <span style="color:var(--accent-violet)">${esc(ev.kind)}</span> ${esc((ev.summary || '').slice(0, 90))}</div>`;
+                }
+                html += '</div>';
+                box.innerHTML = html;
+            } catch (e) {
+                box.innerHTML = '<div style="color:var(--accent-rose); font-size:0.68rem;">action history unavailable</div>';
+            }
+        }
+
+        let MODELS = null;
+        let USAGE = {};
+        let TABLIVE = {};
+
+        async function refreshModels() {
+            try {
+                const res = await fetch('/api/models');
+                MODELS = await res.json();
+                try { USAGE = await (await fetch('/api/usage')).json(); } catch (_) { USAGE = {}; }
+                renderEngineBar();
+            } catch (e) { }
+        }
+
+        function tabEngine(tab) {
+            if (tab === 'antigravity') return 'agy';
+            if (tab === 'qoder') return 'qoder';
+            return 'shell';
+        }
+
+        function fillSelect(el, values, keep, fmt) {
+            if (!el) return;
+            el.innerHTML = values.length
+                ? values.map(v => `<option value="${esc(typeof v === 'string' ? v : v[0])}">${esc(fmt ? fmt(v) : (typeof v === 'string' ? v : v[1]))}</option>`).join('')
+                : '<option value="">(no options)</option>';
+            if (values.length && values.some(v => (typeof v === 'string' ? v : v[0]) === keep)) el.value = keep;
+        }
+
+        function renderEngineBar() {
+            const bar = document.getElementById('engine-bar');
+            if (!bar || !MODELS) return;
+            const engine = tabEngine(activeTab);
+            bar.classList.toggle('hidden', engine === 'shell');
+            const name = document.getElementById('eb-engine');
+            if (name) name.textContent = engine === 'agy' ? 'Antigravity CLI' : 'Qoder CLI';
+
+            const usage = document.getElementById('eb-usage');
+            if (usage) {
+                if (engine === 'agy') {
+                    const c = (USAGE.antigravity || {}).conversation || {};
+                    const rawModel = (USAGE.antigravity || {}).last_model || '';
+                    const m = /^MODEL_PLACEHOLDER/i.test(rawModel) ? '' : rawModel;
+                    usage.innerHTML = contextBar(USAGE.antigravity && USAGE.antigravity.context_pct);
+                } else {
+                    usage.innerHTML = contextBar(USAGE.qoder && USAGE.qoder.context_pct);
+                }
+            }
+
+            const live = TABLIVE[activeTab] || {};
+            const list = (MODELS[engine] || []).map(m => [m.id, m.label || m.id]);
+            fillSelect(document.getElementById('model-select'), list,
+                       document.getElementById('model-select')?.value);
+
+            const efforts = (engine === 'agy' ? MODELS.agy_efforts : MODELS.qoder_efforts) || [];
+            fillSelect(document.getElementById('effort-select'), efforts,
+                       document.getElementById('effort-select')?.value);
+
+            const ctxWrap = document.getElementById('eb-context-wrap');
+            if (ctxWrap) ctxWrap.style.display = engine === 'qoder' ? '' : 'none';
+            const ctxBtn = document.getElementById('eb-ctx');
+            if (ctxBtn) ctxBtn.style.display = engine === 'agy' ? '' : 'none';
+            const effWrap = document.getElementById('eb-effort-wrap');
+            if (effWrap) effWrap.style.display = engine === 'qoder' ? '' : 'none';
+            if (engine === 'qoder') {
+                fillSelect(document.getElementById('context-select'),
+                            [['1048576', '1,048,576 (1M)'], ['200000', '200,000'], ['128000', '128,000']],
+                            live.context || document.getElementById('context-select')?.value);
+            }
+
+            const ms = document.getElementById('model-select'), es = document.getElementById('effort-select');
+            if (live.model && ms && [...ms.options].some(o => o.value === live.model)) ms.value = live.model;
+            if (live.effort && es && [...es.options].some(o => o.value === live.effort)) es.value = live.effort;
+        }
+
+        function refreshUI() {
+            window.location.reload();
+        }
+
+        async function openStation() {
+            // Lewat daemon, bukan window.open: di jendela wry tidak ada tab untuk dibuka,
+            // dan daftar aksinya tertutup — halaman ini tidak bisa menyuruh menjalankan apa pun.
+            try { await fetch('/api/action', {method:'POST', headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({action:'open_station'})}); }
+            catch(e) { window.open('/station', '_blank'); }
+        }
+
+        async function restartServerDaemon() {
+            if (!confirm('Are you sure you want to restart the server daemon?')) return;
+            try {
+                await fetch('/api/restart-server', {method: 'POST'});
+                alert('Server daemon is restarting. The page will reload...');
+                setTimeout(() => window.location.reload(), 2000);
+            } catch(e) {
+                window.location.reload();
+            }
+        }
+
+        async function captureScreen() {
+            const box = document.getElementById('screen-box');
+            box.innerHTML = '<span style="font-size:0.72rem; color:var(--accent-cyan);">Capturing...</span>';
+            const res = await fetch('/api/see', {method: 'POST'});
+            const data = await res.json();
+            if (data.status === 'ok') {
+                box.innerHTML = `<img src="/api/screenshot/latest?t=${Date.now()}" alt="Screen" />`;
+            }
+        }
+
+        window.onload = () => {
+            initTerminal();
+            fetchStats();
+            refreshWorkspace();
+            refreshRecovery();
+            refreshModels();
+            refreshAutopilot();
+            // ?tab=antigravity membuka tab itu sejak awal: berguna sebagai deep link,
+            // dan membuat tampilan tiap engine bisa diperiksa tanpa klik.
+            const wantTab = new URLSearchParams(location.search).get('tab');
+            if (wantTab && typeof TABS !== 'undefined' && TABS.includes(wantTab)) {
+                setTimeout(() => switchTab(wantTab), 120);
+            }
+            setInterval(fetchStats, 3000);
+            setInterval(refreshWorkspace, 6000);
+            setInterval(refreshRecovery, 20000);
+            /* Satu-satunya alasan interval ini ada: sakelar harus menunjukkan keadaan yang
+               sebenarnya, termasuk saat AI lain yang membaliknya. */
+            setInterval(refreshAutopilot, 20000);
+            const inp = document.getElementById('prompt-input');
+            if (inp) autoGrowPrompt(inp);
+        };
+    </script>
+</body>
+</html>

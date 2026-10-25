@@ -1,0 +1,24 @@
+[Unit]
+# F10.5 dream phase: konsolidasi memori tanpa LLM dan tanpa terminal.
+# Bekerja sendirian atas tabel yang sama dipakai semua engine, jadi ia TIDAK memanggil model apa pun
+# dan tidak menghabiskan kuota siapa pun — lihat tools/dream_phase.py.
+Description=Irsofka AI Workstation - Dream phase (memory consolidation)
+Documentation=https://github.com/irsjofka-alt/irsofka-ai-workstation
+After=network-online.target irsofka-ai-workstation.service
+
+[Service]
+Type=oneshot
+# 3 = "gerbang menolak", yaitu keputusan yang benar (mode OFF, atau mesin belum menganggur 30 menit).
+# Tanpa baris ini, setiap penolakan yang sah akan menandai unit failed dan systemd berhenti
+# membangunkan mimpi pada boot berikutnya — rem yang menghukum mesin karena ia memakai remnya.
+SuccessExitStatus=0 3
+# dream memanggil `bash bin/arch_map.sh --check` (sampai 40s) dan `git status` (sampai 12s),
+# keduanya lewat tools/call_workers.py::run_grouped. Timeout di bawah jumlah itu membunuh
+# pengukuran di tengah jalan lalu melaporkan UNKNOWN sebagai kalau-kalau keadaan bersih.
+TimeoutStartSec=180
+ExecStart=%h/.ai-station/bin/dream_tick.sh
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
