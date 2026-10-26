@@ -641,17 +641,32 @@ function contextSnapshotText(snapshot, waiting, provider) {
       : value >= 1_000
         ? `${(value / 1_000).toFixed(1)}k`
         : `${value}`;
-  const manual = provider === "antigravity" ? " · manual" : "";
   const suffix = waiting ? " · standby" : "";
   const window = snapshot.window || 0;
-  if (snapshot.ratio != null && window) {
-    return `Context ${fmt(snapshot.tokens)} / ${fmt(window)} · ${(snapshot.ratio * 100).toFixed(1)}%${manual}${suffix}`;
+  const ratio =
+    snapshot.ratio != null
+      ? snapshot.ratio
+      : snapshot.tokens != null && window > 0
+        ? snapshot.tokens / window
+        : null;
+  const tokens =
+    snapshot.tokens != null
+      ? snapshot.tokens
+      : ratio != null && window > 0
+        ? Math.round(ratio * window)
+        : null;
+  const manual =
+    provider === "antigravity" && snapshot.ratio == null && snapshot.source !== "engine"
+      ? " · manual"
+      : "";
+  if (ratio != null && window > 0) {
+    return `Context ${fmt(tokens)} / ${fmt(window)} · ${(ratio * 100).toFixed(1)}%${manual}${suffix}`;
   }
-  if (snapshot.tokens != null && window) {
-    return `Context ${fmt(snapshot.tokens)} / ${fmt(window)}${manual}${suffix}`;
+  if (tokens != null && window > 0) {
+    return `Context ${fmt(tokens)} / ${fmt(window)}${manual}${suffix}`;
   }
-  if (snapshot.ratio != null) {
-    return `Context ${(snapshot.ratio * 100).toFixed(1)}%${manual}${suffix}`;
+  if (ratio != null) {
+    return `Context ${(ratio * 100).toFixed(1)}%${manual}${suffix}`;
   }
   return "Context —";
 }
@@ -685,23 +700,18 @@ function contextBadgeState(waker) {
       className: "badge draft",
       title:
         provider === "antigravity"
-          ? "Antigravity tidak melaporkan context otomatis; cek manual"
+          ? "Menunggu laporan context Antigravity"
           : "Belum ada context yang dilaporkan engine",
-      text:
-        provider === "antigravity"
-          ? window
-            ? `Context — / ${fmt(window)} · manual`
-            : "Context — · manual"
-          : window
-            ? `Context — / ${fmt(window)}`
-            : "Context —",
+      text: window ? `Context — / ${fmt(window)}` : "Context —",
     };
   }
 
   const currentRatio =
     run && typeof run.context_ratio === "number" ? run.context_ratio : null;
   const currentTokens =
-    run && run.input_tokens != null && run.input_tokens > 0 ? run.input_tokens : null;
+    run && run.input_tokens != null && run.input_tokens > 0
+      ? run.input_tokens + (run.cache_read_tokens || 0)
+      : null;
 
   if (currentRatio != null || currentTokens != null) {
     const previous = state.contextSnapshot[waker.id];
@@ -728,14 +738,19 @@ function contextBadgeState(waker) {
       currentRatio != null && window
         ? Math.round(currentRatio * window)
         : currentTokens;
-    const manual = provider === "antigravity" ? " · manual" : "";
+    const manual =
+      provider === "antigravity" && currentRatio == null && run?.source !== "engine"
+        ? " · manual"
+        : "";
     const pct = ratio != null && window ? Math.min(100, ratio * 100) : null;
     const badge = pct != null && pct > 80 ? "bad" : pct != null && pct > 60 ? "paused" : "ok";
     const title =
       provider === "qoder"
         ? "Rasio context dari Qoder stream-json (otomatis)"
         : provider === "antigravity"
-          ? "Token dari usage Antigravity; rasio context manual"
+          ? (currentRatio != null
+              ? "Rasio context dari Antigravity stream-json (otomatis)"
+              : "Token dari usage Antigravity")
           : provider === "nvidia"
             ? "Token dari usage NVIDIA"
             : "Context dari engine";
@@ -780,11 +795,11 @@ function contextBadgeState(waker) {
     };
   }
 
-  if (provider === "antigravity") {
+  if (activeRun || provider === "qoder" || provider === "antigravity") {
     return {
       className: "badge draft",
-      title: "Antigravity tidak melaporkan context otomatis; cek manual",
-      text: window ? `Context — / ${fmt(window)} · manual` : "Context — · manual",
+      title: "Menunggu laporan context dari engine",
+      text: window ? `Context — / ${fmt(window)} · menunggu` : "Context — · menunggu",
     };
   }
   if (provider === "ollama") {

@@ -35,6 +35,19 @@ fn model_contexts() -> serde_json::Map<String, Value> {
         .unwrap_or_default()
 }
 
+pub(crate) fn model_context_window(model: &str) -> Option<u64> {
+    model_contexts()
+        .get(model)
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            if model.contains("gemini") || model.contains("flash") || model.contains("argon") {
+                Some(1_000_000)
+            } else {
+                None
+            }
+        })
+}
+
 pub(crate) fn agy_models() -> Vec<Value> {
     let contexts = model_contexts();
     run_capture("agy", &["models"])

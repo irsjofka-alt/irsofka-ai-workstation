@@ -17,7 +17,7 @@ stays in the archive so a revert or audit never depends on memory.
 | Rust daemon + native window + tmux tabs | ✅ ready | `irsofka-station-core`, `/api/workspace` |
 | Web console `/` | ✅ ready | new console, Project/Auto Pilot/Human Decide/Waker Console |
 | Realtime run events | ✅ ready | `GET /api/stream` (SSE), `run_event` + `run_state` |
-| Context display | ✅ ready | Qoder `context_usage_ratio`; sticky last value; Antigravity manual |
+| Context display | ✅ ready | Qoder & Antigravity automatic ratio & sticky last value |
 | Human Decide + @Decider | ✅ ready | decision policy AUTO/SEMI/OFF, Decider Gemini Flash 3.8 High |
 | Auto Pilot Task | ✅ active | automation `kind=autopilot`, 1-minute cadence, Play/Pause/Stop |
 | Playground site | ✅ Phase 0–7 ready | `build.py --check` 16/16, 36 posts, 25 media; clone test passed |

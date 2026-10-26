@@ -240,7 +240,7 @@ Auto Pilot Task lives under **Ruang Kerja** and is an automation with
 | Worker | Context source | Display |
 |---|---|---|
 | Qoder | `context_usage_ratio` from stream-json | automatic, sticky last value |
-| Antigravity / Gemini | usage tokens if reported | token count, ratio marked **manual** |
+| Antigravity / Gemini | `input_tokens` from stream-json | automatic ratio & tokens, sticky last value |
 | NVIDIA | OpenAI `usage` prompt tokens | token count; no ratio unless reported |
 | Ollama / Local | none | `Context —` |
 

@@ -446,13 +446,18 @@ impl RunManager {
 
         let id = new_run_id();
         let started = Utc::now().to_rfc3339();
+        let model = params.model.clone().or_else(|| spec.model.clone());
+        let context_window = params.context_window.or_else(|| {
+            let m = model.as_deref()?;
+            crate::engineinfo::model_context_window(m)
+        });
         let record = RunRecord {
             id: id.clone(),
             waker_id: params.waker_id.clone(),
             engine_key: params.engine_key.clone(),
-            model: params.model.clone().or_else(|| spec.model.clone()),
+            model: model.clone(),
             reasoning_effort: params.reasoning_effort.clone(),
-            context_window: params.context_window,
+            context_window,
             content: params.prompt.clone(),
             prompt: prompt.clone(),
             workspace: workspace.clone(),
@@ -1045,7 +1050,7 @@ async fn run_attempt(
             while let Ok(Some(line)) = lines.next_line().await {
                 if stream_json {
                     let error = if is_agy || line.trim().starts_with("{\"event\":") {
-                        stream_agy_line(&store, &handle, &line, &mut tool_names).await
+                        stream_agy_line(&store, &handle, &line, &mut tool_names, &mut last_context).await
                     } else {
                         stream_qoder_line(&store, &handle, &line, &mut tool_names, &mut last_context).await
                     };
@@ -1938,16 +1943,66 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
     short_text(&raw, 150)
 }
 
+async fn record_agy_usage(
+    store: &Store,
+    handle: &Arc<Mutex<RunRecord>>,
+    usage: &serde_json::Value,
+    last_context: &mut Option<f64>,
+) {
+    let (inp_opt, window_opt) = {
+        let mut record = handle.lock().await;
+        if let Some(inp) = usage.get("input_tokens").and_then(|v| v.as_i64()) {
+            record.input_tokens = Some(inp);
+        }
+        if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_i64()) {
+            record.output_tokens = Some(out);
+        }
+        if let Some(cache) = usage.get("cache_read_tokens").and_then(|v| v.as_i64()) {
+            record.cache_read_tokens = Some(cache);
+        }
+        let window = record.context_window.or_else(|| {
+            let m = record.model.as_deref()?;
+            crate::engineinfo::model_context_window(m)
+        });
+        if record.context_window.is_none() && window.is_some() {
+            record.context_window = window;
+        }
+        let total_prompt = record.input_tokens.map(|inp| {
+            inp + record.cache_read_tokens.unwrap_or(0)
+        });
+        (total_prompt, record.context_window)
+    };
+    if let (Some(prompt_tokens), Some(window)) = (inp_opt, window_opt) {
+        if window > 0 && prompt_tokens > 0 {
+            let ratio = prompt_tokens as f64 / window as f64;
+            let changed = last_context
+                .map(|previous| (previous - ratio).abs() >= 0.0005)
+                .unwrap_or(true);
+            if changed {
+                *last_context = Some(ratio);
+                push_event(
+                    store,
+                    handle,
+                    "context",
+                    format!("context {:.1}%", ratio * 100.0),
+                )
+                .await;
+            }
+        }
+    }
+}
+
 /// Antigravity CLI (agy) `--output-format stream-json` → event yang bisa ditampilkan sebagai
 /// Deep Thinking, View Steps, dan status tool secara live. Satu baris = satu objek JSON (NDJSON).
 ///
 /// Event kinds yang dihasilkan: `status`, `thinking`, `delta`, `tool_started`,
-/// `tool_finished`, `result`, `stderr`. `delta` tetap menjadi isi jawaban.
+/// `tool_finished`, `context`, `result`, `stderr`. `delta` tetap menjadi isi jawaban.
 async fn stream_agy_line(
     store: &Store,
     handle: &Arc<Mutex<RunRecord>>,
     line: &str,
     tool_names: &mut HashMap<String, String>,
+    last_context: &mut Option<f64>,
 ) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -2008,16 +2063,7 @@ async fn stream_agy_line(
                     }
                     if state == "DONE" {
                         if let Some(usage) = step.get("usage") {
-                            let mut record = handle.lock().await;
-                            if let Some(inp) = usage.get("input_tokens").and_then(|v| v.as_i64()) {
-                                record.input_tokens = Some(inp);
-                            }
-                            if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_i64()) {
-                                record.output_tokens = Some(out);
-                            }
-                            if let Some(cache) = usage.get("cache_read_tokens").and_then(|v| v.as_i64()) {
-                                record.cache_read_tokens = Some(cache);
-                            }
+                            record_agy_usage(store, handle, usage, last_context).await;
                         }
                     }
                 }
@@ -2085,16 +2131,7 @@ async fn stream_agy_line(
             let turns = res.get("num_turns").and_then(serde_json::Value::as_u64).unwrap_or(1);
 
             if let Some(usage) = res.get("usage") {
-                let mut record = handle.lock().await;
-                if let Some(inp) = usage.get("input_tokens").and_then(|v| v.as_i64()) {
-                    record.input_tokens = Some(inp);
-                }
-                if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_i64()) {
-                    record.output_tokens = Some(out);
-                }
-                if let Some(cache) = usage.get("cache_read_tokens").and_then(|v| v.as_i64()) {
-                    record.cache_read_tokens = Some(cache);
-                }
+                record_agy_usage(store, handle, usage, last_context).await;
             }
 
             if is_error {
@@ -2807,31 +2844,32 @@ mod tests {
             last_activity: Instant::now(),
         }));
         let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut last_context: Option<f64> = None;
 
         // 1. Init
         let init_line = r#"{"event":"init","conversation_id":"abc","init":{"model":"gemini-3.8-flash-high","cwd":"/home/irsofka","tools":["run_command","read_file"],"permission_mode":"always-proceed"}}"#;
-        let err = stream_agy_line(&store, &record, init_line, &mut tool_names).await;
+        let err = stream_agy_line(&store, &record, init_line, &mut tool_names, &mut last_context).await;
         assert!(err.is_none());
 
         // 2. Thinking
         let think_line = r#"{"event":"step_update","step_update":{"conversation_id":"abc","step_index":1,"state":"ACTIVE","step_type":"agent_response","thinking_delta":"sedang menganalisis"}}"#;
-        stream_agy_line(&store, &record, think_line, &mut tool_names).await;
+        stream_agy_line(&store, &record, think_line, &mut tool_names, &mut last_context).await;
 
         // 3. Tool started
         let tool_start = r#"{"event":"step_update","step_update":{"conversation_id":"abc","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"date"}}}}"#;
-        stream_agy_line(&store, &record, tool_start, &mut tool_names).await;
+        stream_agy_line(&store, &record, tool_start, &mut tool_names, &mut last_context).await;
 
         // 4. Tool finished
         let tool_done = r#"{"event":"step_update","step_update":{"conversation_id":"abc","step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","duration_seconds":0.05,"tool_info":{"name":"run_command","parameters":{"CommandLine":"date"},"output":"Sun Oct 25 2026"}}}"#;
-        stream_agy_line(&store, &record, tool_done, &mut tool_names).await;
+        stream_agy_line(&store, &record, tool_done, &mut tool_names, &mut last_context).await;
 
         // 5. Agent response delta
         let delta_line = r#"{"event":"step_update","step_update":{"conversation_id":"abc","step_index":3,"state":"ACTIVE","step_type":"agent_response","text_delta":"Hasilnya adalah "}}"#;
-        stream_agy_line(&store, &record, delta_line, &mut tool_names).await;
+        stream_agy_line(&store, &record, delta_line, &mut tool_names, &mut last_context).await;
 
         // 6. Result
         let res_line = r#"{"event":"result","result":{"conversation_id":"abc","status":"SUCCESS","response":"Hasilnya adalah OK","duration_seconds":1.2,"num_turns":1,"usage":{"input_tokens":100,"output_tokens":20,"thinking_tokens":10,"cache_read_tokens":5,"total_tokens":125}}}"#;
-        let res_err = stream_agy_line(&store, &record, res_line, &mut tool_names).await;
+        let res_err = stream_agy_line(&store, &record, res_line, &mut tool_names, &mut last_context).await;
         assert!(res_err.is_none());
 
         let rec = record.lock().await;
@@ -2843,7 +2881,7 @@ mod tests {
         let kinds: Vec<&str> = rec.events.iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(
             kinds,
-            vec!["status", "thinking", "tool_started", "tool_finished", "delta", "result"]
+            vec!["status", "thinking", "tool_started", "tool_finished", "delta", "context", "result"]
         );
     }
 }
