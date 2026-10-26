@@ -20,6 +20,7 @@ const VIEWS = [
   "channels",
   "engines",
   "models",
+  "usage",
   "capabilities",
   "knowledge",
   "memory",

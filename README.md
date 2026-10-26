@@ -23,6 +23,18 @@ audit trail that can be recovered at any time.
 The active plan is [`ROADMAP.md`](ROADMAP.md). Internal planning notes and historical
 evidence are kept outside the public repository.
 
+## Console Preview
+
+The web console provides a unified dark-mode command center for managing autonomous workers, multi-engine routing, execution runs, and human-in-the-loop decisions.
+
+| Dashboard Overview | Workers Management |
+| :---: | :---: |
+| ![Dashboard Overview](docs/screenshots/01-dashboard.png) | ![Workers Management](docs/screenshots/02-workers.png) |
+
+| Multi-Engine Registry | Execution Runs Trace |
+| :---: | :---: |
+| ![Multi-Engine Registry](docs/screenshots/03-engines.png) | ![Execution Runs Trace](docs/screenshots/04-runs.png) |
+
 ## Installation
 
 A complete, step-by-step setup guide is available in **[INSTALL.md](INSTALL.md)** — prerequisites,
